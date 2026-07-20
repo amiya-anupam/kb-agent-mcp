@@ -244,17 +244,52 @@ Rules:
     return {"description": folder_name, "keywords": [folder_name.lower()]}
 
 
-# ── README stub generator (for new folders with no README) ───────────────────
+# ── README finder (shared by stub generator and stale-check) ─────────────────
 
 def _find_readme(folder: pathlib.Path) -> pathlib.Path | None:
-    """Find any .md file whose name contains 'readme' (case-insensitive)."""
+    """
+    Locate the README for a knowledge folder using a priority cascade:
+      1. Any .md whose name contains 'readme' (case-insensitive)
+      2. <FolderName>.md  (standard name used by this generator)
+      3. Any .md file whose first 500 chars contain a Markdown heading (# …)
+      4. The first .md file found (last resort)
+
+    Fully dynamic — works for any user-chosen filename.
+    """
     try:
-        for f in folder.iterdir():
-            if f.is_file() and "readme" in f.name.lower() and f.suffix.lower() == ".md":
-                return f
+        md_files = [f for f in folder.iterdir()
+                    if f.is_file() and f.suffix.lower() == ".md"]
     except Exception:
-        pass
-    return None
+        return None
+
+    if not md_files:
+        return None
+
+    # Priority 1: name contains "readme"
+    for f in md_files:
+        if "readme" in f.name.lower():
+            return f
+
+    # Priority 2: matches the folder name exactly (e.g. "ACE Docs.md")
+    folder_name_md = folder.name + ".md"
+    for f in md_files:
+        if f.name == folder_name_md:
+            return f
+
+    # Priority 3: first .md whose content starts with a Markdown heading
+    for f in md_files:
+        try:
+            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
+            if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
+                return f
+        except Exception:
+            continue
+
+    # Priority 4: first .md file
+    return md_files[0]
+
+
+# ── README stub generator (for new folders with no README) ───────────────────
 
 
 def generate_readme_stub(folder_name: str, folder: pathlib.Path, description: str) -> pathlib.Path:
@@ -748,13 +783,19 @@ def main():
             idx_file.unlink()
             print(f"  🗑  Deleted orphaned index: {idx_file.name}")
 
-    # Clean stale entries from file_summaries.json cache
+    # Clean stale entries from file_summaries.json cache.
+    # Keys are stored as POSIX-style paths ("FolderName/file.ext") regardless
+    # of OS.  Split on the first "/" to extract the folder name, then check
+    # whether that folder is still in our discovered set.
     summaries_path = vector_store / "file_summaries.json"
     if summaries_path.exists():
         try:
             summaries = json.loads(summaries_path.read_text(encoding="utf-8"))
-            stale_keys = [k for k in summaries if not any(k.startswith(f + os.sep) or
-                          k.startswith(f + "/") for f in folders)]
+            folder_set = set(folders)
+            stale_keys = [
+                k for k in summaries
+                if k.replace("\\", "/").split("/")[0] not in folder_set
+            ]
             if stale_keys:
                 for k in stale_keys:
                     del summaries[k]
