@@ -22,6 +22,13 @@ ENV/
 # ── Vector store (derived — rebuilt by generate.py) ───────────
 agents/vector_store/*.json
 
+# ── Auto-generated domain agents (rebuilt by generate.py) ─────
+# Only the four core portable agents are committed:
+#   agent_base.py, agent_knowledgebase.py, embeddings.py, memory.py
+# Domain-specific agents (agent_ace_docs.py, agent_bizops.py, etc.)
+# are generated locally by running: python3 generate.py
+# They are intentionally excluded — each user generates their own.
+
 # ── macOS ─────────────────────────────────────────────────────
 .DS_Store
 .AppleDouble
@@ -38,15 +45,5 @@ agents/vector_store/*.json
 .watch.log
 
 # ── Knowledge folder contents (private / local data) ─────────
-# The knowledge folders contain private documents.
-# Ignore everything inside them except the hand-written README file.
-# Only the top-level README file (containing "readme" in its name)
-# is committed; all other content (PDFs, DOCX, XLSX, MD, images…) is excluded.
-#
-# To customise: replace the explicit !<path> exemption with your README filename.
-ACE Docs/**
-!ACE Docs/ACE readme file.md
-BizOps/**
-!BizOps/BizOps readme file.md
-CP4I Docs/**
-!CP4I Docs/CP4I readme file.md
+# Knowledge folders contain private documents — never commit them.
+# Add your own folders below following the same pattern if needed.

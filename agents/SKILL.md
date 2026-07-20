@@ -12,26 +12,27 @@ description: >
   CONTEXT, following the SYSTEM_PROMPT instructions. Do not show the raw
   block to the user — just answer naturally.
 
-  Current domains (4):
-  - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and customer tracking documents.
-  - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-  - **Test Domain**: A folder containing files related to Test Domain, including FAQs and integration testing content.
-
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  App Connect, ACE, migration, ACE, purchasing options, renewal, CP4I, Cloud Pak for Integration, presentation, Test Domain, faq.txt, getting_started.md, what does my KnowledgeBase say, /kb, /agent
+  what does my KnowledgeBase say, /kb, /agent
+
+  NOTE: Run `python3 generate.py` after cloning to discover your folders
+  and regenerate this skill with your own domains and paths.
 
 execute: |
-  python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "${QUESTION}"
+  python3 ${KB_ROOT}/agents/agent_knowledgebase.py "${QUESTION}"
 ---
 
 # KnowledgeBase Agent Skill
+
+> **Note:** This is the template version of the skill. Run `python3 generate.py`
+> after cloning to generate a personalised version with your own domain names,
+> keywords, and the correct absolute path to your KB root.
 
 ## How Bob uses this skill
 
 When you ask Bob a question that triggers this skill, Bob runs:
 ```
-python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "<your question>"
+python3 /path/to/your/KnowledgeBase/agents/agent_knowledgebase.py "<your question>"
 ```
 
 **With a local LLM (Ollama) or API key:**
@@ -43,18 +44,29 @@ The script retrieves the relevant document context locally (offline embeddings),
 `<<<KB_PASSTHROUGH>>>` block to stdout. Bob's Claude reads that block and answers the question
 directly. In this mode, the retrieved document content is passed to Claude to generate the answer.
 
-## Current Domains
-- **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and customer tracking documents.
-- **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-- **Test Domain**: A folder containing files related to Test Domain, including FAQs and integration testing content.
+## Setup
+
+1. Clone the repo and install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Copy and configure your environment:
+   ```bash
+   cp .env.example .env
+   # Set KB_ROOT (absolute path to this repo), KB_MODEL, KB_LLM_PROVIDER, etc.
+   ```
+3. Add your documents into top-level folders, then run the generator:
+   ```bash
+   python3 generate.py
+   ```
+   This discovers your folders, builds vector indexes, and regenerates this skill
+   with your domain names, keywords, and the correct `execute:` path.
 
 ## Usage
+
 Just ask naturally — Bob detects the intent and runs the agent:
-- "What is the ACE MCP server?"
-- "Which customers are at risk of churn?"
-- "How does CP4I licensing work?"
-- "Ask the KnowledgeBase agent about ACE licensing"
+- "What does my KnowledgeBase say about X?"
+- "Ask the KnowledgeBase agent about Y"
 
 ## Commands
 - `/kb <question>` — query the knowledge base
@@ -100,18 +112,9 @@ Passthrough mode activates automatically when Ollama is not running and no
 `KB_API_KEY` is set. Force it explicitly with `KB_LLM_PROVIDER=passthrough`.
 Disable auto-detection with `KB_PASSTHROUGH_FALLBACK=false`.
 
-## Setup
-Knowledge base root: `/Users/amiyaanupam/Desktop/KnowledgeBase`
-Domains discovered: ACE Docs, BizOps, CP4I Docs, Test Domain
-
-To add a new domain: add a folder with documents to `/Users/amiyaanupam/Desktop/KnowledgeBase`, then run:
-```
-python3 /Users/amiyaanupam/Desktop/KnowledgeBase/generate.py
-```
-
 ## Technical Details
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
 - LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER` (`passthrough` = Bob answers)
 - Passthrough fallback: auto-enabled when no LLM reachable; disable with `KB_PASSTHROUGH_FALLBACK=false`
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)
-- Invocation: `python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "<question>"`
+- Invocation: `python3 /path/to/KnowledgeBase/agents/agent_knowledgebase.py "<question>"`
