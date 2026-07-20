@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from memory import get_history, add_turn, clear, summary
-from agent_base import call_llm, _load_env
+from agent_base import call_llm, _load_env, _PASSTHROUGH
 
 _load_env()
 
@@ -99,6 +99,15 @@ def classify_intent(
     if conversation_history:
         messages.extend(conversation_history[-4:])
     messages.append({"role": "user", "content": question})
+
+    # In passthrough mode the LLM is unavailable — skip to keyword fallback
+    if _PASSTHROUGH:
+        kw = keyword_route(question, domains)
+        return {
+            "domains":                kw or ([fallback] if fallback else []),
+            "needs_clarification":    False,
+            "clarification_question": "",
+        }
 
     try:
         raw   = call_llm(messages, temperature=0.0)
@@ -196,6 +205,12 @@ def merge_answers(results: list[dict], domains: list[dict]) -> str:
             "Try rephrasing, or add more context. Available domains:\n"
             + domain_hints
         )
+
+    # Passthrough results: the <<<KB_PASSTHROUGH>>> blocks are already printed
+    # to stdout by each sub-agent. Just concatenate them — Bob's Claude will
+    # read the entire stdout and answer using all the context blocks.
+    if any(r.get("passthrough") for r in found):
+        return "".join(r["answer"] for r in found if r.get("passthrough"))
 
     if len(found) == 1:
         r = found[0]

@@ -17,10 +17,16 @@ README-first pipeline:
   4. Fallback              → raw-file RAG if README is absent or too thin
 
 LLM provider is driven entirely by env vars:
-  KB_LLM_PROVIDER  ollama | openai | anthropic | custom
+  KB_LLM_PROVIDER  ollama | openai | anthropic | custom | passthrough
   KB_LLM_BASE_URL  base endpoint
   KB_MODEL         model name
   KB_API_KEY       API key (openai / anthropic / custom)
+
+Passthrough mode (KB_LLM_PROVIDER=passthrough, or auto-detected when no
+LLM is reachable and KB_PASSTHROUGH_FALLBACK != "false"):
+  Instead of calling a local LLM, the agent emits a structured
+  <<<KB_PASSTHROUGH>>> block to stdout. Bob's Claude reads that block and
+  answers directly — no local LLM required.
 """
 
 import os
@@ -59,6 +65,83 @@ LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 MODEL        = os.environ.get("KB_MODEL", "qwen3:14b")
 API_KEY      = os.environ.get("KB_API_KEY", "")
+
+# ── Passthrough helpers ───────────────────────────────────────────────────────
+
+_PASSTHROUGH_MARKER = "<<<KB_PASSTHROUGH>>>"
+_PASSTHROUGH_END    = "<<<KB_PASSTHROUGH_END>>>"
+
+def _is_passthrough_mode() -> bool:
+    """
+    Return True when the agent should emit a passthrough block instead of
+    calling a local LLM.
+
+    Conditions (any of):
+      1. KB_LLM_PROVIDER is explicitly set to "passthrough"
+      2. KB_LLM_PROVIDER is "ollama" (default), no KB_API_KEY is set,
+         and the Ollama endpoint is not reachable
+         (auto-detection; can be disabled with KB_PASSTHROUGH_FALLBACK=false)
+    """
+    if LLM_PROVIDER == "passthrough":
+        return True
+
+    # Only auto-detect for the default Ollama provider when no API key is set
+    if LLM_PROVIDER not in ("ollama",) or API_KEY:
+        return False
+
+    if os.environ.get("KB_PASSTHROUGH_FALLBACK", "true").lower() == "false":
+        return False
+
+    try:
+        import httpx
+        r = httpx.get(f"{LLM_BASE_URL}/api/tags", timeout=3.0)
+        return r.status_code >= 400
+    except Exception:
+        return True  # unreachable → passthrough
+
+
+# Evaluated once at import so sub-agents share the same decision
+_PASSTHROUGH = _is_passthrough_mode()
+
+
+def emit_passthrough(question: str, context: str, system_prompt: str,
+                     agent_name: str, source_label: str) -> dict:
+    """
+    Print a structured passthrough block to stdout and return a sentinel dict.
+
+    Bob's skill handler reads everything the script prints.  The block is
+    human-readable so Bob's Claude can parse it without any special tooling:
+
+        <<<KB_PASSTHROUGH>>>
+        AGENT: <name>
+        QUESTION: <question>
+        SOURCE: <label>
+        SYSTEM_PROMPT:
+        <system prompt>
+        ---CONTEXT---
+        <retrieved context>
+        <<<KB_PASSTHROUGH_END>>>
+
+    Bob's Claude sees this output and answers the question using the context
+    provided, then returns the answer to the user.
+    """
+    block = (
+        f"\n{_PASSTHROUGH_MARKER}\n"
+        f"AGENT: {agent_name}\n"
+        f"QUESTION: {question}\n"
+        f"SOURCE: {source_label}\n"
+        f"SYSTEM_PROMPT:\n{system_prompt}\n"
+        f"---CONTEXT---\n{context}\n"
+        f"{_PASSTHROUGH_END}\n"
+    )
+    print(block, flush=True)
+    return {
+        "agent":   agent_name,
+        "answer":  block,   # orchestrator treats this as the answer text
+        "sources": [{"name": source_label, "path": source_label, "score": 1.0}],
+        "found":   True,
+        "passthrough": True,
+    }
 
 # README-first config
 MARKER_START     = "<!-- KB:AUTO-INDEX:START -->"
@@ -375,6 +458,17 @@ def ask(
             f"{len(readme_context):,} chars)"
         )
 
+        # ── Passthrough: emit context for Bob's Claude to answer ──────────────
+        if _PASSTHROUGH:
+            print(f"  [{agent_name}] Passthrough mode — emitting context for Bob")
+            return emit_passthrough(
+                question     = question,
+                context      = readme_context,
+                system_prompt= system_prompt,
+                agent_name   = agent_name,
+                source_label = source_label,
+            )
+
         messages = [{"role": "system", "content": system_prompt}]
 
         if conversation_history:
@@ -435,6 +529,17 @@ def ask(
         }
 
     context = "\n\n".join(context_blocks)
+
+    # ── Passthrough: emit context for Bob's Claude to answer ──────────────────
+    if _PASSTHROUGH:
+        print(f"  [{agent_name}] Passthrough mode — emitting context for Bob")
+        return emit_passthrough(
+            question      = question,
+            context       = context,
+            system_prompt = system_prompt,
+            agent_name    = agent_name,
+            source_label  = ", ".join(s["name"] for s in sources),
+        )
 
     messages = [{"role": "system", "content": system_prompt}]
 
