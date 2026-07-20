@@ -1,0 +1,877 @@
+#!/usr/bin/env python3
+"""
+watch_kb.py — KnowledgeBase Dynamic Watcher
+--------------------------------------------
+Watches KB_ROOT for filesystem events and keeps everything in sync:
+
+  FILE ADDED      → embed into vector index + update README AUTO-INDEX
+  FILE MODIFIED   → re-embed into vector index + update README AUTO-INDEX
+  FILE DELETED    → remove from vector index + summary cache + update README
+  FILE RENAMED    → remove old path from index/cache + embed new path + update README
+  FOLDER CREATED  → run generate.py (builds index, creates agent, updates meta)
+  FOLDER DELETED  → immediately delete agent .py + _index.json + meta entry
+                    + all summary cache entries for that folder
+  FOLDER RENAMED  → immediately rename agent .py + _index.json + meta entry
+                    + re-key summary cache entries; no full generate.py needed
+
+README AUTO-INDEX block (written into each folder's README):
+  <!-- KB:AUTO-INDEX:START -->
+  | file | type | size | modified | summary |
+  ...per-file rows, always current...
+  <!-- KB:AUTO-INDEX:END -->
+
+Agents read this block directly — no raw file scanning at query time.
+
+Configuration (env vars / .env):
+  KB_ROOT           Root directory to watch (defaults to script directory)
+  KB_MODEL          LLM model for generating file summaries
+  KB_LLM_PROVIDER   ollama | openai | anthropic | custom
+  KB_LLM_BASE_URL   LLM base URL
+  KB_API_KEY        API key (openai / anthropic / custom)
+  KB_IGNORE_FOLDERS Comma-separated extra folders to ignore
+
+Run:
+  python3 watch_kb.py
+"""
+
+import os
+import re
+import sys
+import json
+import time
+import shutil
+import subprocess
+import datetime
+import pathlib
+import hashlib
+
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+# ── Environment loader ────────────────────────────────────────────────────────
+
+def _load_env(root: pathlib.Path):
+    env_file = root / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+
+SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+_load_env(SCRIPT_DIR)
+
+# ── Config (from env) ─────────────────────────────────────────────────────────
+
+def _resolve_watch_root() -> pathlib.Path:
+    raw = os.environ.get("KB_ROOT", "")
+    return pathlib.Path(raw).resolve() if raw else SCRIPT_DIR
+
+WATCH_ROOT   = _resolve_watch_root()
+LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
+LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
+MODEL        = os.environ.get("KB_MODEL", "qwen3:14b")
+API_KEY      = os.environ.get("KB_API_KEY", "")
+
+_DEFAULT_BLOCKLIST = {
+    "agents", ".git", "__pycache__", ".ds_store", "node_modules",
+    ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
+}
+
+def _get_blocklist() -> set[str]:
+    extra = os.environ.get("KB_IGNORE_FOLDERS", "")
+    user  = {f.strip().lower() for f in extra.split(",") if f.strip()}
+    return _DEFAULT_BLOCKLIST | user
+
+BLOCKLIST = _get_blocklist()
+
+INCLUDE_EXTS  = {".pdf", ".docx", ".pptx", ".xlsx", ".ppt", ".doc",
+                 ".png", ".jpg", ".jpeg", ".boxnote", ".md", ".txt", ".csv"}
+# Files whose name contains any of these strings are never indexed or trigger README updates.
+# "readme" catches all README variants; the watcher itself writes READMEs so we must
+# ignore those writes to prevent an infinite update loop.
+SKIP_PATTERNS = {"readme", ".ds_store", ".watch.log", "thumbs.db"}
+DEBOUNCE_SECS = 5
+
+# README markers
+MARKER_START = "<!-- KB:AUTO-INDEX:START -->"
+MARKER_END   = "<!-- KB:AUTO-INDEX:END -->"
+
+# Summary cache path
+SUMMARY_CACHE_PATH = SCRIPT_DIR / "agents" / "vector_store" / "file_summaries.json"
+DOMAIN_META_PATH   = SCRIPT_DIR / "agents" / "vector_store" / "domain_meta.json"
+AGENTS_DIR         = SCRIPT_DIR / "agents"
+
+SUMMARY_EXTRACT_CHARS = 3000
+
+# ── Folder name helpers (all dynamic — never hardcoded) ───────────────────────
+
+def folder_to_safe_name(folder_name: str) -> str:
+    """Convert any folder name to a safe snake_case identifier."""
+    name = folder_name.lower()
+    name = re.sub(r"[^a-z0-9]+", "_", name)
+    return name.strip("_")
+
+
+def agent_filename(folder_name: str) -> str:
+    return f"agent_{folder_to_safe_name(folder_name)}.py"
+
+
+def index_filename(folder_name: str) -> str:
+    return f"{folder_to_safe_name(folder_name)}_index.json"
+
+
+# ── Summary cache ─────────────────────────────────────────────────────────────
+
+def _load_summary_cache() -> dict:
+    if SUMMARY_CACHE_PATH.exists():
+        try:
+            return json.loads(SUMMARY_CACHE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_summary_cache(cache: dict):
+    SUMMARY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SUMMARY_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+# ── Domain meta helpers ───────────────────────────────────────────────────────
+
+def _load_domain_meta() -> dict:
+    if DOMAIN_META_PATH.exists():
+        try:
+            return json.loads(DOMAIN_META_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+def _save_domain_meta(meta: dict):
+    DOMAIN_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DOMAIN_META_PATH.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+# ── Folder / file helpers ─────────────────────────────────────────────────────
+
+def is_knowledge_folder(path: pathlib.Path) -> bool:
+    return (
+        path.is_dir()
+        and path.parent == WATCH_ROOT
+        and path.name.lower() not in BLOCKLIST
+    )
+
+def discover_knowledge_folders() -> list[pathlib.Path]:
+    return [p for p in sorted(WATCH_ROOT.iterdir()) if is_knowledge_folder(p)]
+
+def find_readme(folder: pathlib.Path) -> pathlib.Path | None:
+    """Find any .md file whose name contains 'readme' (case-insensitive)."""
+    try:
+        for f in folder.iterdir():
+            if f.is_file() and "readme" in f.name.lower() and f.suffix.lower() == ".md":
+                return f
+    except Exception:
+        pass
+    return None
+
+def ensure_readme(folder: pathlib.Path) -> pathlib.Path:
+    """
+    Return the folder's README path, creating a minimal one if absent.
+    Name is always derived from the folder name — never hardcoded.
+    """
+    existing = find_readme(folder)
+    if existing:
+        return existing
+    readme = folder / f"{folder.name}.md"
+    readme.write_text(
+        f"# {folder.name}\n\n"
+        f"Knowledge domain: **{folder.name}**\n\n"
+        f"_Add your own notes about this domain here._\n\n",
+        encoding="utf-8",
+    )
+    print(f"[KB Watcher] Created README: {readme.name}", flush=True)
+    return readme
+
+def should_skip(path: pathlib.Path) -> bool:
+    return any(p in path.name.lower() for p in SKIP_PATTERNS)
+
+def human_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} KB"
+    return f"{size_bytes / 1024 ** 2:.1f} MB"
+
+def gather_files(folder: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(
+        f for f in folder.rglob("*")
+        if f.is_file()
+        and f.suffix.lower() in INCLUDE_EXTS
+        and not should_skip(f)
+    )
+
+def file_hash(path: pathlib.Path) -> str:
+    try:
+        return hashlib.md5(path.read_bytes()).hexdigest()
+    except Exception:
+        return ""
+
+def top_folder_name(event_path: str) -> str | None:
+    try:
+        rel = pathlib.Path(event_path).relative_to(WATCH_ROOT)
+        return rel.parts[0] if rel.parts else None
+    except ValueError:
+        return None
+
+# ── Text extraction ───────────────────────────────────────────────────────────
+
+def extract_snippet(file_path: pathlib.Path) -> str:
+    """Extract up to SUMMARY_EXTRACT_CHARS of text from a file."""
+    ext = file_path.suffix.lower()
+    try:
+        if ext in {".txt", ".md", ".csv"}:
+            return file_path.read_text(encoding="utf-8", errors="ignore")[:SUMMARY_EXTRACT_CHARS]
+
+        elif ext == ".docx":
+            import zipfile, re as _re
+            with zipfile.ZipFile(file_path) as z:
+                with z.open("word/document.xml") as f:
+                    xml = f.read().decode("utf-8", errors="ignore")
+            text = _re.sub(r"<[^>]+>", " ", xml)
+            return " ".join(text.split())[:SUMMARY_EXTRACT_CHARS]
+
+        elif ext == ".pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(str(file_path))
+            text = ""
+            for page in reader.pages[:4]:
+                text += (page.extract_text() or "") + "\n"
+                if len(text) >= SUMMARY_EXTRACT_CHARS:
+                    break
+            return text[:SUMMARY_EXTRACT_CHARS]
+
+        elif ext in {".pptx", ".ppt"}:
+            from pptx import Presentation
+            prs = Presentation(str(file_path))
+            text = ""
+            for slide in prs.slides[:6]:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text += shape.text.strip() + "\n"
+                if len(text) >= SUMMARY_EXTRACT_CHARS:
+                    break
+            return text[:SUMMARY_EXTRACT_CHARS]
+
+        elif ext in {".xlsx", ".xls"}:
+            import openpyxl
+            wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
+            text = ""
+            for sheet in wb.worksheets[:2]:
+                text += f"[Sheet: {sheet.title}] "
+                for row in sheet.iter_rows(max_row=30, values_only=True):
+                    row_text = " | ".join(str(c) for c in row if c is not None)
+                    if row_text.strip():
+                        text += row_text + " "
+                if len(text) >= SUMMARY_EXTRACT_CHARS:
+                    break
+            return text[:SUMMARY_EXTRACT_CHARS]
+
+        elif ext == ".boxnote":
+            data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
+            def walk(node):
+                if isinstance(node, dict):
+                    if node.get("type") == "text":
+                        yield node.get("text", "")
+                    for v in node.values():
+                        yield from walk(v)
+                elif isinstance(node, list):
+                    for item in node:
+                        yield from walk(item)
+            return " ".join(walk(data))[:SUMMARY_EXTRACT_CHARS]
+
+    except Exception as e:
+        return f"[extraction error: {e}]"
+
+    return f"[{file_path.suffix.upper().lstrip('.')} file]"
+
+# ── LLM helpers ───────────────────────────────────────────────────────────────
+
+def _llm_available() -> bool:
+    try:
+        import httpx
+        if LLM_PROVIDER == "ollama":
+            r = httpx.get(f"{LLM_BASE_URL}/api/tags", timeout=4.0)
+        else:
+            r = httpx.get(LLM_BASE_URL.rstrip("/"), timeout=4.0)
+        return r.status_code < 500
+    except Exception:
+        return False
+
+def _call_llm(prompt: str) -> str:
+    import httpx
+    messages = [{"role": "user", "content": prompt}]
+
+    if LLM_PROVIDER == "anthropic":
+        headers = {"x-api-key": API_KEY, "anthropic-version": "2023-06-01",
+                   "Content-Type": "application/json"}
+        r = httpx.post(f"{LLM_BASE_URL}/v1/messages", headers=headers,
+                       json={"model": MODEL, "max_tokens": 256,
+                             "temperature": 0.1, "messages": messages},
+                       timeout=30.0)
+        r.raise_for_status()
+        return r.json()["content"][0]["text"].strip()
+
+    if LLM_PROVIDER in ("openai", "custom"):
+        base = LLM_BASE_URL.rstrip("/")
+        if "11434" in base and not base.endswith("/v1"):
+            base += "/v1"
+        headers = {"Content-Type": "application/json"}
+        if API_KEY:
+            headers["Authorization"] = f"Bearer {API_KEY}"
+        r = httpx.post(f"{base}/chat/completions", headers=headers,
+                       json={"model": MODEL, "messages": messages, "temperature": 0.1},
+                       timeout=30.0)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+
+    # Ollama
+    r = httpx.post(f"{LLM_BASE_URL}/api/chat",
+                   json={"model": MODEL, "messages": messages, "stream": False,
+                         "options": {"temperature": 0.1, "num_ctx": 4096},
+                         "think": False},
+                   timeout=30.0)
+    r.raise_for_status()
+    return r.json()["message"]["content"].strip()
+
+# ── File summary (cached, LLM or fallback) ────────────────────────────────────
+
+def generate_file_summary(file_path: pathlib.Path) -> str:
+    snippet = extract_snippet(file_path)
+    if not snippet or snippet.startswith("["):
+        return f"{file_path.suffix.upper().lstrip('.')} file"
+    if not _llm_available():
+        return snippet.replace("\n", " ").strip()[:200] or file_path.name
+    prompt = (
+        f"Summarise the following document excerpt in exactly ONE concise sentence "
+        f"(max 20 words). Be specific about what the document covers.\n\n"
+        f"Filename: {file_path.name}\n\nContent:\n{snippet[:1500]}\n\nOne-sentence summary:"
+    )
+    try:
+        summary = _call_llm(prompt)
+        summary = re.sub(
+            r"^(summary|one.sentence summary|here is|this document)[:\s]+",
+            "", summary, flags=re.IGNORECASE
+        ).strip()
+        return summary[:147] + "..." if len(summary) > 150 else summary
+    except Exception as e:
+        print(f"[KB Watcher] ⚠ Summary LLM failed for {file_path.name}: {e}", flush=True)
+        return snippet[:120].replace("\n", " ").strip()
+
+
+def get_file_summary(file_path: pathlib.Path, cache: dict, rel_key: str) -> tuple[str, bool]:
+    """Return (summary, cache_updated). Reuses cached entry if hash unchanged."""
+    h      = file_hash(file_path)
+    cached = cache.get(rel_key, {})
+    if cached.get("hash") == h and cached.get("summary"):
+        return cached["summary"], False
+    summary = generate_file_summary(file_path)
+    cache[rel_key] = {"hash": h, "summary": summary}
+    return summary, True
+
+# ── AUTO-INDEX block builder ──────────────────────────────────────────────────
+
+def build_auto_index_block(folder: pathlib.Path, cache: dict) -> tuple[str, bool]:
+    files       = gather_files(folder)
+    now         = datetime.datetime.now().strftime("%d %b %Y %H:%M")
+    cache_dirty = False
+
+    lines = [
+        "## 📁 Folder Index",
+        "",
+        f"> **{len(files)} file{'s' if len(files) != 1 else ''}** &nbsp;|&nbsp; "
+        f"_Last indexed: {now}_",
+        "",
+        "| File | Type | Size | Last Modified | Summary |",
+        "|---|---|---|---|---|",
+    ]
+
+    current_subdir = None
+    for f in files:
+        rel     = f.relative_to(folder)
+        subdir  = str(rel.parent) if len(rel.parts) > 1 else ""
+        rel_key = str(f.relative_to(WATCH_ROOT))
+
+        if subdir != current_subdir:
+            current_subdir = subdir
+            if subdir:
+                lines.append(f"| **📁 {subdir}/** | | | | |")
+
+        ext      = f.suffix.upper().lstrip(".")
+        size     = human_size(f.stat().st_size)
+        modified = datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d")
+
+        summary, updated = get_file_summary(f, cache, rel_key)
+        if updated:
+            cache_dirty = True
+
+        lines.append(f"| `{f.name}` | {ext} | {size} | {modified} | {summary.replace('|', chr(92)+'|')} |")
+
+    lines.append("")
+    return "\n".join(lines), cache_dirty
+
+
+def update_readme(folder: pathlib.Path, cache: dict) -> bool:
+    """
+    Create or update the AUTO-INDEX block in the folder's README.
+    Returns True if the summary cache was updated.
+    """
+    readme                 = ensure_readme(folder)
+    content                = readme.read_text(encoding="utf-8")
+    new_block, cache_dirty = build_auto_index_block(folder, cache)
+    full_block             = MARKER_START + "\n\n" + new_block + "\n" + MARKER_END
+
+    if MARKER_START in content and MARKER_END in content:
+        pattern = re.escape(MARKER_START) + r".*?" + re.escape(MARKER_END)
+        updated = re.sub(pattern, full_block, content, flags=re.DOTALL)
+    else:
+        updated = content.rstrip() + "\n\n---\n\n" + full_block + "\n"
+
+    if updated != content:
+        readme.write_text(updated, encoding="utf-8")
+        print(
+            f"[KB Watcher] ✓ README updated: {folder.name}/{readme.name} "
+            f"({len(gather_files(folder))} files)",
+            flush=True,
+        )
+
+    return cache_dirty
+
+# ── Inline folder cleanup (no generate.py needed) ─────────────────────────────
+
+def _purge_folder_artifacts(folder_name: str, cache: dict) -> bool:
+    """
+    Immediately remove all artifacts for a deleted/renamed folder:
+      - agents/agent_<safe>.py
+      - agents/vector_store/<safe>_index.json
+      - domain_meta.json entry
+      - all summary cache entries under that folder
+    Returns True if the summary cache was mutated.
+    """
+    safe        = folder_to_safe_name(folder_name)
+    agent_file  = AGENTS_DIR / f"agent_{safe}.py"
+    index_file  = AGENTS_DIR / "vector_store" / f"{safe}_index.json"
+    cache_dirty = False
+
+    if agent_file.exists():
+        agent_file.unlink()
+        print(f"[KB Watcher] 🗑 Deleted agent: {agent_file.name}", flush=True)
+
+    if index_file.exists():
+        index_file.unlink()
+        print(f"[KB Watcher] 🗑 Deleted index: {index_file.name}", flush=True)
+
+    # Remove domain_meta entry
+    meta = _load_domain_meta()
+    if folder_name in meta:
+        del meta[folder_name]
+        _save_domain_meta(meta)
+        print(f"[KB Watcher] 🗑 Removed meta entry: {folder_name}", flush=True)
+
+    # Purge all summary cache entries that belong to this folder
+    prefix = folder_name + os.sep
+    stale  = [k for k in cache if k.startswith(prefix) or k.startswith(folder_name + "/")]
+    for k in stale:
+        del cache[k]
+    if stale:
+        cache_dirty = True
+        print(f"[KB Watcher] 🗑 Purged {len(stale)} cache entries for {folder_name}", flush=True)
+
+    return cache_dirty
+
+
+def _rename_folder_artifacts(old_name: str, new_name: str, cache: dict) -> bool:
+    """
+    Rename all artifacts when a top-level folder is renamed:
+      - Rename agents/agent_<old>.py → agents/agent_<new>.py  (rewrite content)
+      - Rename _index.json
+      - Update domain_meta.json key
+      - Re-key all summary cache entries
+    Returns True if the summary cache was mutated.
+    """
+    old_safe = folder_to_safe_name(old_name)
+    new_safe = folder_to_safe_name(new_name)
+
+    old_agent = AGENTS_DIR / f"agent_{old_safe}.py"
+    new_agent = AGENTS_DIR / f"agent_{new_safe}.py"
+    old_index = AGENTS_DIR / "vector_store" / f"{old_safe}_index.json"
+    new_index = AGENTS_DIR / "vector_store" / f"{new_safe}_index.json"
+
+    # Rename / rewrite agent file (folder name is embedded in the content)
+    if old_agent.exists():
+        content = old_agent.read_text(encoding="utf-8")
+        # Update every occurrence of the old folder name and safe name
+        content = content.replace(f'AGENT_FOLDER = "{old_name}"', f'AGENT_FOLDER = "{new_name}"')
+        content = content.replace(f'AGENT_NAME   = "{old_name} Agent"', f'AGENT_NAME   = "{new_name} Agent"')
+        content = content.replace(f'agent_{old_safe}', f'agent_{new_safe}')
+        content = content.replace(old_name, new_name)
+        new_agent.write_text(content, encoding="utf-8")
+        old_agent.unlink()
+        print(f"[KB Watcher] ✏ Renamed agent: {old_agent.name} → {new_agent.name}", flush=True)
+
+    # Rename / update index file
+    if old_index.exists():
+        try:
+            data = json.loads(old_index.read_text())
+            # Update folder name and all rel_path keys
+            data["folder"] = new_name
+            for entry in data.get("entries", []):
+                old_prefix = old_name + os.sep
+                new_prefix = new_name + os.sep
+                if entry.get("path", "").startswith(old_prefix):
+                    entry["path"]   = new_prefix + entry["path"][len(old_prefix):]
+                entry["folder"] = new_name
+            new_index.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            print(f"[KB Watcher] ⚠ Could not migrate index: {e}", flush=True)
+        old_index.unlink()
+        print(f"[KB Watcher] ✏ Renamed index: {old_index.name} → {new_index.name}", flush=True)
+
+    # Update domain_meta.json
+    meta = _load_domain_meta()
+    if old_name in meta:
+        entry        = meta.pop(old_name)
+        entry["folder_name"] = new_name
+        entry["safe_name"]   = new_safe
+        entry["agent_name"]  = f"{new_name} Agent"
+        meta[new_name]       = entry
+        _save_domain_meta(meta)
+        print(f"[KB Watcher] ✏ Updated meta: {old_name} → {new_name}", flush=True)
+
+    # Re-key summary cache entries
+    old_prefix = old_name + os.sep
+    new_prefix = new_name + os.sep
+    old_prefix_fwd = old_name + "/"
+    new_prefix_fwd = new_name + "/"
+    rekeyed    = {}
+    cache_dirty = False
+    for k, v in list(cache.items()):
+        if k.startswith(old_prefix) or k.startswith(old_prefix_fwd):
+            new_key         = new_prefix + k[len(old_prefix):] if k.startswith(old_prefix) \
+                              else new_prefix_fwd + k[len(old_prefix_fwd):]
+            rekeyed[new_key] = v
+            del cache[k]
+            cache_dirty = True
+    cache.update(rekeyed)
+    if cache_dirty:
+        print(f"[KB Watcher] ✏ Re-keyed {len(rekeyed)} cache entries: {old_name} → {new_name}",
+              flush=True)
+
+    return cache_dirty
+
+# ── generate.py trigger ───────────────────────────────────────────────────────
+
+def run_generate(reason: str):
+    generate_script = SCRIPT_DIR / "generate.py"
+    if not generate_script.exists():
+        print(f"[KB Watcher] ⚠ generate.py not found — skipping agent rebuild", flush=True)
+        return
+
+    print(f"[KB Watcher] 🔄 Running generate.py ({reason})...", flush=True)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(generate_script)],
+            capture_output=False,
+            cwd=str(SCRIPT_DIR),
+            timeout=300,
+        )
+        if result.returncode == 0:
+            print(f"[KB Watcher] ✓ generate.py completed", flush=True)
+        else:
+            print(f"[KB Watcher] ✗ generate.py exited {result.returncode}", flush=True)
+    except subprocess.TimeoutExpired:
+        print(f"[KB Watcher] ✗ generate.py timed out after 300s", flush=True)
+    except Exception as e:
+        print(f"[KB Watcher] ✗ generate.py failed: {e}", flush=True)
+
+# ── Embeddings helper (lazy import) ───────────────────────────────────────────
+
+def _update_index(folder_name: str, file_path: pathlib.Path):
+    """Embed a single file into its folder's vector index."""
+    sys.path.insert(0, str(AGENTS_DIR))
+    try:
+        from embeddings import update_index_for_file
+        updated = update_index_for_file(folder_name, file_path)
+        if updated:
+            print(f"[KB Watcher] 🔍 Indexed: {file_path.name}", flush=True)
+    except Exception as e:
+        print(f"[KB Watcher] ⚠ Index update failed for {file_path.name}: {e}", flush=True)
+
+
+def _remove_index(folder_name: str, file_path: pathlib.Path):
+    """Remove a single file from its folder's vector index."""
+    sys.path.insert(0, str(AGENTS_DIR))
+    try:
+        from embeddings import remove_from_index
+        removed = remove_from_index(folder_name, file_path)
+        if removed:
+            print(f"[KB Watcher] 🔍 Removed from index: {file_path.name}", flush=True)
+    except Exception as e:
+        print(f"[KB Watcher] ⚠ Index removal failed for {file_path.name}: {e}", flush=True)
+
+# ── Event handler ─────────────────────────────────────────────────────────────
+
+class KBHandler(FileSystemEventHandler):
+    """
+    Pending work queues (debounced):
+      _pending_readme[folder_name] = deadline   → update README + re-index files in that folder
+      _pending_generate = deadline              → run generate.py (new folder only)
+
+    Immediate work (no debounce):
+      folder deleted → _purge_folder_artifacts()
+      folder renamed → _rename_folder_artifacts()
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._pending_readme:           dict[str, float] = {}
+        self._pending_index:            dict[str, set[pathlib.Path]] = {}  # folder → files to index
+        self._pending_deindex:          dict[str, set[pathlib.Path]] = {}  # folder → files to remove
+        self._pending_generate:         float | None = None
+        self._pending_generate_reason:  str          = ""
+        self._known_folders:            set[str]     = {
+            p.name for p in discover_knowledge_folders()
+        }
+        self._cache: dict = _load_summary_cache()
+
+    # ── Schedulers ────────────────────────────────────────────────────────────
+
+    def _schedule_readme(self, folder_name: str):
+        self._pending_readme[folder_name] = time.time() + DEBOUNCE_SECS
+
+    def _schedule_index(self, folder_name: str, file_path: pathlib.Path):
+        self._pending_index.setdefault(folder_name, set()).add(file_path)
+        self._schedule_readme(folder_name)
+
+    def _schedule_deindex(self, folder_name: str, file_path: pathlib.Path):
+        self._pending_deindex.setdefault(folder_name, set()).add(file_path)
+        self._schedule_readme(folder_name)
+
+    def _schedule_generate(self, reason: str):
+        if self._pending_generate is None:
+            self._pending_generate        = time.time() + DEBOUNCE_SECS
+            self._pending_generate_reason = reason
+
+    # ── Dispatch loop (called every second) ──────────────────────────────────
+
+    def dispatch_pending(self):
+        now = time.time()
+
+        # 1. Process deindex requests first (so removed files don't appear in README)
+        for folder_name, files in list(self._pending_deindex.items()):
+            # Only fire when the matching readme debounce has passed
+            if self._pending_readme.get(folder_name, 0) <= now:
+                del self._pending_deindex[folder_name]
+                for fp in files:
+                    _remove_index(folder_name, fp)
+                    rel_key = str(fp.relative_to(WATCH_ROOT))
+                    if rel_key in self._cache:
+                        del self._cache[rel_key]
+                _save_summary_cache(self._cache)
+
+        # 2. Process index requests
+        for folder_name, files in list(self._pending_index.items()):
+            if self._pending_readme.get(folder_name, 0) <= now:
+                del self._pending_index[folder_name]
+                for fp in files:
+                    if fp.exists():
+                        _update_index(folder_name, fp)
+
+        # 3. Fire overdue README updates
+        fired = [fn for fn, t in self._pending_readme.items() if now >= t]
+        for folder_name in fired:
+            del self._pending_readme[folder_name]
+            folder = WATCH_ROOT / folder_name
+            if folder.exists() and is_knowledge_folder(folder):
+                dirty = update_readme(folder, self._cache)
+                if dirty:
+                    _save_summary_cache(self._cache)
+
+        # 4. Poll for folder changes the OS may not have delivered directory events for.
+        #    macOS FSEvents sometimes coalesces mkdir/rmdir into just file events.
+        live_folders    = {p.name for p in discover_knowledge_folders()}
+        new_folders     = live_folders - self._known_folders
+        deleted_folders = self._known_folders - live_folders
+
+        for fname in new_folders:
+            self._known_folders.add(fname)
+            print(f"[KB Watcher] 📁 New folder detected (poll): {fname} → scheduling generate.py",
+                  flush=True)
+            self._schedule_generate(f"new folder: {fname}")
+
+        for fname in deleted_folders:
+            self._known_folders.discard(fname)
+            print(f"[KB Watcher] 🗑 Folder gone (poll): {fname} → purging artifacts immediately",
+                  flush=True)
+            dirty = _purge_folder_artifacts(fname, self._cache)
+            if dirty:
+                _save_summary_cache(self._cache)
+            # Cancel any pending work for this folder
+            self._pending_readme.pop(fname, None)
+            self._pending_index.pop(fname, None)
+            self._pending_deindex.pop(fname, None)
+
+        # 5. Fire overdue generate.py run (new folder only)
+        if self._pending_generate is not None and now >= self._pending_generate:
+            reason                 = self._pending_generate_reason
+            self._pending_generate = None
+            run_generate(reason)
+            self._known_folders = {p.name for p in discover_knowledge_folders()}
+
+    # ── watchdog callbacks ────────────────────────────────────────────────────
+
+    def on_created(self, event):
+        path = pathlib.Path(event.src_path)
+
+        if event.is_directory:
+            if path.parent == WATCH_ROOT and path.name.lower() not in BLOCKLIST:
+                if path.name not in self._known_folders:
+                    self._known_folders.add(path.name)
+                    print(f"[KB Watcher] 📁 New folder: {path.name} → scheduling generate.py",
+                          flush=True)
+                    self._schedule_generate(f"new folder: {path.name}")
+            return
+
+        folder_name = top_folder_name(event.src_path)
+        if not folder_name or folder_name.lower() in BLOCKLIST:
+            return
+        if is_readme(path) or should_skip(path):
+            return
+        if path.suffix.lower() not in INCLUDE_EXTS:
+            return
+
+        print(f"[KB Watcher] ＋ {path.name} in {folder_name} → scheduling index + README",
+              flush=True)
+        self._schedule_index(folder_name, path)
+
+    def on_deleted(self, event):
+        path = pathlib.Path(event.src_path)
+
+        if event.is_directory:
+            if path.parent == WATCH_ROOT and path.name in self._known_folders:
+                self._known_folders.discard(path.name)
+                print(f"[KB Watcher] 🗑 Folder deleted: {path.name} → purging artifacts immediately",
+                      flush=True)
+                dirty = _purge_folder_artifacts(path.name, self._cache)
+                if dirty:
+                    _save_summary_cache(self._cache)
+                # Cancel any pending work for this folder
+                self._pending_readme.pop(path.name, None)
+                self._pending_index.pop(path.name, None)
+                self._pending_deindex.pop(path.name, None)
+            return
+
+        folder_name = top_folder_name(event.src_path)
+        if not folder_name or folder_name.lower() in BLOCKLIST:
+            return
+        if is_readme(path) or path.suffix.lower() not in INCLUDE_EXTS:
+            return
+
+        print(f"[KB Watcher] ✕ {path.name} deleted from {folder_name} → scheduling deindex + README",
+              flush=True)
+        self._schedule_deindex(folder_name, path)
+
+    def on_moved(self, event):
+        src  = pathlib.Path(event.src_path)
+        dest = pathlib.Path(event.dest_path)
+
+        # ── Top-level folder renamed ──────────────────────────────────────────
+        if event.is_directory and src.parent == WATCH_ROOT and dest.parent == WATCH_ROOT:
+            old_name = src.name
+            new_name = dest.name
+
+            if old_name in self._known_folders and new_name.lower() not in BLOCKLIST:
+                self._known_folders.discard(old_name)
+                self._known_folders.add(new_name)
+                print(f"[KB Watcher] ✏ Folder renamed: {old_name} → {new_name} "
+                      f"→ updating artifacts immediately", flush=True)
+
+                dirty = _rename_folder_artifacts(old_name, new_name, self._cache)
+                if dirty:
+                    _save_summary_cache(self._cache)
+
+                # Update README (the renamed folder now exists at dest)
+                self._schedule_readme(new_name)
+
+                # Migrate pending work from old name to new name
+                for q in (self._pending_readme, self._pending_index, self._pending_deindex):
+                    if old_name in q:
+                        q[new_name] = q.pop(old_name)
+            return
+
+        # ── File moved / renamed inside a knowledge folder ────────────────────
+        src_folder  = top_folder_name(event.src_path)
+        dest_folder = top_folder_name(event.dest_path)
+
+        if src_folder and src_folder.lower() not in BLOCKLIST:
+            if not is_readme(src) and src.suffix.lower() in INCLUDE_EXTS and not should_skip(src):
+                print(f"[KB Watcher] ↩ {src.name} moved/renamed → deindexing src", flush=True)
+                self._schedule_deindex(src_folder, src)
+
+        if dest_folder and dest_folder.lower() not in BLOCKLIST:
+            if not is_readme(dest) and dest.suffix.lower() in INCLUDE_EXTS and not should_skip(dest):
+                print(f"[KB Watcher] ↪ {dest.name} moved/renamed → indexing dest", flush=True)
+                self._schedule_index(dest_folder, dest)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        path = pathlib.Path(event.src_path)
+        # Ignore README writes — we write READMEs ourselves; don't loop
+        if is_readme(path):
+            return
+        folder_name = top_folder_name(event.src_path)
+        if not folder_name or folder_name.lower() in BLOCKLIST:
+            return
+        if path.suffix.lower() not in INCLUDE_EXTS or should_skip(path):
+            return
+
+        print(f"[KB Watcher] ✎ {path.name} modified in {folder_name} → scheduling re-index + README",
+              flush=True)
+        self._schedule_index(folder_name, path)
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main():
+    print(f"[KB Watcher] Starting — watching {WATCH_ROOT}", flush=True)
+    print(f"[KB Watcher] LLM: {LLM_PROVIDER} / {MODEL}", flush=True)
+    if not _llm_available():
+        print(f"[KB Watcher] ⚠ LLM not reachable — summaries will use text snippets as fallback",
+              flush=True)
+
+    folders = discover_knowledge_folders()
+    if folders:
+        for folder in folders:
+            print(f"  → {folder.name}/ ({len(gather_files(folder))} files)", flush=True)
+    else:
+        print("  ⚠ No knowledge folders found — will watch for new ones", flush=True)
+
+    handler  = KBHandler()
+    observer = Observer()
+    observer.schedule(handler, str(WATCH_ROOT), recursive=True)
+    observer.start()
+    print("[KB Watcher] Running. Press Ctrl+C to stop.\n", flush=True)
+
+    try:
+        while True:
+            handler.dispatch_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[KB Watcher] Stopping…", flush=True)
+        observer.stop()
+    observer.join()
+    print("[KB Watcher] Stopped.", flush=True)
+
+
+if __name__ == "__main__":
+    main()

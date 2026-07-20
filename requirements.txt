@@ -1,0 +1,21 @@
+# KnowledgeBase Agent — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Core (required) ───────────────────────────────────────────
+httpx>=0.27.0
+numpy>=1.26.0
+scikit-learn>=1.4.0
+watchdog>=4.0.0
+
+# ── File format support (required for full document coverage) ─
+pypdf>=4.0.0          # PDF reading
+python-pptx>=1.0.0    # PPTX/PPT reading
+openpyxl>=3.1.0       # XLSX/XLS reading
+
+# ── Offline embedding fallback (optional but recommended) ─────
+# Install this if you don't have Ollama or an OpenAI API key.
+# Downloads ~80MB model on first use (all-MiniLM-L6-v2).
+sentence-transformers>=3.0.0
+
+# ── .env file support (optional) ─────────────────────────────
+# Already handled natively — no python-dotenv needed.

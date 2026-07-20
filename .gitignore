@@ -1,0 +1,52 @@
+# ── Environment ───────────────────────────────────────────────
+.env
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Vector store (derived — rebuilt by generate.py) ───────────
+agents/vector_store/*.json
+
+# ── macOS ─────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── IDE ───────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+.watch.log
+
+# ── Knowledge folder contents (private / local data) ─────────
+# The knowledge folders contain private documents.
+# Ignore everything inside them except the hand-written README file.
+# Only the top-level README file (containing "readme" in its name)
+# is committed; all other content (PDFs, DOCX, XLSX, MD, images…) is excluded.
+#
+# To customise: replace the explicit !<path> exemption with your README filename.
+ACE Docs/**
+!ACE Docs/ACE readme file.md
+BizOps/**
+!BizOps/BizOps readme file.md
+CP4I Docs/**
+!CP4I Docs/CP4I readme file.md
