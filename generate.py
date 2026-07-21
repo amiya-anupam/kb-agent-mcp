@@ -800,12 +800,14 @@ def main():
     generate_requirements(req_path)
     print(f"✓ requirements.txt written\n")
 
-    # ── Step 10: generate README.md ───────────────────────────────────────────
-    readme_path = SCRIPT_DIR / "README.md"
-    generate_readme(domains_list, kb_root, readme_path)
-    print(f"✓ README.md written\n")
-
-    # ── Step 11: generate SKILL.md ────────────────────────────────────────────
+    # ── Step 9: generate SKILL.md ─────────────────────────────────────────────
+    # NOTE: README.md is intentionally NOT regenerated here.
+    # It is a hand-authored installation guide — overwriting it would destroy
+    # the ⚡ AI Agent Installation Guide section and all setup instructions.
+    # Per-domain README stubs are created above (inside the folder loop) when
+    # a domain folder has no README yet.  The repo-level README.md is never
+    # touched by generate.py.
+    # ── Step 9: generate SKILL.md ────────────────────────────────────────────
     print("Generating SKILL.md...")
     generate_skill_md(domains_list, agents_dir, kb_root)
     print()
