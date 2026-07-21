@@ -48,6 +48,10 @@ import hashlib
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# context_budget is in agents/ — add it to path before importing
+sys.path.insert(0, str(pathlib.Path(__file__).parent / "agents"))
+from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
+
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
@@ -374,7 +378,7 @@ def _call_llm(prompt: str) -> str:
     # Ollama
     r = httpx.post(f"{LLM_BASE_URL}/api/chat",
                    json={"model": MODEL, "messages": messages, "stream": False,
-                         "options": {"temperature": 0.1, "num_ctx": 4096},
+                         "options": {"temperature": 0.1, "num_ctx": _budget_get("num_ctx")},
                          "think": False},
                    timeout=30.0)
     r.raise_for_status()
@@ -399,10 +403,10 @@ def generate_file_summary(file_path: pathlib.Path) -> str:
             r"^(summary|one.sentence summary|here is|this document)[:\s]+",
             "", summary, flags=re.IGNORECASE
         ).strip()
-        return summary[:147] + "..." if len(summary) > 150 else summary
+        return trim_summary(summary, file_path.name)
     except Exception as e:
         print(f"[KB Watcher] ⚠ Summary LLM failed for {file_path.name}: {e}", flush=True)
-        return snippet[:120].replace("\n", " ").strip()
+        return trim_summary(snippet[:120].replace("\n", " ").strip(), file_path.name)
 
 
 def get_file_summary(file_path: pathlib.Path, cache: dict, rel_key: str) -> tuple[str, bool]:
@@ -418,40 +422,71 @@ def get_file_summary(file_path: pathlib.Path, cache: dict, rel_key: str) -> tupl
 # ── AUTO-INDEX block builder ──────────────────────────────────────────────────
 
 def build_auto_index_block(folder: pathlib.Path, cache: dict) -> tuple[str, bool]:
+    """
+    Build the raw AUTO-INDEX markdown block for a folder.
+
+    Summary capping, collapse grouping, and all formatting rules are
+    delegated to context_budget — this function only handles file I/O
+    and cache management.
+    """
     files       = gather_files(folder)
     now         = datetime.datetime.now().strftime("%d %b %Y %H:%M")
     cache_dirty = False
+    summary_cap = _budget_get("summary")
 
-    lines = [
-        "## 📁 Folder Index",
-        "",
-        f"> **{len(files)} file{'s' if len(files) != 1 else ''}** &nbsp;|&nbsp; "
-        f"_Last indexed: {now}_",
-        "",
-        "| File | Type | Size | Last Modified | Summary |",
-        "|---|---|---|---|---|",
-    ]
+    # ── Collect per-file (subdir, filename, summary) tuples ──────────────────
+    collapsed: dict[str, dict] = {}   # label → {"files": [], "tmpl": str}
+    row_data:  list[tuple]     = []   # (subdir, filename, summary)
 
-    current_subdir = None
     for f in files:
         rel     = f.relative_to(folder)
         subdir  = str(rel.parent) if len(rel.parts) > 1 else ""
         rel_key = str(f.relative_to(WATCH_ROOT))
 
-        if subdir != current_subdir:
-            current_subdir = subdir
-            if subdir:
-                lines.append(f"| **📁 {subdir}/** | | | | |")
-
-        ext      = f.suffix.upper().lstrip(".")
-        size     = human_size(f.stat().st_size)
-        modified = datetime.datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d")
-
-        summary, updated = get_file_summary(f, cache, rel_key)
+        raw_summary, updated = get_file_summary(f, cache, rel_key)
         if updated:
             cache_dirty = True
 
-        lines.append(f"| `{f.name}` | {ext} | {size} | {modified} | {summary.replace('|', chr(92)+'|')} |")
+        summary = trim_summary(raw_summary, f.name)
+
+        # Check whether this file belongs to a collapse group
+        matched = False
+        for pat, label, tmpl in COLLAPSE_RULES:
+            if pat.search(f.name):
+                if label not in collapsed:
+                    collapsed[label] = {"files": [], "tmpl": tmpl}
+                collapsed[label]["files"].append(f.name)
+                matched = True
+                break
+
+        if not matched:
+            row_data.append((subdir, f.name, summary))
+
+    # ── Build raw markdown table (compact_index_block will post-process) ─────
+    lines = [
+        "| File | Summary |",
+        "|---|---|",
+    ]
+
+    current_subdir = None
+    for subdir, fname, summary in row_data:
+        if subdir != current_subdir:
+            current_subdir = subdir
+            if subdir:
+                lines.append(f"| **📁 {subdir}/** | |")
+        if len(summary) > summary_cap:
+            summary = summary[:summary_cap] + "…"
+        lines.append(f"| `{fname}` | {summary.replace('|', chr(92)+'|')} |")
+
+    # One collapsed row per group
+    for label, info in collapsed.items():
+        n    = len(info["files"])
+        qtrs = sorted(set(re.findall(r"Q[123]\d{2,3}", " ".join(info["files"]))))
+        q_str = ", ".join(qtrs) if qtrs else f"{n} files"
+        desc  = info["tmpl"].format(quarters=q_str, n=n)
+        if len(desc) > summary_cap:
+            desc = desc[:summary_cap] + "…"
+        lines.append(f"| _{label}_ ({n} files) | {desc} |")
 
     lines.append("")
     return "\n".join(lines), cache_dirty

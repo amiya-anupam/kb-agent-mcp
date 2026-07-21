@@ -13,7 +13,7 @@ Provides:
 README-first pipeline:
   1. Find the folder's README (must contain <!-- KB:AUTO-INDEX:START --> block)
   2. For normal questions  → pass AUTO-INDEX block only (~500-2000 tokens)
-  3. For complex questions → pass full README up to MAX_README_CHARS
+  3. For complex questions → pass full README up to KB_BUDGET_FULL_README chars
   4. Fallback              → raw-file RAG if README is absent or too thin
 
 LLM provider is driven entirely by env vars:
@@ -146,8 +146,9 @@ def emit_passthrough(question: str, context: str, system_prompt: str,
 # README-first config
 MARKER_START     = "<!-- KB:AUTO-INDEX:START -->"
 MARKER_END       = "<!-- KB:AUTO-INDEX:END -->"
-MAX_README_CHARS = int(os.environ.get("KB_MAX_README_CHARS", "40000"))
-MIN_README_CHARS = 200   # README must have at least this many non-index chars to be used
+
+import importlib as _importlib
+_cb = _importlib.import_module("context_budget")
 
 # Keywords that indicate the user wants a detailed/full answer
 _COMPLEX_QUESTION_PATTERNS = re.compile(
@@ -248,27 +249,25 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
         return None, ""
 
     # README must have meaningful hand-written content (not just the auto-index)
-    if _non_index_chars(readme_text) < MIN_README_CHARS:
+    if _non_index_chars(readme_text) < _cb.get("min_readme"):
         return None, ""
 
     is_complex = _is_complex_question(question)
 
     if is_complex:
-        # Pass the full README up to MAX_README_CHARS
-        context = readme_text[:MAX_README_CHARS]
+        # Complex question: full README body, compacted and capped
+        context = _cb.trim(readme_text, "full_readme")
         label   = f"Full README ({readme.name})"
     else:
-        # Try to use just the AUTO-INDEX block for efficiency
+        # Simple question: compact AUTO-INDEX block + brief intro
         auto_index = _extract_auto_index_block(readme_text)
         if auto_index:
-            # For index-only context, prepend the non-index hand-written part
-            # (limited to first 3000 chars) so the LLM has domain context too
             pre_index = readme_text[:readme_text.index(MARKER_START)].strip()
-            context   = (pre_index[:3000] + "\n\n" + auto_index) if pre_index else auto_index
+            context   = _cb.build_context(pre_index, auto_index)
             label     = f"README index ({readme.name})"
         else:
             # README has no auto-index block yet — use full README
-            context = readme_text[:MAX_README_CHARS]
+            context = _cb.trim(readme_text, "full_readme")
             label   = f"Full README ({readme.name})"
 
     return context, label
@@ -276,7 +275,9 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 
 # ── Full text extractor ───────────────────────────────────────────────────────
 
-def extract_full_text(file_path: pathlib.Path, max_chars: int = 6000) -> str:
+def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> str:
+    if max_chars is None:
+        max_chars = _cb.get("rag_file")
     """Extract as much useful text as possible from a file."""
     ext = file_path.suffix.lower()
     try:
@@ -383,7 +384,7 @@ def _call_ollama(messages: list[dict], temperature: float) -> str:
             "model":    MODEL,
             "messages": messages,
             "stream":   False,
-            "options":  {"temperature": temperature, "num_ctx": 32768},
+            "options":  {"temperature": temperature, "num_ctx": _cb.get("num_ctx")},
             "think":    False,
         },
         timeout=120.0,
@@ -457,7 +458,7 @@ def ask(
     system_prompt: str,
     conversation_history: list[dict] | None = None,
     top_n: int = 4,
-    max_chars: int = 6000,
+    max_chars: int | None = None,
 ) -> dict:
     """
     README-first RAG pipeline for a single folder domain.
@@ -465,7 +466,7 @@ def ask(
     Strategy:
       1. Try README-first: use the folder README as primary context
          - Normal questions  → AUTO-INDEX block + brief intro section
-         - Complex questions → full README (up to MAX_README_CHARS chars)
+         - Complex questions → full README (up to KB_BUDGET_FULL_README chars)
       2. Fallback to raw-file RAG if README is absent or too thin (<200 chars
          of hand-written content outside the AUTO-INDEX block)
 
@@ -506,7 +507,7 @@ def ask(
         messages = [{"role": "system", "content": system_prompt}]
 
         if conversation_history:
-            messages.extend(conversation_history[-6:])
+            messages.extend(conversation_history[-_cb.get("history"):])
 
         messages.append({
             "role": "user",
@@ -578,7 +579,7 @@ def ask(
     messages = [{"role": "system", "content": system_prompt}]
 
     if conversation_history:
-        messages.extend(conversation_history[-6:])
+        messages.extend(conversation_history[-_cb.get("history"):])
 
     messages.append({
         "role": "user",

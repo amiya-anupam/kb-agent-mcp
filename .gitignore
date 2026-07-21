@@ -47,3 +47,7 @@ agents/vector_store/*.json
 # ── Knowledge folder contents (private / local data) ─────────
 # Knowledge folders contain private documents — never commit them.
 # Add your own folders below following the same pattern if needed.
+
+ACE Docs/
+BizOps/
+CP4I Docs/

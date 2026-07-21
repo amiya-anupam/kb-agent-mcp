@@ -5,18 +5,40 @@ memory.py — Conversation Memory
 Stores multi-turn conversation history for the KnowledgeBase Agent.
 Persists to disk so context survives between Bob invocations in the same session.
 
-Session resets automatically after TIMEOUT_HOURS of inactivity.
+Session resets automatically after KB_SESSION_TIMEOUT_HOURS of inactivity.
+
+Environment variables (all optional — sensible defaults provided):
+  KB_SESSION_TIMEOUT_HOURS  Hours of inactivity before session resets.  Default: 2
+  KB_SESSION_MAX_TURNS      Max conversation turns kept in memory.       Default: 20
 """
 
+import os
 import json
 import time
 import pathlib
 
+# ── Load .env if present ──────────────────────────────────────────────────────
+
+def _load_env():
+    for candidate in [
+        pathlib.Path(os.environ.get("KB_ROOT", "")) / ".env",
+        pathlib.Path(__file__).parent.parent / ".env",
+    ]:
+        if candidate.exists():
+            for line in candidate.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
+            break
+
+_load_env()
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 MEMORY_FILE    = pathlib.Path(__file__).parent / "vector_store" / "session_memory.json"
-TIMEOUT_HOURS  = 2       # reset session after 2 hours of inactivity
-MAX_TURNS      = 20      # keep last 20 turns (40 messages) to stay within context
+TIMEOUT_HOURS  = float(os.environ.get("KB_SESSION_TIMEOUT_HOURS", "2"))
+MAX_TURNS      = int(os.environ.get("KB_SESSION_MAX_TURNS", "20"))
 
 # ── Memory operations ─────────────────────────────────────────────────────────
 

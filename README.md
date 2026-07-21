@@ -184,6 +184,51 @@ NOTE: raw document files never leave your machine.
       When Ollama is running, nothing goes to Claude at all.
 ```
 
+
+### Token consumption — online vs. offline
+
+Every query goes through two layers. The numbers below are for a **simple question** (README index mode, 4-turn history, average 25-word question).
+
+#### Per-query token budget breakdown
+
+| Component | Online (passthrough) | Offline (local LLM) |
+|---|---|---|
+| `classify_intent()` LLM call | — skipped (keyword route used) | ~120 tok |
+| System prompt | ~48 tok | ~48 tok |
+| Conversation history (4 turns) | 0 tok (not sent in passthrough) | ~200 tok |
+| Retrieved context (README index) | domain-specific (see below) | domain-specific (see below) |
+| User question | ~25 tok | ~25 tok |
+
+#### Domain token breakdown (README index mode vs. RAG fallback)
+
+| Domain | Online + README | Offline + README | Online + RAG | Offline + RAG | README saves (offline) |
+|---|---|---|---|---|---|
+| ACE Docs | **1,410 tok** | **1,675 tok** | 4,103 tok | 4,368 tok | −2,693 tok (62%) |
+| BizOps | **2,023 tok** | **2,288 tok** | 4,103 tok | 4,368 tok | −2,080 tok (48%) |
+| CP4I Docs | **754 tok** | **1,019 tok** | 4,104 tok | 4,369 tok | −3,349 tok (77%) |
+
+**Key observations:**
+- **Online vs. offline delta is only +265 tok per query** — the extra cost is the single `classify_intent()` routing call and conversation history passed to the local LLM.
+- **README index mode saves 48–77%** vs. raw-file RAG fallback — the compacted index block is the biggest win.
+- **CP4I Docs is smallest context** (754 tok online) because its README has only 11 files; its 100 KB narrative is capped by `KB_BUDGET_PRE_INDEX` (500 tok).
+- **BizOps is largest context** (2,023 tok online) because it has the most files (76) — but EPM2-004 and screenshot collapsing keeps it under the 2,000-token index budget.
+- RAG fallback is always ~4,100 tok regardless of domain — it's bounded by `top_n=4` files × `KB_BUDGET_RAG_FILE` (1,000 tok each).
+
+#### What drives the online→offline +265 tok delta
+
+```
+Online (passthrough) mode:
+  1. keyword_route()    — O(1) keyword scan, zero tokens
+  2. emit_passthrough() — context + system_prompt sent to Bob's Claude
+     Bob's Claude pays the token cost from its own context window
+
+Offline (local LLM) mode:
+  1. classify_intent()  — 1 LLM call: ~120 tok (routing prompt + question)
+  2. agent_base.ask()   — system_prompt + history + context + question
+     Ollama pays the token cost locally
+```
+
+
 ### What needs internet vs. what is offline
 
 | Operation | Runs on | Network |
@@ -205,7 +250,7 @@ NOTE: raw document files never leave your machine.
 
 ```bash
 # 1. Clone the repo
-git clone https://github.ibm.com/Amiya-Anupam1/knowledgebase-agent.git
+git clone <repo-url>
 cd knowledgebase-agent
 
 # 2. Install dependencies
@@ -244,6 +289,58 @@ Copy `.env.example` to `.env` and configure:
 | `KB_API_KEY` | _(empty)_ | API key for OpenAI / Anthropic / custom providers |
 | `KB_EMBED_MODEL` | `nomic-embed-text` | Embedding model (leave blank for offline fallback) |
 | `KB_IGNORE_FOLDERS` | _(empty)_ | Comma-separated extra folders to exclude from discovery |
+
+### Token budget variables (`agents/context_budget.py`)
+
+All token-affecting limits are tunable via env vars — no code changes needed:
+
+| Variable | Default | Tokens (~) | Description |
+|---|---|---|---|
+| `KB_BUDGET_TOTAL` | `24000` chars | ~6,000 | Hard ceiling — any context sent to any LLM |
+| `KB_BUDGET_INDEX` | `8000` chars | ~2,000 | README index block (simple-query context) |
+| `KB_BUDGET_FULL_README` | `24000` chars | ~6,000 | Full README (complex-query context) |
+| `KB_BUDGET_PRE_INDEX` | `2000` chars | ~500 | Hand-written README intro prepended to index |
+| `KB_BUDGET_RAG_FILE` | `4000` chars | ~1,000 | Max chars extracted per file in RAG fallback |
+| `KB_BUDGET_SUMMARY` | `100` chars | ~25 | Per-file summary line in the AUTO-INDEX table |
+| `KB_BUDGET_HISTORY` | `4` turns | — | Conversation history turns sent with each request |
+
+---
+
+## `agents/context_budget.py` — Token Compaction Engine
+
+`context_budget.py` is the **single source of truth** for all token-affecting decisions in the pipeline. Both `watch_kb.py` (index-time) and `agent_base.py` (query-time) import from it.
+
+### Public API
+
+| Function | Used by | What it does |
+|---|---|---|
+| `trim(text, key)` | `agent_base.py` | Hard-trim text to a named budget |
+| `trim_summary(summary, filename)` | `watch_kb.py` | Trim file summary; replace useless fallbacks with filename |
+| `compact_index_block(block)` | both | Strip boilerplate, normalise columns, collapse repeated-version groups |
+| `compact_pre_index(text)` | `agent_base.py` | Trim the hand-written README intro |
+| `build_context(pre, index)` | `agent_base.py` | Assemble final context within `KB_BUDGET_INDEX` |
+| `get(key)` | both | Return the character budget for a named key |
+| `COLLAPSE_RULES` | both | Importable list of `(pattern, label, template)` tuples |
+
+### Adding a new collapse group
+
+The **recommended way** (no code change, not shared with cloners) — add to your `.env`:
+
+```bash
+# Single rule
+KB_COLLAPSE_PATTERNS=Weekly_Report|weekly reports|Weekly status reports ({n} files)
+
+# Multiple rules separated by ;;
+KB_COLLAPSE_PATTERNS=EPM2-004|EPM snapshots|Weekly files for {quarters} ({n} files);;^Screenshot|screenshots|Snapshot images ({n} files)
+```
+
+Format per rule: `regex_pattern|label|description_template`
+- `{n}` — number of matched files
+- `{quarters}` — quarter codes extracted from filenames (e.g. `Q126, Q226`)
+
+This covers both index-time (watcher rewrites the README when the watcher next runs) and query-time (agent compacts on the fly) automatically.
+
+**Alternative** — if you want a rule to apply for everyone who clones the repo, add it to `_BUILTIN_COLLAPSE_RULES` in `agents/context_budget.py`. Only put genuinely universal patterns there (e.g. OS junk files).
 
 ---
 
@@ -321,19 +418,26 @@ Watches `KB_ROOT` for filesystem events and keeps everything in sync -- no manua
 
 ### README AUTO-INDEX block
 
-Each folder's README contains a maintained table kept current by the watcher:
+Each folder's README contains a maintained 2-column table kept current by the watcher:
 
 ```markdown
 <!-- KB:AUTO-INDEX:START -->
-## Folder Index
-
-| File | Type | Size | Last Modified | Summary |
-|---|---|---|---|---|
-| `doc.pdf` | PDF | 1.2 MB | 2024-11-01 | One-sentence LLM summary... |
+| File | Summary |
+|---|---|
+| `doc.pdf` | One-sentence LLM summary (≤100 chars)... |
+| `report.xlsx` | Quarterly pipeline analysis for CP4I and ACE |
+| _EPM2-004 weekly snapshots_ | Weekly pipeline detail files for Q126, Q226 (19 files) — query by quarter/week |
 <!-- KB:AUTO-INDEX:END -->
 ```
 
-This block is the **primary retrieval context** -- agents read it first before
+The watcher generates this block. `context_budget.py` compacts it at both write-time (watcher) and query-time (agent):
+
+- **2 columns only** — File + Summary (Type/Size/Last Modified stripped)
+- **Summary ≤ 100 chars** — `KB_BUDGET_SUMMARY` caps each row
+- **Repeated-version groups collapsed** — e.g. 19 EPM2-004 files become 1 summary row
+- **Heading boilerplate stripped** — `## 📁 Folder Index`, count lines removed
+
+This block is the **primary retrieval context** — agents read it first before
 falling back to raw vector search.
 
 > **Note:** The watcher runs as a `launchd` daemon on macOS (service `com.knowledgebase.watcher`).

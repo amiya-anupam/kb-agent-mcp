@@ -75,8 +75,6 @@ Just ask naturally — Bob detects the intent and runs the agent:
 - `/kb --memory` — show conversation history summary
 
 ## How the pipeline works
-
-**With a local LLM (Ollama) or API key:**
 ```
 You → Bob (Claude) → detects skill trigger
                    → runs: python3 agent_knowledgebase.py "<question>"
@@ -85,36 +83,29 @@ You → Bob (Claude) → detects skill trigger
                              ↓ (if ambiguous)
                         classify_intent() ← your local LLM
                              ↓
-                        search() ← embeddings (local)
+                        agent_base.ask()  ← README-first RAG pipeline
+                             |
+                             +-- README index block (simple Q)
+                             +-- full README (complex Q)
+                             +-- vector search fallback (no README)
                              ↓
                         call_llm() ← your local LLM answers
                              ↓
                    → Bob reads stdout and returns answer to you
 ```
 
-**Without a local LLM — Passthrough mode (auto-detected):**
-```
-You → Bob (Claude) → detects skill trigger
-                   → runs: python3 agent_knowledgebase.py "<question>"
-                             ↓
-                        keyword_route() / classify_intent() ← routing only
-                             ↓
-                        search() ← embeddings (sentence-transformers, offline)
-                             ↓
-                        emit <<<KB_PASSTHROUGH>>> block to stdout
-                             ↓
-                   → Bob (Claude) reads the context block
-                             ↓
-                   → Bob answers the question directly
-```
+## Setup
 
-Passthrough mode activates automatically when Ollama is not running and no
-`KB_API_KEY` is set. Force it explicitly with `KB_LLM_PROVIDER=passthrough`.
-Disable auto-detection with `KB_PASSTHROUGH_FALLBACK=false`.
+To add a new domain: add a folder with documents to your KB root, then run:
+```
+python3 generate.py
+```
+This discovers your folders, builds vector indexes, and regenerates this skill
+with your domain names, keywords, and the correct `execute:` path.
 
 ## Technical Details
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
-- LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER` (`passthrough` = Bob answers)
-- Passthrough fallback: auto-enabled when no LLM reachable; disable with `KB_PASSTHROUGH_FALLBACK=false`
+- LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER`
+- Context budget: configurable via `KB_BUDGET_*` env vars (see `.env.example`)
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)
 - Invocation: `python3 /path/to/KnowledgeBase/agents/agent_knowledgebase.py "<question>"`

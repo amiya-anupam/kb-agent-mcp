@@ -15,6 +15,7 @@ Run standalone to rebuild all indexes:
 """
 
 import os
+import sys
 import json
 import pathlib
 import hashlib
@@ -50,6 +51,11 @@ def _kb_root() -> pathlib.Path:
 
 KB_ROOT      = _kb_root()
 VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
+
+# Import context_budget for embed_chars budget
+sys.path.insert(0, str(pathlib.Path(__file__).parent))
+import importlib as _importlib
+_cb = _importlib.import_module("context_budget")
 
 OLLAMA_URL   = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 EMBED_MODEL  = os.environ.get("KB_EMBED_MODEL", "nomic-embed-text")
@@ -130,7 +136,7 @@ def _embed_ollama(text: str) -> list[float]:
     import httpx
     response = httpx.post(
         f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text[:8000]},
+        json={"model": EMBED_MODEL, "prompt": text[:_cb.get("embed_chars")]},
         timeout=30.0,
     )
     response.raise_for_status()
@@ -146,7 +152,7 @@ def _embed_openai(text: str) -> list[float]:
     response = httpx.post(
         f"{base}/embeddings",
         headers=headers,
-        json={"model": EMBED_MODEL or "text-embedding-3-small", "input": text[:8000]},
+        json={"model": EMBED_MODEL or "text-embedding-3-small", "input": text[:_cb.get("embed_chars")]},
         timeout=30.0,
     )
     response.raise_for_status()
@@ -167,7 +173,7 @@ def _embed_sentence_transformers(text: str) -> list[float]:
                 "endpoint is not reachable.\n"
                 "Install it with:  pip install sentence-transformers"
             )
-    return _st_model.encode(text[:8000]).tolist()
+    return _st_model.encode(text[:_cb.get("embed_chars")]).tolist()
 
 
 def get_embedding(text: str) -> list[float]:
