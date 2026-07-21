@@ -150,11 +150,20 @@ MARKER_END       = "<!-- KB:AUTO-INDEX:END -->"
 import importlib as _importlib
 _cb = _importlib.import_module("context_budget")
 
-# Keywords that indicate the user wants a detailed/full answer
+# Keywords that indicate the user genuinely needs the full README narrative.
+#
+# INTENTIONALLY NARROW: casual phrasing ("tell me about", "describe",
+# "overview of") is NOT included — those questions are almost always
+# answered by the compacted AUTO-INDEX block (index mode, ~2 000 tokens).
+# Only structural/comparative questions that need the full document body
+# are included here.  Incorrect inclusion of casual verbs was the single
+# largest source of token waste (up to 6 000 tokens per domain per query).
 _COMPLEX_QUESTION_PATTERNS = re.compile(
-    r"\b(explain|detail|elaborate|compare|contrast|difference|how does|"
-    r"walk me through|deep dive|in depth|comprehensive|full|everything about|"
-    r"tell me about|describe|outline|overview of|breakdown|analysis of)\b",
+    r"\b(compare|contrast|difference between|differences between|"
+    r"walk me through|step[- ]by[- ]step|deep dive|in[- ]depth|"
+    r"comprehensive|explain in detail|elaborate on|how does .{3,40} work|"
+    r"pros and cons|trade[- ]off|architecture of|internals of|"
+    r"full breakdown|everything about)\b",
     re.IGNORECASE,
 )
 

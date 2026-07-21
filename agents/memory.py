@@ -10,6 +10,11 @@ Session resets automatically after KB_SESSION_TIMEOUT_HOURS of inactivity.
 Environment variables (all optional — sensible defaults provided):
   KB_SESSION_TIMEOUT_HOURS  Hours of inactivity before session resets.  Default: 2
   KB_SESSION_MAX_TURNS      Max conversation turns kept in memory.       Default: 20
+  KB_SESSION_MAX_ANSWER_CHARS
+                            Max chars of an assistant answer stored in memory.
+                            Long answers are truncated before persisting so they
+                            don't inflate the history context sent to the LLM on
+                            every subsequent turn.  Default: 400  (~100 tokens)
 """
 
 import os
@@ -36,9 +41,10 @@ _load_env()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-MEMORY_FILE    = pathlib.Path(__file__).parent / "vector_store" / "session_memory.json"
-TIMEOUT_HOURS  = float(os.environ.get("KB_SESSION_TIMEOUT_HOURS", "2"))
-MAX_TURNS      = int(os.environ.get("KB_SESSION_MAX_TURNS", "20"))
+MEMORY_FILE      = pathlib.Path(__file__).parent / "vector_store" / "session_memory.json"
+TIMEOUT_HOURS    = float(os.environ.get("KB_SESSION_TIMEOUT_HOURS", "2"))
+MAX_TURNS        = int(os.environ.get("KB_SESSION_MAX_TURNS", "20"))
+MAX_ANSWER_CHARS = int(os.environ.get("KB_SESSION_MAX_ANSWER_CHARS", "400"))
 
 # ── Memory operations ─────────────────────────────────────────────────────────
 
@@ -69,10 +75,19 @@ def get_history() -> list[dict]:
 
 
 def add_turn(user_message: str, assistant_message: str):
-    """Append a user + assistant turn to memory."""
+    """Append a user + assistant turn to memory.
+
+    The assistant answer is truncated to MAX_ANSWER_CHARS before persisting.
+    The full answer was already shown to the user; only a summary is needed
+    for follow-up routing and context.  This prevents previous long answers
+    from inflating the history tokens sent on every subsequent LLM call.
+    """
     data = _load()
+    stored_answer = assistant_message[:MAX_ANSWER_CHARS]
+    if len(assistant_message) > MAX_ANSWER_CHARS:
+        stored_answer += "…"
     data["messages"].append({"role": "user",      "content": user_message})
-    data["messages"].append({"role": "assistant",  "content": assistant_message})
+    data["messages"].append({"role": "assistant",  "content": stored_answer})
     # Trim to MAX_TURNS (keep most recent)
     if len(data["messages"]) > MAX_TURNS * 2:
         data["messages"] = data["messages"][-(MAX_TURNS * 2):]

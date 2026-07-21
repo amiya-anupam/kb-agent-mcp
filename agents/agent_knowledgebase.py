@@ -77,6 +77,30 @@ def keyword_route(question: str, domains: list[dict]) -> list[str]:
     ]
 
 
+def _keyword_confidence(question: str, domains: list[dict]) -> tuple[list[str], bool]:
+    """
+    Return (matched_domain_names, is_confident).
+
+    is_confident is True when keyword matching alone is sufficient to route:
+      - exactly 1 domain matched AND it has ≥2 keyword hits
+        (single strong match — no ambiguity)
+
+    When not confident, the LLM classifier is invoked to disambiguate.
+    """
+    q = question.lower()
+    hit_counts: dict[str, int] = {}
+    for d in domains:
+        hits = sum(1 for kw in d.get("keywords", []) if kw.lower() in q)
+        if hits > 0:
+            hit_counts[d["folder_name"]] = hits
+
+    matched = list(hit_counts.keys())
+
+    # Confident: single domain matched, at least 2 distinct keyword hits
+    confident = (len(matched) == 1 and hit_counts[matched[0]] >= 2)
+    return matched, confident
+
+
 # ── LLM-based intent classifier ───────────────────────────────────────────────
 
 def classify_intent(
@@ -285,18 +309,23 @@ def ask_knowledgebase(question: str) -> str:
             f"  Expected at: {META_PATH}"
         )
 
-    # Fast keyword pre-filter
-    kw_domains = keyword_route(question, domains)
+    # Fast keyword pre-filter — skip the LLM routing call when confident
+    kw_domains, kw_confident = _keyword_confidence(question, domains)
 
-    # LLM classification
-    classification = classify_intent(question, history, domains)
-    domain_names   = classification["domains"] or kw_domains or [domains[0]["folder_name"]]
+    if kw_confident:
+        # Single domain, ≥2 keyword hits — no LLM call needed
+        domain_names = kw_domains
+        print(f"\n[{AGENT_NAME}] Keyword routing (confident, skipping LLM): {domain_names[0]}")
+    else:
+        # Ambiguous or zero keyword matches — invoke LLM classifier
+        classification = classify_intent(question, history, domains)
+        domain_names   = classification["domains"] or kw_domains or [domains[0]["folder_name"]]
 
-    # Needs clarification?
-    if classification.get("needs_clarification") and classification.get("clarification_question"):
-        cq = classification["clarification_question"]
-        add_turn(question, cq)
-        return cq
+        # Needs clarification?
+        if classification.get("needs_clarification") and classification.get("clarification_question"):
+            cq = classification["clarification_question"]
+            add_turn(question, cq)
+            return cq
 
     print(f"\n[{AGENT_NAME}] Routing to: {', '.join(domain_names)}")
     if len(domain_names) > 1:
