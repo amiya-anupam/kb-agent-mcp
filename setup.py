@@ -7,18 +7,17 @@ Run this once after cloning (or after adding new knowledge folders).
 What it does:
   1. Checks Python version (3.10+)
   2. Installs Python dependencies from requirements.txt
-  3. Creates .env from .env.example if .env does not exist yet
-     — auto-fills KB_ROOT to the directory where this script lives
-     — prompts for LLM provider/key only if not already set
-  4. Prompts the user to add knowledge folders (or accepts --kb-root)
-  5. Runs python3 generate.py to build indexes and install the Bob skill
+  3. Asks where to store knowledge documents (link existing folder or create new)
+  4. Asks whether to use a local LLM or rely on the calling AI tool (passthrough)
+  5. Creates .env with KB_ROOT and LLM settings pre-filled
+  6. Runs python3 generate.py to build indexes and install the agent skill
 
 Usage:
   python3 setup.py                    # interactive
   python3 setup.py --yes              # non-interactive (accept all defaults)
-  python3 setup.py --kb-root /path    # use an existing folder as KB root
+  python3 setup.py --kb-root /path    # skip the root folder prompt
 
-After setup the Bob skill is live at:
+After setup the skill is live at:
   ~/.bob/skills/knowledgebase-agent/SKILL.md
 """
 
@@ -91,55 +90,174 @@ def install_deps():
     ok("Dependencies installed")
 
 
-# ── Step 3: .env setup ────────────────────────────────────────────────────────
+# ── Step 3: choose KB root folder ────────────────────────────────────────────
 
-def setup_env(kb_root: pathlib.Path, yes: bool):
-    hdr("③ Configuring environment (.env)")
+def choose_kb_root(cli_kb_root: pathlib.Path | None, yes: bool) -> pathlib.Path:
+    """Ask the user where their knowledge documents live (or should live).
+
+    Three outcomes:
+      a) --kb-root flag was passed  → use it directly, no prompt
+      b) --yes flag                 → default to repo directory, no prompt
+      c) interactive                → ask: link existing folder OR create new one
+    """
+    if cli_kb_root is not None:
+        ok(f"KB root: {cli_kb_root}")
+        return cli_kb_root
+
+    if yes:
+        ok(f"KB root: {SCRIPT_DIR}  (default)")
+        return SCRIPT_DIR
+
+    hdr("③ Knowledge documents folder")
+    print()
+    print("  Where are (or will be) your knowledge documents stored?")
+    print()
+    print("  1) Use this repo folder  (create subfolders here for each domain)")
+    print(f"       {SCRIPT_DIR}/")
+    print("  2) Link an existing folder on my machine")
+    print("       (e.g. ~/Documents/MyProject — its subfolders become domains)")
+    print("  3) Create a new folder somewhere")
+    print()
+
+    choice = ask("Choice", "1")
+
+    if choice == "2":
+        while True:
+            raw = ask("Full path to your existing folder")
+            path = pathlib.Path(raw).expanduser().resolve()
+            if path.is_dir():
+                ok(f"KB root set to: {path}")
+                return path
+            err(f"'{path}' does not exist or is not a directory. Try again.")
+
+    elif choice == "3":
+        raw = ask("Full path for the new folder", str(pathlib.Path.home() / "KnowledgeBase"))
+        path = pathlib.Path(raw).expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        ok(f"Created and set KB root to: {path}")
+        return path
+
+    else:
+        ok(f"KB root: {SCRIPT_DIR}")
+        return SCRIPT_DIR
+
+
+# ── Step 4: choose LLM ────────────────────────────────────────────────────────
+
+def choose_llm(yes: bool) -> dict:
+    """Ask whether the user wants a local LLM or passthrough mode.
+
+    Returns a dict of env-var key→value pairs to write into .env.
+    """
+    if yes:
+        info("LLM: passthrough mode (AI tool answers using retrieved context)")
+        return {"KB_LLM_PROVIDER": "passthrough"}
+
+    hdr("④ LLM (language model) setup")
+    print()
+    print("  The agent needs a language model to answer questions.")
+    print("  You have two options:")
+    print()
+    print("  1) Use your AI tool directly  (passthrough — recommended to start)")
+    print("       No extra software needed. The agent retrieves relevant context")
+    print("       from your documents locally, then your AI tool (Bob, Claude,")
+    print("       ChatGPT, etc.) reads that context and answers the question.")
+    print("       Your raw documents never leave your machine.")
+    print()
+    print("  2) Install a local LLM  (fully offline, no AI tool involved)")
+    print("       The agent answers entirely on your machine.")
+    print("       Options: Ollama (free, local), OpenAI API key, Anthropic API key.")
+    print()
+
+    top = ask("Choice", "1")
+
+    if top == "1":
+        info("Passthrough mode selected.")
+        return {"KB_LLM_PROVIDER": "passthrough"}
+
+    # Local LLM sub-menu
+    print()
+    print("  Which local LLM provider?")
+    print("  a) Ollama  (free, runs on your machine — install from https://ollama.com)")
+    print("  b) OpenAI  (cloud API key required)")
+    print("  c) Anthropic  (cloud API key required)")
+    print("  d) Custom / LM Studio / Jan  (any OpenAI-compatible local server)")
+    print()
+
+    sub = ask("Provider", "a").lower()
+
+    if sub == "b":
+        key   = ask("OpenAI API key (sk-...)")
+        model = ask("OpenAI model", "gpt-4o-mini")
+        return {
+            "KB_LLM_PROVIDER":  "openai",
+            "KB_LLM_BASE_URL":  "https://api.openai.com/v1",
+            "KB_MODEL":         model,
+            "KB_API_KEY":       key,
+            "KB_EMBED_MODEL":   "text-embedding-3-small",
+        }
+    elif sub == "c":
+        key   = ask("Anthropic API key")
+        model = ask("Anthropic model", "claude-3-5-haiku-20241022")
+        return {
+            "KB_LLM_PROVIDER":  "anthropic",
+            "KB_LLM_BASE_URL":  "https://api.anthropic.com",
+            "KB_MODEL":         model,
+            "KB_API_KEY":       key,
+        }
+    elif sub == "d":
+        url   = ask("Base URL of your local server", "http://localhost:1234/v1")
+        model = ask("Model name")
+        return {
+            "KB_LLM_PROVIDER":  "custom",
+            "KB_LLM_BASE_URL":  url,
+            "KB_MODEL":         model,
+        }
+    else:
+        # Ollama (default)
+        model = ask("Ollama model", "qwen3:14b")
+        print()
+        info("Make sure Ollama is running before asking questions: `ollama serve`")
+        info("Pull the model if you haven't already: `ollama pull " + model + "`")
+        return {
+            "KB_LLM_PROVIDER":  "ollama",
+            "KB_MODEL":         model,
+            "KB_EMBED_MODEL":   "nomic-embed-text",
+        }
+
+
+# ── Step 5: write .env ────────────────────────────────────────────────────────
+
+def setup_env(kb_root: pathlib.Path, llm_settings: dict):
+    hdr("⑤ Configuring environment (.env)")
     env_path     = SCRIPT_DIR / ".env"
     example_path = SCRIPT_DIR / ".env.example"
 
     if env_path.exists():
         ok(".env already exists — keeping it")
-        # Always patch KB_ROOT to current location in case the repo was moved
+        # Always patch KB_ROOT in case the repo was moved
         _patch_kb_root(env_path, kb_root)
         return
 
     if not example_path.exists():
         warn(".env.example not found — creating a minimal .env")
-        env_path.write_text(
-            f"KB_ROOT={kb_root}\nKB_LLM_PROVIDER=ollama\nKB_MODEL=qwen3:14b\n"
-            f"KB_EMBED_MODEL=nomic-embed-text\n",
-            encoding="utf-8",
-        )
-        ok(f".env created with KB_ROOT={kb_root}")
+        lines = [f"KB_ROOT={kb_root}"]
+        for k, v in llm_settings.items():
+            lines.append(f"{k}={v}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        ok(f".env created")
         return
 
-    # Copy example and fill in KB_ROOT automatically
+    # Start from the example, patch KB_ROOT, then apply all LLM settings
     content = example_path.read_text(encoding="utf-8")
     content = content.replace("# KB_ROOT=/path/to/your/KnowledgeBase",
                                f"KB_ROOT={kb_root}")
     env_path.write_text(content, encoding="utf-8")
-    ok(f".env created  (KB_ROOT={kb_root})")
-
-    # Optionally prompt for LLM config
-    if yes:
-        info("Using default LLM config (Ollama / passthrough). Edit .env to change.")
-        return
-
-    print()
-    print("  Choose your LLM provider (or press Enter to use passthrough mode):")
-    print("  1) Ollama  (local, default — run `ollama serve` first)")
-    print("  2) OpenAI  (needs KB_API_KEY)")
-    print("  3) Anthropic  (needs KB_API_KEY)")
-    print("  4) Skip  (passthrough mode — Bob's Claude answers using retrieved context)")
-
-    choice = ask("Choice", "4")
 
     lines = env_path.read_text(encoding="utf-8").splitlines()
 
     def _set(key: str, value: str):
-        new_lines = []
-        found = False
+        new_lines, found = [], False
         for ln in lines:
             stripped = ln.lstrip("# ")
             if stripped.startswith(f"{key}=") or ln.startswith(f"{key}="):
@@ -151,31 +269,11 @@ def setup_env(kb_root: pathlib.Path, yes: bool):
             new_lines.append(f"{key}={value}")
         lines[:] = new_lines
 
-    if choice == "1":
-        model = ask("Ollama model", "qwen3:14b")
-        _set("KB_LLM_PROVIDER", "ollama")
-        _set("KB_MODEL", model)
-        _set("KB_EMBED_MODEL", "nomic-embed-text")
-    elif choice == "2":
-        key   = ask("OpenAI API key (sk-...)")
-        model = ask("OpenAI model", "gpt-4o-mini")
-        _set("KB_LLM_PROVIDER", "openai")
-        _set("KB_LLM_BASE_URL", "https://api.openai.com/v1")
-        _set("KB_MODEL", model)
-        _set("KB_API_KEY", key)
-        _set("KB_EMBED_MODEL", "text-embedding-3-small")
-    elif choice == "3":
-        key   = ask("Anthropic API key")
-        model = ask("Anthropic model", "claude-3-5-haiku-20241022")
-        _set("KB_LLM_PROVIDER", "anthropic")
-        _set("KB_LLM_BASE_URL", "https://api.anthropic.com")
-        _set("KB_MODEL", model)
-        _set("KB_API_KEY", key)
-    else:
-        info("Passthrough mode selected. Bob's Claude will answer using retrieved context.")
+    for k, v in llm_settings.items():
+        _set(k, v)
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    ok(".env configured")
+    ok(f".env configured  (KB_ROOT={kb_root}, provider={llm_settings.get('KB_LLM_PROVIDER', '?')})")
 
 
 def _patch_kb_root(env_path: pathlib.Path, kb_root: pathlib.Path):
@@ -199,7 +297,7 @@ def _patch_kb_root(env_path: pathlib.Path, kb_root: pathlib.Path):
         ok(f"KB_ROOT updated to {kb_root}")
 
 
-# ── Step 4: knowledge folder check ───────────────────────────────────────────
+# ── Step 6: knowledge folder check ───────────────────────────────────────────
 
 BLOCKLIST = {
     "agents", ".git", "__pycache__", ".ds_store", "node_modules",
@@ -209,7 +307,7 @@ INCLUDE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
                 ".csv", ".boxnote", ".ppt", ".doc"}
 
 def check_knowledge_folders(kb_root: pathlib.Path, yes: bool):
-    hdr("④ Checking knowledge folders")
+    hdr("⑥ Checking knowledge folders")
     folders = [
         p for p in sorted(kb_root.iterdir())
         if p.is_dir()
@@ -242,10 +340,10 @@ def check_knowledge_folders(kb_root: pathlib.Path, yes: bool):
         info("Skipping — you can add folders and run `python3 generate.py` later")
 
 
-# ── Step 5: run generate.py ───────────────────────────────────────────────────
+# ── Step 7: run generate.py ───────────────────────────────────────────────────
 
 def run_generate(yes: bool):
-    hdr("⑤ Running generate.py  (builds indexes + installs Bob skill)")
+    hdr("⑦ Running generate.py  (builds indexes + installs agent skill)")
     gen = SCRIPT_DIR / "generate.py"
     if not gen.exists():
         err("generate.py not found — cannot continue")
@@ -322,18 +420,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Examples:
-              python3 setup.py                    # interactive
+              python3 setup.py                    # interactive (recommended)
               python3 setup.py --yes              # non-interactive (all defaults)
-              python3 setup.py --kb-root /data/kb # use an existing folder as root
+              python3 setup.py --kb-root /data/kb # skip the root folder prompt
         """),
     )
     parser.add_argument("--yes",     action="store_true",
-                        help="Non-interactive: accept all defaults")
+                        help="Non-interactive: accept all defaults (passthrough mode)")
     parser.add_argument("--kb-root", type=str, default=None,
-                        help="Absolute path to use as KB_ROOT (defaults to repo dir)")
+                        help="Absolute path to use as KB_ROOT (skips the folder prompt)")
     args = parser.parse_args()
 
-    kb_root = pathlib.Path(args.kb_root).resolve() if args.kb_root else SCRIPT_DIR
+    cli_kb_root = pathlib.Path(args.kb_root).resolve() if args.kb_root else None
 
     print(_color("1;36", "\n╔══════════════════════════════════════════╗"))
     print(_color("1;36",   "║   KnowledgeBase Agent — Setup            ║"))
@@ -341,7 +439,9 @@ def main():
 
     check_python()
     install_deps()
-    setup_env(kb_root, args.yes)
+    kb_root     = choose_kb_root(cli_kb_root, args.yes)
+    llm_config  = choose_llm(args.yes)
+    setup_env(kb_root, llm_config)
     check_knowledge_folders(kb_root, args.yes)
     run_generate(args.yes)
     install_install_skill()
