@@ -228,6 +228,10 @@ def ensure_readme(folder: pathlib.Path) -> pathlib.Path:
 def should_skip(path: pathlib.Path) -> bool:
     return any(p in path.name.lower() for p in SKIP_PATTERNS)
 
+def is_readme(path: pathlib.Path) -> bool:
+    """Return True if this path is a README file (should not be indexed as a doc)."""
+    return "readme" in path.name.lower() or path.name.lower() == path.parent.name.lower() + ".md"
+
 def human_size(size_bytes: int) -> str:
     if size_bytes < 1024:
         return f"{size_bytes} B"
