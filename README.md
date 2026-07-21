@@ -253,26 +253,25 @@ Offline (local LLM) mode:
 git clone <repo-url>
 cd knowledgebase-agent
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure your environment
-cp .env.example .env
-# Edit .env -- set KB_ROOT to the absolute path of this repo, and configure your LLM
-
-# 4. Add your knowledge folders (any top-level folder with documents)
+# 2. Add your knowledge folders (any top-level folder with documents)
 mkdir "My Domain"
 cp /path/to/your/docs/*.pdf "My Domain/"
 
-# 5. Run the generator -- discovers folders, builds indexes, generates agents + Bob skill
-python3 generate.py
-
-# 6. Ask a question via CLI
-python3 agents/agent_knowledgebase.py "your question here"
+# 3. Run the one-command installer
+python3 setup.py
 ```
 
-After `generate.py` runs, the Bob skill is auto-installed to `~/.bob/skills/knowledgebase-agent/SKILL.md`
-and you can ask questions directly in Bob.
+`setup.py` handles everything automatically:
+- installs Python dependencies
+- creates `.env` with `KB_ROOT` pre-filled to the repo location
+- prompts for your LLM choice (Ollama / OpenAI / Anthropic / passthrough)
+- runs `generate.py` — builds vector indexes, installs the Bob skill
+
+After setup, the Bob skill is live at `~/.bob/skills/knowledgebase-agent/SKILL.md`.
+Ask questions directly in Bob: `"What does my KnowledgeBase say about X?"`
+or via CLI: `python3 agents/agent_knowledgebase.py "your question here"`
+
+**No local LLM required** — passthrough mode lets Bob's Claude answer using retrieved context.
 
 ---
 
