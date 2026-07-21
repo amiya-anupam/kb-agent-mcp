@@ -133,7 +133,15 @@ def choose_kb_root(cli_kb_root: pathlib.Path | None, yes: bool) -> pathlib.Path:
     elif choice == "3":
         raw = ask("Full path for the new folder", str(pathlib.Path.home() / "KnowledgeBase"))
         path = pathlib.Path(raw).expanduser().resolve()
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            err(f"Permission denied: cannot create '{path}'")
+            err(f"Choose a path inside your home directory, e.g. ~/KnowledgeBase")
+            sys.exit(1)
+        except OSError as e:
+            err(f"Could not create folder '{path}': {e}")
+            sys.exit(1)
         ok(f"Created and set KB root to: {path}")
         return path
 
@@ -353,7 +361,12 @@ def run_generate(yes: bool):
     # user can run `python3 generate.py` separately to enrich descriptions.
     rc = run([sys.executable, str(gen)] + flags)
     if rc != 0:
-        err("generate.py exited with errors. See output above.")
+        err("generate.py exited with an error (see output above).")
+        err("Common causes:")
+        err("  • KB_ROOT in .env points to a folder that doesn't exist")
+        err("  • No knowledge subfolders with documents were found")
+        err("  • A required Python package is missing (re-run: pip install -r requirements.txt)")
+        err("Re-run manually to see the full error:  python3 generate.py")
         sys.exit(1)
     ok("generate.py completed")
 

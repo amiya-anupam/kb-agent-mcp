@@ -141,7 +141,15 @@ def _load_summary_cache() -> dict:
 
 def _save_summary_cache(cache: dict):
     SUMMARY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SUMMARY_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    try:
+        SUMMARY_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except (PermissionError, OSError) as e:
+        print(
+            f"[KB Watcher] ✗ Could not write summary cache: {e}\n"
+            f"  Path: {SUMMARY_CACHE_PATH}\n"
+            f"  Summaries will be regenerated next run.",
+            flush=True,
+        )
 
 # ── Domain meta helpers ───────────────────────────────────────────────────────
 
@@ -155,7 +163,15 @@ def _load_domain_meta() -> dict:
 
 def _save_domain_meta(meta: dict):
     DOMAIN_META_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DOMAIN_META_PATH.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        DOMAIN_META_PATH.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (PermissionError, OSError) as e:
+        print(
+            f"[KB Watcher] ✗ Could not write domain_meta.json: {e}\n"
+            f"  Path: {DOMAIN_META_PATH}\n"
+            f"  Domain routing changes will not persist until this is fixed.",
+            flush=True,
+        )
 
 # ── Folder / file helpers ─────────────────────────────────────────────────────
 
@@ -905,6 +921,16 @@ class KBHandler(FileSystemEventHandler):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    if not WATCH_ROOT.exists():
+        env_file = SCRIPT_DIR / ".env"
+        print(f"[KB Watcher] ✗ WATCH_ROOT does not exist: {WATCH_ROOT}", flush=True)
+        if env_file.exists():
+            print(f"[KB Watcher]   Check KB_ROOT in your .env: {env_file}", flush=True)
+        else:
+            print(f"[KB Watcher]   Set KB_ROOT in {SCRIPT_DIR}/.env", flush=True)
+        print(f"[KB Watcher]   Or run:  python3 setup.py   to configure interactively.", flush=True)
+        sys.exit(1)
+
     print(f"[KB Watcher] Starting — watching {WATCH_ROOT}", flush=True)
     print(f"[KB Watcher] LLM: {LLM_PROVIDER} / {MODEL}", flush=True)
     if not _llm_available():

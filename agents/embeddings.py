@@ -179,9 +179,21 @@ def _embed_sentence_transformers(text: str) -> list[float]:
 def get_embedding(text: str) -> list[float]:
     """
     Try embedding backends in order:
-      1. Configured provider (Ollama or OpenAI-compatible)
-      2. sentence-transformers offline fallback
+      1. passthrough mode → sentence-transformers directly (no LLM available)
+      2. Configured provider (Ollama or OpenAI-compatible)
+      3. sentence-transformers offline fallback
     """
+    # passthrough mode has no LLM — go straight to sentence-transformers
+    if LLM_PROVIDER == "passthrough":
+        try:
+            return _embed_sentence_transformers(text)
+        except ImportError:
+            raise RuntimeError(
+                "KB_LLM_PROVIDER=passthrough requires sentence-transformers for embeddings.\n"
+                "Install it with:  pip install sentence-transformers\n"
+                "(This downloads ~80 MB the first time, then works fully offline.)"
+            )
+
     # Try primary provider
     try:
         if LLM_PROVIDER in ("openai", "anthropic", "custom"):

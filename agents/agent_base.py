@@ -378,19 +378,29 @@ def call_llm(messages: list[dict], temperature: float = 0.2) -> str:
 
 def _call_ollama(messages: list[dict], temperature: float) -> str:
     import httpx
-    response = httpx.post(
-        f"{LLM_BASE_URL}/api/chat",
-        json={
-            "model":    MODEL,
-            "messages": messages,
-            "stream":   False,
-            "options":  {"temperature": temperature, "num_ctx": _cb.get("num_ctx")},
-            "think":    False,
-        },
-        timeout=120.0,
-    )
-    response.raise_for_status()
-    return response.json()["message"]["content"].strip()
+    try:
+        response = httpx.post(
+            f"{LLM_BASE_URL}/api/chat",
+            json={
+                "model":    MODEL,
+                "messages": messages,
+                "stream":   False,
+                "options":  {"temperature": temperature, "num_ctx": _cb.get("num_ctx")},
+                "think":    False,
+            },
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()["message"]["content"].strip()
+    except Exception as e:
+        hint = (
+            f"Ollama call failed: {e}\n"
+            f"  URL:   {LLM_BASE_URL}/api/chat\n"
+            f"  Model: {MODEL}\n"
+            f"  Check: is Ollama running? (`ollama serve`)\n"
+            f"         is the model pulled? (`ollama pull {MODEL}`)"
+        )
+        raise RuntimeError(hint) from e
 
 
 def _call_openai_compat(messages: list[dict], temperature: float) -> str:
@@ -401,18 +411,31 @@ def _call_openai_compat(messages: list[dict], temperature: float) -> str:
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
-    response = httpx.post(
-        f"{base}/chat/completions",
-        headers=headers,
-        json={
-            "model":       MODEL,
-            "messages":    messages,
-            "temperature": temperature,
-        },
-        timeout=120.0,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"].strip()
+    try:
+        response = httpx.post(
+            f"{base}/chat/completions",
+            headers=headers,
+            json={
+                "model":       MODEL,
+                "messages":    messages,
+                "temperature": temperature,
+            },
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        missing_key = not API_KEY and LLM_PROVIDER in ("openai", "custom")
+        hint = (
+            f"OpenAI-compatible call failed: {e}\n"
+            f"  URL:   {base}/chat/completions\n"
+            f"  Model: {MODEL}\n"
+        )
+        if missing_key:
+            hint += "  Check: KB_API_KEY is not set in your .env\n"
+        else:
+            hint += "  Check: is KB_API_KEY correct? Is the endpoint reachable?\n"
+        raise RuntimeError(hint) from e
 
 
 def _call_anthropic(messages: list[dict], temperature: float) -> str:
@@ -439,14 +462,24 @@ def _call_anthropic(messages: list[dict], temperature: float) -> str:
     if system:
         payload["system"] = system
 
-    response = httpx.post(
-        f"{LLM_BASE_URL}/v1/messages",
-        headers=headers,
-        json=payload,
-        timeout=120.0,
-    )
-    response.raise_for_status()
-    return response.json()["content"][0]["text"].strip()
+    try:
+        response = httpx.post(
+            f"{LLM_BASE_URL}/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        return response.json()["content"][0]["text"].strip()
+    except Exception as e:
+        hint = (
+            f"Anthropic call failed: {e}\n"
+            f"  URL:   {LLM_BASE_URL}/v1/messages\n"
+            f"  Model: {MODEL}\n"
+            f"  Check: is KB_API_KEY set correctly in your .env?\n"
+            f"         does your key have access to {MODEL}?"
+        )
+        raise RuntimeError(hint) from e
 
 
 # ── Core ask function ─────────────────────────────────────────────────────────
@@ -548,6 +581,11 @@ def ask(
     for r in results:
         file_path = KB_ROOT / r["path"]
         if not file_path.exists():
+            print(
+                f"  [{agent_name}] ⚠ Indexed file no longer on disk, skipping: "
+                f"{r['path']}  (re-run generate.py to update the index)",
+                flush=True,
+            )
             continue
         text = extract_full_text(file_path, max_chars=max_chars)
         context_blocks.append(

@@ -637,8 +637,25 @@ def main():
     print(f"  KB_ROOT: {kb_root}")
     print(f"{'='*60}\n")
 
-    # ── Step 1: discover folders ──────────────────────────────────────────────
-    folders = discover_folders(kb_root, blocklist)
+    # ── Step 1: validate KB_ROOT exists ──────────────────────────────────────
+    if not kb_root.exists():
+        env_file = SCRIPT_DIR / ".env"
+        print(f"✗ KB_ROOT does not exist: {kb_root}")
+        if env_file.exists():
+            print(f"  Check KB_ROOT in your .env file: {env_file}")
+        else:
+            print(f"  Set KB_ROOT in a .env file at: {SCRIPT_DIR}/.env")
+            print(f"  Example:  KB_ROOT=/path/to/your/documents")
+        print(f"  Or run:   python3 setup.py   to configure the path interactively.")
+        sys.exit(1)
+
+    # ── Step 1b: discover folders ─────────────────────────────────────────────
+    try:
+        folders = discover_folders(kb_root, blocklist)
+    except PermissionError as e:
+        print(f"✗ Cannot read KB_ROOT: {e}")
+        print(f"  Check that you have read access to: {kb_root}")
+        sys.exit(1)
     if not folders:
         print(f"✗ No knowledge folders found under {kb_root}")
         print(f"  Create a folder with documents and re-run generate.py")

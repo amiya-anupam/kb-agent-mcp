@@ -44,7 +44,20 @@ def load_domain_meta() -> dict[str, dict]:
         return {}
     try:
         return json.loads(META_PATH.read_text(encoding="utf-8"))
-    except Exception:
+    except json.JSONDecodeError as e:
+        print(
+            f"[KnowledgeBase Agent] ✗ domain_meta.json is corrupt (invalid JSON): {e}\n"
+            f"  Path: {META_PATH}\n"
+            f"  Fix:  python3 generate.py --force",
+            flush=True,
+        )
+        return {}
+    except Exception as e:
+        print(
+            f"[KnowledgeBase Agent] ✗ Could not read domain_meta.json: {e}\n"
+            f"  Path: {META_PATH}",
+            flush=True,
+        )
         return {}
 
 
@@ -259,9 +272,17 @@ def ask_knowledgebase(question: str) -> str:
     history  = get_history()
 
     if not domains:
+        if META_PATH.exists():
+            return (
+                f"No knowledge domains found in domain_meta.json.\n"
+                f"  Path: {META_PATH}\n"
+                f"  The file may be empty or corrupt. Run:\n"
+                f"    python3 generate.py --force"
+            )
         return (
-            "No knowledge domains found. Run `python3 generate.py` first to "
-            "discover folders and generate sub-agents."
+            f"domain_meta.json not found. Run `python3 generate.py` first to "
+            f"discover folders and build the knowledge index.\n"
+            f"  Expected at: {META_PATH}"
         )
 
     # Fast keyword pre-filter
