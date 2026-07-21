@@ -260,18 +260,46 @@ def run_generate(yes: bool):
     ok("generate.py completed")
 
 
+# ── Step 6: install the knowledgebase-install skill ───────────────────────────
+
+def install_install_skill():
+    """Copy agents/install_skill.md → ~/.bob/skills/knowledgebase-install/SKILL.md
+    so that any user who cloned this repo can also guide others through setup."""
+    src = SCRIPT_DIR / "agents" / "install_skill.md"
+    if not src.exists():
+        return  # not fatal — skill body lives in the repo, just not copied yet
+    dest_dir = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-install"
+    dest = dest_dir / "SKILL.md"
+    if dest.exists():
+        ok("knowledgebase-install skill already present")
+        return
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        ok(f"knowledgebase-install skill installed: {dest}")
+    except Exception as e:
+        warn(f"Could not install knowledgebase-install skill: {e}")
+
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 def print_done(kb_root: pathlib.Path):
     skill = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-agent" / "SKILL.md"
+    install_skill = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-install" / "SKILL.md"
     hdr("✅  Setup complete!")
     print()
     if skill.exists():
         print(_color("32", "  Bob skill installed:") + f" {skill}")
+        if install_skill.exists():
+            print(_color("32", "  Install skill installed:") + f" {install_skill}")
         print()
         print("  Ask Bob a question to get started:")
         print("    \"What does my KnowledgeBase say about X?\"")
         print("    \"/kb how does Y work?\"")
+        print()
+        print("  Share this repo with anyone — they just need to say:")
+        print("    \"Here's the repo link, install the skill\"")
+        print("    and any AI tool will guide them through setup.")
     else:
         print("  Bob not detected. You can still use the CLI:")
         print(f"    python3 agents/agent_knowledgebase.py \"your question\"")
@@ -316,6 +344,7 @@ def main():
     setup_env(kb_root, args.yes)
     check_knowledge_folders(kb_root, args.yes)
     run_generate(args.yes)
+    install_install_skill()
     print_done(kb_root)
 
 
