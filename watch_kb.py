@@ -523,20 +523,17 @@ def update_readme(folder: pathlib.Path, cache: dict) -> bool:
 def _purge_folder_artifacts(folder_name: str, cache: dict) -> bool:
     """
     Immediately remove all artifacts for a deleted/renamed folder:
-      - agents/agent_<safe>.py
-      - agents/vector_store/<safe>_index.json
-      - domain_meta.json entry
+      - agents/vector_store/<safe>_index.json  (vector embeddings)
+      - domain_meta.json entry                 (routing + description)
       - all summary cache entries under that folder
+
+    NOTE: There are no per-domain agent_*.py files in this architecture.
+    The orchestrator is data-driven and reads domain_meta.json at runtime.
     Returns True if the summary cache was mutated.
     """
     safe        = folder_to_safe_name(folder_name)
-    agent_file  = AGENTS_DIR / f"agent_{safe}.py"
     index_file  = AGENTS_DIR / "vector_store" / f"{safe}_index.json"
     cache_dirty = False
-
-    if agent_file.exists():
-        agent_file.unlink()
-        print(f"[KB Watcher] 🗑 Deleted agent: {agent_file.name}", flush=True)
 
     if index_file.exists():
         index_file.unlink()
@@ -564,31 +561,19 @@ def _purge_folder_artifacts(folder_name: str, cache: dict) -> bool:
 def _rename_folder_artifacts(old_name: str, new_name: str, cache: dict) -> bool:
     """
     Rename all artifacts when a top-level folder is renamed:
-      - Rename agents/agent_<old>.py → agents/agent_<new>.py  (rewrite content)
-      - Rename _index.json
-      - Update domain_meta.json key
+      - Rename <old>_index.json → <new>_index.json  (rewrite folder/path fields)
+      - Update domain_meta.json key + folder_name / safe_name / agent_name fields
       - Re-key all summary cache entries
+
+    NOTE: There are no per-domain agent_*.py files in this architecture.
+    The orchestrator is data-driven and reads domain_meta.json at runtime.
     Returns True if the summary cache was mutated.
     """
     old_safe = folder_to_safe_name(old_name)
     new_safe = folder_to_safe_name(new_name)
 
-    old_agent = AGENTS_DIR / f"agent_{old_safe}.py"
-    new_agent = AGENTS_DIR / f"agent_{new_safe}.py"
     old_index = AGENTS_DIR / "vector_store" / f"{old_safe}_index.json"
     new_index = AGENTS_DIR / "vector_store" / f"{new_safe}_index.json"
-
-    # Rename / rewrite agent file (folder name is embedded in the content)
-    if old_agent.exists():
-        content = old_agent.read_text(encoding="utf-8")
-        # Update every occurrence of the old folder name and safe name
-        content = content.replace(f'AGENT_FOLDER = "{old_name}"', f'AGENT_FOLDER = "{new_name}"')
-        content = content.replace(f'AGENT_NAME   = "{old_name} Agent"', f'AGENT_NAME   = "{new_name} Agent"')
-        content = content.replace(f'agent_{old_safe}', f'agent_{new_safe}')
-        content = content.replace(old_name, new_name)
-        new_agent.write_text(content, encoding="utf-8")
-        old_agent.unlink()
-        print(f"[KB Watcher] ✏ Renamed agent: {old_agent.name} → {new_agent.name}", flush=True)
 
     # Rename / update index file
     if old_index.exists():
@@ -650,10 +635,16 @@ def run_generate(reason: str):
 
     print(f"[KB Watcher] 🔄 Running generate.py ({reason})...", flush=True)
     try:
+        # Forward KB_ROOT explicitly so the subprocess always knows which root
+        # to scan — even if the parent process set it via a .env file that the
+        # child's setdefault() would not override from an inherited env.
+        env = os.environ.copy()
+        env["KB_ROOT"] = str(WATCH_ROOT)
         result = subprocess.run(
             [sys.executable, str(generate_script)],
             capture_output=False,
             cwd=str(SCRIPT_DIR),
+            env=env,
             timeout=300,
         )
         if result.returncode == 0:

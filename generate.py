@@ -362,6 +362,13 @@ def generate_skill_md(domains: list[dict], agents_dir: pathlib.Path, kb_root: pa
         kw for d in domains for kw in d["keywords"][:3]
     )
 
+    # IMPORTANT: agent_knowledgebase.py lives in SCRIPT_DIR/agents/ — it is
+    # always co-located with generate.py regardless of where KB_ROOT points.
+    # Using kb_root here would produce a broken path when KB_ROOT is an
+    # external folder (e.g. ~/Documents/MyDocs).
+    agent_script = agents_dir / "agent_knowledgebase.py"
+    generate_script = SCRIPT_DIR / "generate.py"
+
     content = f"""\
 ---
 name: knowledgebase-agent
@@ -377,7 +384,7 @@ description: >
   {trigger_keywords}, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
-  python3 {kb_root}/agents/agent_knowledgebase.py "${{QUESTION}}"
+  python3 {agent_script} "${{QUESTION}}"
 ---
 
 # KnowledgeBase Agent Skill
@@ -386,7 +393,7 @@ execute: |
 
 When you ask Bob a question that triggers this skill, Bob runs:
 ```
-python3 {kb_root}/agents/agent_knowledgebase.py "<your question>"
+python3 {agent_script} "<your question>"
 ```
 The Python script handles **all the AI work locally** (routing, retrieval, answering)
 using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays it back.
@@ -400,10 +407,8 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 
 ## Usage
 Just ask naturally — Bob detects the intent and runs the agent:
-- "What is the ACE MCP server?"
-- "Which customers are at risk of churn?"
-- "How does CP4I licensing work?"
-- "Ask the KnowledgeBase agent about ACE licensing"
+- "What does my KnowledgeBase say about X?"
+- "Ask the KnowledgeBase agent about Y"
 
 ## Commands
 - `/kb <question>` — query the knowledge base
@@ -420,9 +425,9 @@ You → Bob (Claude) → detects skill trigger
                              ↓ (if ambiguous)
                         classify_intent() ← your local LLM
                              ↓
-                        search() ← embeddings (local)
+                        agent_base.ask() ← README-first RAG pipeline
                              ↓
-                        call_llm() ← your local LLM answers
+                        call_llm() or passthrough block
                              ↓
                    → Bob reads stdout and returns answer to you
 ```
@@ -431,16 +436,16 @@ You → Bob (Claude) → detects skill trigger
 Knowledge base root: `{kb_root}`
 Domains discovered: {folder_names}
 
-To add a new domain: add a folder with documents to `{kb_root}`, then run:
+To add a new domain: create a folder with documents in `{kb_root}`, then run:
 ```
-python3 {kb_root}/generate.py
+python3 {generate_script}
 ```
 
 ## Technical Details
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
 - LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER`
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)
-- Invocation: `python3 {kb_root}/agents/agent_knowledgebase.py "<question>"`
+- Invocation: `python3 {agent_script} "<question>"`
 """
 
     # Write to agents/SKILL.md (in-repo copy)
