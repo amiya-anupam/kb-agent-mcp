@@ -15,6 +15,15 @@ Usage (interactive chat):
 Usage (single question — called by Bob skill or any AI agent):
   python3 agents/agent_knowledgebase.py "your question"
 
+Usage (single question with explicit format):
+  python3 agents/agent_knowledgebase.py "your question" --format table
+  python3 agents/agent_knowledgebase.py "your question" --format bullets
+  python3 agents/agent_knowledgebase.py "your question" --format oneline
+  python3 agents/agent_knowledgebase.py "your question" --format paragraph
+
+  Natural-language intent phrases are also detected automatically:
+    "give me a table", "as bullet points", "in one sentence", etc.
+
 Usage (clear session memory):
   python3 agents/agent_knowledgebase.py --clear
 """
@@ -65,6 +74,89 @@ def get_domains() -> list[dict]:
     """Return list of domain dicts from domain_meta.json."""
     meta = load_domain_meta()
     return list(meta.values())
+
+
+# ── Format intent detection ───────────────────────────────────────────────────
+
+# Map each canonical format name to the instruction injected into the system prompt.
+_FORMAT_INSTRUCTIONS: dict[str, str] = {
+    "table":     "Format your entire answer as a Markdown table with clear column headers. "
+                 "Do not use prose paragraphs — the response must be a table.",
+    "bullets":   "Format your entire answer as a concise Markdown bullet list. "
+                 "Use short, scannable bullet points. Do not use prose paragraphs.",
+    "oneline":   "Answer in exactly ONE sentence. Be direct and specific. "
+                 "Do not add any explanation, preamble, or follow-up.",
+    "paragraph": "Write your answer as clear prose paragraphs. "
+                 "Do not use bullet points or tables.",
+    "numbered":  "Format your entire answer as a numbered Markdown list. "
+                 "Each item should be a concise, self-contained point.",
+    "json":      "Return your answer as valid JSON only. No markdown fences, no prose. "
+                 "Choose a sensible structure (array of objects or flat object) for the content.",
+}
+
+# Natural-language phrases that map to a format name.
+# Checked in order — first match wins.
+_FORMAT_PHRASE_MAP: list[tuple[re.Pattern, str]] = [
+    # table
+    (re.compile(r"\b(as a table|in (a )?table (format|form)?|give me a table|show (it|that|results?) as a table)\b", re.IGNORECASE), "table"),
+    # bullets
+    (re.compile(r"\b(as bullet[- ]?points?|in bullet[- ]?points?|bullet[- ]?point (format|form|list)?|as a (bullet )?list)\b", re.IGNORECASE), "bullets"),
+    # one line / one sentence
+    (re.compile(r"\b(in one sentence|as one sentence|one[- ]liner|one[- ]line (answer|summary)?|in a single sentence|briefly in one sentence|give me (a )?(quick |short )?one[- ]?liner)\b", re.IGNORECASE), "oneline"),
+    # numbered list
+    (re.compile(r"\b(as a numbered list|in a numbered list|number (the |each )?(items?|points?|steps?))\b", re.IGNORECASE), "numbered"),
+    # json
+    (re.compile(r"\b(as (valid )?json|in json( format)?|return (as )?json)\b", re.IGNORECASE), "json"),
+    # paragraph (explicit request — paragraphs are the default but allow explicit override)
+    (re.compile(r"\b(as (prose )?paragraphs?|in paragraph (format|form)?)\b", re.IGNORECASE), "paragraph"),
+]
+
+# --format flag alias normalisation (accepts shorthands like "bullet", "1line", etc.)
+_FORMAT_ALIASES: dict[str, str] = {
+    "bullet":    "bullets",
+    "bullet-points": "bullets",
+    "list":      "bullets",
+    "1line":     "oneline",
+    "one-line":  "oneline",
+    "one-liner": "oneline",
+    "1liner":    "oneline",
+    "prose":     "paragraph",
+    "paragraphs": "paragraph",
+    "num":       "numbered",
+    "numbered-list": "numbered",
+}
+
+
+def detect_format_intent(question: str, explicit_flag: str | None = None) -> tuple[str, str]:
+    """
+    Detect the desired answer format from an explicit --format flag or
+    natural-language phrases embedded in the question text.
+
+    Returns:
+        (clean_question, format_instruction)
+
+    clean_question       — question with any intent phrases left intact
+                           (they are part of the user's phrasing, not noise)
+    format_instruction   — instruction string to append to the system prompt,
+                           or "" when no format preference is detected.
+    """
+    # 1. Explicit --format flag takes highest priority
+    if explicit_flag:
+        key = explicit_flag.strip().lower()
+        key = _FORMAT_ALIASES.get(key, key)
+        instruction = _FORMAT_INSTRUCTIONS.get(key, "")
+        if instruction:
+            print(f"[KnowledgeBase Agent] Format: {key} (--format flag)")
+        return question, instruction
+
+    # 2. Scan question for natural-language intent phrases
+    for pattern, fmt_key in _FORMAT_PHRASE_MAP:
+        if pattern.search(question):
+            instruction = _FORMAT_INSTRUCTIONS[fmt_key]
+            print(f"[KnowledgeBase Agent] Format: {fmt_key} (detected from question)")
+            return question, instruction
+
+    return question, ""
 
 
 # ── Fast keyword router ────────────────────────────────────────────────────────
@@ -201,12 +293,38 @@ def _build_system_prompt(domain_meta: dict) -> str:
     )
 
 
-def call_sub_agent(domain: str, question: str, history: list[dict]) -> dict:
+def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
+    """
+    Append a format instruction to a system prompt.
+
+    The instruction is appended as a clearly separated directive so it
+    overrides any generic formatting guidance in the base prompt without
+    rewriting the whole prompt.  Returns the prompt unchanged when
+    format_instruction is empty.
+    """
+    if not format_instruction:
+        return system_prompt
+    return system_prompt + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
+
+
+def call_sub_agent(
+    domain: str,
+    question: str,
+    history: list[dict],
+    format_instruction: str = "",
+) -> dict:
     """
     Dispatch a question to the handler for a single domain.
 
     Reads domain config from domain_meta.json and calls agent_base.ask()
     directly — no per-domain .py file required.
+
+    Args:
+        domain:             Domain folder name to query.
+        question:           The user's question.
+        history:            Conversation history for multi-turn context.
+        format_instruction: Optional format directive injected into the
+                            system prompt (from detect_format_intent).
     """
     meta = load_domain_meta()
     domain_cfg = meta.get(domain)
@@ -224,11 +342,14 @@ def call_sub_agent(domain: str, question: str, history: list[dict]) -> dict:
     sys.path.insert(0, str(pathlib.Path(__file__).parent))
     from agent_base import ask as _base_ask
 
+    base_prompt    = domain_cfg.get("system_prompt") or _build_system_prompt(domain_cfg)
+    final_prompt   = _apply_format_instruction(base_prompt, format_instruction)
+
     return _base_ask(
         question             = question,
         folder_name          = domain_cfg["folder_name"],
         agent_name           = domain_cfg.get("agent_name", domain + " Agent"),
-        system_prompt        = domain_cfg.get("system_prompt") or _build_system_prompt(domain_cfg),
+        system_prompt        = final_prompt,
         conversation_history = history,
         top_n                = domain_cfg.get("top_n", 4),
         max_chars            = domain_cfg.get("max_chars", 6000),
@@ -239,14 +360,15 @@ def run_agents_parallel(
     domain_names: list[str],
     question: str,
     history: list[dict],
+    format_instruction: str = "",
 ) -> list[dict]:
     if len(domain_names) == 1:
-        return [call_sub_agent(domain_names[0], question, history)]
+        return [call_sub_agent(domain_names[0], question, history, format_instruction)]
 
     results = []
     with ThreadPoolExecutor(max_workers=len(domain_names)) as executor:
         futures = {
-            executor.submit(call_sub_agent, domain, question, history): domain
+            executor.submit(call_sub_agent, domain, question, history, format_instruction): domain
             for domain in domain_names
         }
         for future in as_completed(futures):
@@ -297,8 +419,17 @@ def merge_answers(results: list[dict], domains: list[dict]) -> str:
 
 # ── Main orchestrator ──────────────────────────────────────────────────────────
 
-def ask_knowledgebase(question: str) -> str:
-    """Full pipeline: classify → route → run sub-agents → merge → return answer."""
+def ask_knowledgebase(question: str, format_flag: str | None = None) -> str:
+    """
+    Full pipeline: detect format → classify → route → run sub-agents → merge → return answer.
+
+    Args:
+        question:    The user's question (may contain natural-language format phrases).
+        format_flag: Explicit format name from --format CLI flag, or None.
+                     Supported values: table | bullets | oneline | paragraph | numbered | json
+                     (and their aliases).  Natural-language detection always runs in parallel
+                     and is used when format_flag is None.
+    """
     domains  = get_domains()
     history  = get_history()
 
@@ -315,6 +446,9 @@ def ask_knowledgebase(question: str) -> str:
             f"discover folders and build the knowledge index.\n"
             f"  Expected at: {META_PATH}"
         )
+
+    # Detect format intent (explicit flag takes priority over phrase detection)
+    question, format_instruction = detect_format_intent(question, explicit_flag=format_flag)
 
     # Fast keyword pre-filter — skip the LLM routing call when confident
     kw_domains, kw_confident = _keyword_confidence(question, domains)
@@ -338,7 +472,7 @@ def ask_knowledgebase(question: str) -> str:
     if len(domain_names) > 1:
         print(f"[{AGENT_NAME}] Running {len(domain_names)} agents in parallel...")
 
-    results = run_agents_parallel(domain_names, question, history)
+    results = run_agents_parallel(domain_names, question, history, format_instruction)
     for r in results:
         status = "✓ found" if r.get("found") else "✗ not found"
         print(f"[{r['agent']}] {status}")
@@ -359,6 +493,7 @@ def run_interactive():
     else:
         print(f"  ⚠ No domains found — run python3 generate.py first")
     print(f"  Type 'exit' · 'clear' to reset memory · 'memory' to show history")
+    print(f"  Tip: prefix your question with --format <table|bullets|oneline|paragraph|numbered|json>")
     print(f"{'='*60}")
     print(f"  {summary()}\n")
 
@@ -381,19 +516,44 @@ def run_interactive():
             print(summary())
             continue
 
-        answer = ask_knowledgebase(question)
+        # Allow inline --format flag in interactive mode: "What is ACE? --format table"
+        fmt_flag = None
+        fmt_match = re.search(r"--format\s+(\S+)", question, re.IGNORECASE)
+        if fmt_match:
+            fmt_flag = fmt_match.group(1)
+            question = question[:fmt_match.start()].strip() + question[fmt_match.end():].strip()
+            question = question.strip()
+
+        answer = ask_knowledgebase(question, format_flag=fmt_flag)
         print(f"\nKnowledgeBase Agent:\n{answer}\n")
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        arg = " ".join(sys.argv[1:])
+        # Parse --format flag from CLI args
+        args       = sys.argv[1:]
+        fmt_flag   = None
+        clean_args = []
+        i = 0
+        while i < len(args):
+            if args[i] == "--format" and i + 1 < len(args):
+                fmt_flag = args[i + 1]
+                i += 2
+            elif args[i].startswith("--format="):
+                fmt_flag = args[i].split("=", 1)[1]
+                i += 1
+            else:
+                clean_args.append(args[i])
+                i += 1
+
+        arg = " ".join(clean_args)
+
         if arg.strip() == "--clear":
             clear()
             sys.exit(0)
         if arg.strip() == "--memory":
             print(summary())
             sys.exit(0)
-        print(ask_knowledgebase(arg))
+        print(ask_knowledgebase(arg, format_flag=fmt_flag))
     else:
         run_interactive()
