@@ -164,6 +164,8 @@ After running `setup.py`, your `.env` file is created automatically. Edit it to 
 | `KB_API_KEY` | _(empty)_ | API key for OpenAI / Anthropic / custom providers |
 | `KB_EMBED_MODEL` | `nomic-embed-text` | Embedding model (leave blank for offline fallback) |
 | `KB_IGNORE_FOLDERS` | _(empty)_ | Comma-separated extra folders to exclude from discovery |
+| `KB_STALE_DAYS` | `90` | Days before a file is flagged as stale by `watch_kb.py` (0 = disabled) |
+| `KB_PASSTHROUGH_FALLBACK` | `true` | Auto-switch to passthrough when Ollama unreachable (`false` = disable) |
 
 ### Token budget variables (`agents/context_budget.py`)
 
@@ -228,6 +230,49 @@ python3 agents/agent_knowledgebase.py --clear
 python3 agents/agent_knowledgebase.py --memory
 ```
 
+### Structured Answer Format
+
+Control how the LLM formats its answer with a `--format` flag or natural-language phrases.
+
+**Explicit flag (CLI):**
+```bash
+python3 agents/agent_knowledgebase.py "What does CP4I include?" --format table
+python3 agents/agent_knowledgebase.py "List ACE deployment steps"  --format bullets
+python3 agents/agent_knowledgebase.py "What is the ACE toolkit?"   --format oneline
+python3 agents/agent_knowledgebase.py "Explain MQ integration"     --format paragraph
+python3 agents/agent_knowledgebase.py "List supported file types"  --format numbered
+python3 agents/agent_knowledgebase.py "Show renewal data"          --format json
+```
+
+**Inline flag (interactive mode):**
+```
+You: What does CP4I include? --format table
+You: List ACE deployment steps --format bullets
+```
+
+**Natural-language phrases (no flag needed):**
+```
+"Compare ACE and CP4I as a table"
+"Give me bullet points on the toolkit"
+"In one sentence, what is ACE?"
+"Return the renewal figures as json"
+"As a numbered list, what are the deployment steps?"
+```
+
+| Format | Aliases | Output style |
+|---|---|---|
+| `table` | — | Markdown table with headers |
+| `bullets` | `bullet`, `list` | Markdown bullet list |
+| `oneline` | `1line`, `one-line`, `one-liner` | Exactly one sentence |
+| `paragraph` | `prose`, `paragraphs` | Prose paragraphs (default) |
+| `numbered` | `num`, `numbered-list` | Numbered Markdown list |
+| `json` | — | Raw JSON, no fences |
+
+> The format directive is injected as a highest-priority instruction in the system prompt
+> before the LLM call. It works in both online (Ollama / OpenAI / Anthropic) and offline
+> (passthrough) modes — the directive is embedded in the `SYSTEM_PROMPT` block of the
+> passthrough output so the calling AI tool also honours it.
+
 ---
 
 ## Watcher (auto-update on file changes)
@@ -245,6 +290,19 @@ Watches `KB_ROOT` for filesystem events and keeps everything in sync — no manu
 | New top-level folder created | Triggers `generate.py` automatically |
 | Folder deleted | Removes index and domain metadata |
 | Folder renamed | Renames index, re-keys domain metadata |
+
+### Stale file alerts
+
+The watcher automatically checks all indexed files against a configurable age threshold:
+
+- **Startup:** checks all files when `watch_kb.py` launches
+- **Hourly:** re-checks every 60 minutes while the watcher is running
+- **Output:** prints a warning for each file over the threshold, e.g.:
+  ```
+  ⚠ BizOps: Q3_Renewal_Tracker.xlsx was last updated 112 days ago.
+  ```
+- **Disable:** set `KB_STALE_DAYS=0` in `.env`
+- **Threshold:** default 90 days, configurable via `KB_STALE_DAYS`
 
 > **macOS note:** The watcher runs as a `launchd` daemon (`com.knowledgebase.watcher`).
 > Restart with `launchctl stop/start com.knowledgebase.watcher`.
@@ -288,6 +346,7 @@ Watches `KB_ROOT` for filesystem events and keeps everything in sync — no manu
 |                                                       |
 |  agent_knowledgebase.py  (orchestrator)               |
 |    reads domain_meta.json to discover all domains     |
+|    detect_format_intent() -- --format flag or NL      |
 |    keyword_route()   -- fast match, no LLM            |
 |    classify_intent() -- Ollama call only if ambiguous |
 |    dispatches to agent_base.ask() per domain          |
@@ -300,6 +359,8 @@ Watches `KB_ROOT` for filesystem events and keeps everything in sync — no manu
 |      complex question -> full README (up to 24k chars)|
 |    Strategy 2: vector search  (fallback)              |
 |      cosine similarity over *_index.json              |
+|    format directive injected into system_prompt       |
+|    confidence footer (High/Medium/Low) appended       |
 |    calls Ollama or emits passthrough block            |
 |                                                       |
 |  agents/vector_store/                                 |
@@ -357,15 +418,22 @@ AI tool / Bob's Claude  [cloud]
  v
 agent_knowledgebase.py  [local]
  |
+ +---> detect_format_intent()
+ |       --format flag (explicit) or NL phrase scan
+ |       returns format_instruction string (empty = no preference)
+ |
  +---> keyword_route()
  |       scan question against domain keywords in domain_meta.json
  |       fast O(1) match, no LLM involved
  |
  +---> classify_intent()  [only if keyword route is ambiguous]
- |       calls local LLM
+ |       calls local LLM (uses file_summaries for richer routing)
  |       returns: which domain(s) to route to
  |
  +---> dispatch to domain agent(s) via agent_base.ask()
+         |
+         +-- format_instruction injected into system_prompt
+         |     _apply_format_instruction() appends OUTPUT FORMAT DIRECTIVE
          |
          +-- README-first strategy  (primary)
          |     find <Folder>/README.md
@@ -373,14 +441,18 @@ agent_knowledgebase.py  [local]
          |     complex question  -> full README up to 24,000 chars
          |
          +-- vector search fallback  (if README absent or too thin)
-               query *_index.json by cosine similarity
-               extract full text from top-N matched files
+         |     query *_index.json by cosine similarity
+         |     extract full text from top-N matched files
+         |
+         +-- confidence footer appended to answer
+               High (≥0.80) / Medium (≥0.60) / Low (<0.60)
+               README-first: source-only footer (no label)
          |
          v
        Local LLM (Ollama) OR passthrough block -> calling AI tool
          |
          v
-Answer delivered
+ Answer delivered
 ```
 
 ### Passthrough mode — when no local LLM is running
@@ -502,3 +574,150 @@ NameError: name 'is_readme' is not defined. Did you mean: 'find_readme'?
 The watcher stayed alive but stopped responding to all filesystem events.
 
 **Fix:** Added the missing `is_readme(path)` helper. **If you cloned before commit `cf1ef9e`:** run `git pull` and restart the watcher.
+
+---
+
+## Changelog
+
+All notable changes to this project are listed here, newest first.
+
+---
+
+### `f6acfdf` — Structured Answer Format Flag _(latest)_
+
+**What changed:** `agents/agent_knowledgebase.py`
+
+Added the ability to control how the LLM formats its answer — via a `--format` CLI flag, an inline `--format` in interactive mode, or by including a natural-language phrase in your question.
+
+**New functions:**
+
+| Function | Location | Purpose |
+|---|---|---|
+| `detect_format_intent(question, explicit_flag)` | `agent_knowledgebase.py` | Detects `--format` flag or NL phrases; returns `(question, instruction)` |
+| `_apply_format_instruction(system_prompt, instruction)` | `agent_knowledgebase.py` | Appends `OUTPUT FORMAT DIRECTIVE` to system prompt |
+
+**Supported formats:**
+
+| `--format` | Aliases | LLM instruction |
+|---|---|---|
+| `table` | — | Markdown table with column headers |
+| `bullets` | `bullet`, `list` | Markdown bullet list |
+| `oneline` | `1line`, `one-line`, `one-liner` | Exactly one sentence |
+| `paragraph` | `prose`, `paragraphs` | Prose paragraphs |
+| `numbered` | `num`, `numbered-list` | Numbered Markdown list |
+| `json` | — | Raw JSON output |
+
+**Key behaviours:**
+- Explicit `--format` flag takes priority over any NL phrase in the question text
+- Unknown `--format` values are silently ignored — no crash
+- The directive is injected into `system_prompt` before `agent_base.ask()` is called, so it works in **both online and offline (passthrough) modes** — passthrough output already carries it in its `SYSTEM_PROMPT` block
+- `call_sub_agent`, `run_agents_parallel`, and `ask_knowledgebase` all accept the `format_instruction` / `format_flag` parameter — the full call chain is wired
+
+**Usage examples:**
+```bash
+python3 agents/agent_knowledgebase.py "What does CP4I include?" --format table
+python3 agents/agent_knowledgebase.py "List ACE steps" --format=bullets
+```
+```
+# Interactive
+You: What is ACE? --format oneline
+```
+```
+# Natural language (no flag)
+"Compare ACE and CP4I as a table"
+"In one sentence, what is the ACE toolkit?"
+```
+
+---
+
+### `a50127c` — Stale File Watcher Alert
+
+**What changed:** `watch_kb.py`, `.env.example`
+
+Added automatic detection and warning for files that have not been modified within a configurable number of days.
+
+**New function:** `check_stale_files(folders)` — iterates all indexed files using `gather_files()`, reads `st_mtime`, returns human-readable warning strings for any file over the threshold.
+
+**Key behaviours:**
+- Runs at **startup** (when `watch_kb.py` launches) and **hourly** (every `_STALE_CHECK_INTERVAL = 3600` seconds)
+- Threshold: `KB_STALE_DAYS` env var (default `90`). Set to `0` to disable entirely
+- `KBHandler._next_stale_check` stores the next scheduled check timestamp
+- `dispatch_pending()` step 6 fires the hourly re-scan
+- `.env.example` updated with `KB_STALE_DAYS` documentation
+
+**Example output:**
+```
+[KB Watcher] ⚠ Stale files detected:
+  ⚠ BizOps: Q3_Renewal_Tracker.xlsx was last updated 112 days ago.
+  ⚠ BizOps: Pipeline_Report_Q1.xlsx was last updated 97 days ago.
+```
+
+---
+
+### `f7d29b1` — Confidence Score in Answer Footer
+
+**What changed:** `agents/agent_base.py`, `agents/agent_knowledgebase.py`
+
+Every answer now ends with a confidence footer showing how certain the retrieval was.
+
+**New function:** `format_confidence_footer(sources)` — maps cosine score to a label and formats a source citation line.
+
+| Score | Label | Example footer |
+|---|---|---|
+| ≥ 0.80 | **High** | `🎯 Confidence: High (0.87) — Source: doc.pdf` |
+| ≥ 0.60 | **Medium** | `🎯 Confidence: Medium (0.71) — Source: doc.pdf` |
+| < 0.60 | **Low** | `🎯 Confidence: Low (0.54) — Source: doc.pdf` |
+| = 1.0 (README-first) | _(no label)_ | `📄 Source: README index (ACE Docs.md)` |
+
+**Key behaviours:**
+- `ask()` in `agent_base.py` attaches `confidence_footer` key to every return dict
+- `merge_answers()` in `agent_knowledgebase.py` appends it to the final answer
+- Passthrough path is unaffected — confidence footer is only relevant when a local LLM answered
+
+---
+
+### `202811e` — Auto-Summarise Files on Ingest
+
+**What changed:** `generate.py`, `agents/agent_knowledgebase.py`
+
+When `generate.py` runs, it now generates a one-sentence LLM summary for every indexed file and stores it in `agents/vector_store/file_summaries.json`. The routing agent uses these summaries to make smarter domain decisions.
+
+**New functions in `generate.py`:**
+
+| Function | Purpose |
+|---|---|
+| `generate_file_summary(file_path)` | Extracts a text snippet and calls the LLM for a one-sentence summary |
+| `build_file_summaries(folders, no_llm)` | Iterates all files, applies MD5 content-hash caching, writes `file_summaries.json` |
+
+**Key behaviours:**
+- Summaries are **hash-cached** — the LLM is only called when a file changes (MD5 of content)
+- Skipped entirely when `--no-llm` is passed to `generate.py`
+- `classify_intent()` in `agent_knowledgebase.py` includes up to 10 per-file summaries per domain in the routing prompt — the router now matches question content against actual file contents, not just folder-level keywords
+
+---
+
+### `045d9de` — Token Efficiency Optimisations (3 improvements)
+
+**What changed:** `agents/context_budget.py`, `agents/agent_base.py`, `watch_kb.py`
+
+Three targeted changes that reduced per-query token consumption by 48–77% for the common case:
+
+1. **README index mode** — simple questions use only the `AUTO-INDEX` block + brief intro (~2,000 tokens) instead of the full README (~6,000 tokens)
+2. **Collapse rules** — repeated/versioned files (e.g. weekly reports) are grouped into a single summary row in the AUTO-INDEX table
+3. **Narrow complex-question patterns** — `_COMPLEX_QUESTION_PATTERNS` regex was made intentionally narrow so casual phrasing ("tell me about", "describe") no longer triggers the expensive full-README path
+
+---
+
+### `cfa5787` — Comprehensive Error Handling
+
+**What changed:** `agents/agent_base.py`, `agents/agent_knowledgebase.py`, `agents/embeddings.py`, `agents/memory.py`, `watch_kb.py`, `generate.py`
+
+Added actionable error messages with `Fix:` hints across all 6 core files. File permission errors, missing LLM endpoints, and corrupt JSON now print a human-readable diagnosis instead of a raw traceback.
+
+---
+
+### `cf1ef9e` — `is_readme` NameError fix in `watch_kb.py`
+
+**Symptom:** Adding/modifying/deleting files inside an existing folder silently crashed the watcher observer thread after startup.
+
+**Fix:** Added the missing `is_readme(path)` helper that checks whether a given path is a README file (prevents infinite update loops when the watcher writes READMEs itself).
