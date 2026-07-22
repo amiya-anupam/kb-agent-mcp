@@ -491,6 +491,56 @@ def _call_anthropic(messages: list[dict], temperature: float) -> str:
         raise RuntimeError(hint) from e
 
 
+# ── Confidence footer ─────────────────────────────────────────────────────────
+
+def format_confidence_footer(sources: list[dict]) -> str:
+    """
+    Build a human-readable confidence footer from a sources list.
+
+    Uses the top source's score (0.0–1.0 cosine similarity) to assign a
+    label and returns a single footer line, e.g.:
+
+        Confidence: High (0.87) — Source: Q3_Renewal_Tracker.xlsx
+
+    For README-first results the score is 1.0 and the label is omitted
+    (the source IS the authoritative document — no retrieval uncertainty).
+
+    Score thresholds:
+        ≥ 0.80  → High
+        ≥ 0.60  → Medium
+        < 0.60  → Low
+    """
+    if not sources:
+        return ""
+
+    top = sources[0]
+    score = top.get("score", 0.0)
+    name  = top.get("name", "unknown")
+
+    # README-first path sets score=1.0 to signal "authoritative, no vector search"
+    # Show source without a confidence label in that case.
+    if score >= 1.0:
+        return f"\n\n---\n📄 **Source:** `{name}`"
+
+    if score >= 0.80:
+        label = "High"
+    elif score >= 0.60:
+        label = "Medium"
+    else:
+        label = "Low"
+
+    # Include up to 2 additional sources if present
+    extra = sources[1:3]
+    extra_str = ""
+    if extra:
+        extra_str = " · " + " · ".join(f"`{s['name']}`" for s in extra)
+
+    return (
+        f"\n\n---\n🎯 **Confidence:** {label} ({score:.2f})"
+        f" — **Source:** `{name}`{extra_str}"
+    )
+
+
 # ── Core ask function ─────────────────────────────────────────────────────────
 
 def ask(
@@ -562,11 +612,13 @@ def ask(
 
         answer = call_llm(messages)
 
+        readme_sources = [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}]
         return {
-            "agent":   agent_name,
-            "answer":  answer,
-            "sources": [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}],
-            "found":   True,
+            "agent":              agent_name,
+            "answer":             answer,
+            "sources":            readme_sources,
+            "confidence_footer":  format_confidence_footer(readme_sources),
+            "found":              True,
         }
 
     # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
@@ -639,8 +691,9 @@ def ask(
     answer = call_llm(messages)
 
     return {
-        "agent":   agent_name,
-        "answer":  answer,
-        "sources": sources,
-        "found":   True,
+        "agent":             agent_name,
+        "answer":            answer,
+        "sources":           sources,
+        "confidence_footer": format_confidence_footer(sources),
+        "found":             True,
     }

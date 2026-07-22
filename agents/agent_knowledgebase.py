@@ -285,21 +285,13 @@ def merge_answers(results: list[dict], domains: list[dict]) -> str:
 
     if len(found) == 1:
         r = found[0]
-        sources_text = ""
-        if r.get("sources"):
-            sources_text = "\n\n---\n**Sources:** " + " · ".join(
-                f"`{s['name']}`" for s in r["sources"][:3]
-            )
-        return r["answer"] + sources_text
+        footer = r.get("confidence_footer") or ""
+        return r["answer"] + footer
 
     merged = []
     for r in found:
-        sources_text = ""
-        if r.get("sources"):
-            sources_text = "\n*Sources: " + ", ".join(
-                f"`{s['name']}`" for s in r["sources"][:2]
-            ) + "*"
-        merged.append(f"### From {r['agent']}\n\n{r['answer']}{sources_text}")
+        footer = r.get("confidence_footer") or ""
+        merged.append(f"### From {r['agent']}\n\n{r['answer']}{footer}")
     return "\n\n---\n\n".join(merged)
 
 
