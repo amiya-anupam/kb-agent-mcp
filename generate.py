@@ -248,6 +248,189 @@ Rules:
     return {"description": folder_name, "keywords": [folder_name.lower()]}
 
 
+# ── Per-file summary generator ────────────────────────────────────────────────
+
+def _extract_snippet_for_summary(file_path: pathlib.Path, max_chars: int = 2000) -> str:
+    """
+    Extract a representative text snippet from a file to feed to the summariser.
+    Reuses the same lightweight extraction logic as embeddings.py.
+    """
+    ext = file_path.suffix.lower()
+    try:
+        if ext in {".txt", ".md", ".csv"}:
+            return file_path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
+
+        elif ext == ".docx":
+            import zipfile
+            with zipfile.ZipFile(file_path) as z:
+                with z.open("word/document.xml") as f:
+                    xml = f.read().decode("utf-8", errors="ignore")
+            text = re.sub(r"<[^>]+>", " ", xml)
+            return " ".join(text.split())[:max_chars]
+
+        elif ext == ".pdf":
+            try:
+                from pypdf import PdfReader
+                reader = PdfReader(str(file_path))
+                text = ""
+                for page in reader.pages[:4]:
+                    text += (page.extract_text() or "") + "\n"
+                    if len(text) >= max_chars:
+                        break
+                return text[:max_chars]
+            except Exception:
+                return f"[PDF: {file_path.name}]"
+
+        elif ext in {".pptx", ".ppt"}:
+            try:
+                from pptx import Presentation
+                prs = Presentation(str(file_path))
+                text = ""
+                for slide in prs.slides[:6]:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text.strip():
+                            text += shape.text.strip() + "\n"
+                    if len(text) >= max_chars:
+                        break
+                return text[:max_chars]
+            except Exception:
+                return f"[PPTX: {file_path.name}]"
+
+        elif ext in {".xlsx", ".xls"}:
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
+                text = ""
+                for sheet in wb.worksheets[:2]:
+                    text += f"[Sheet: {sheet.title}]\n"
+                    for row in sheet.iter_rows(max_row=40, values_only=True):
+                        row_text = " | ".join(str(c) for c in row if c is not None)
+                        if row_text.strip():
+                            text += row_text + "\n"
+                    if len(text) >= max_chars:
+                        break
+                return text[:max_chars]
+            except Exception:
+                return f"[XLSX: {file_path.name}]"
+
+        elif ext == ".boxnote":
+            try:
+                data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
+                def walk(node):
+                    if isinstance(node, dict):
+                        if node.get("type") == "text":
+                            yield node.get("text", "")
+                        for v in node.values():
+                            yield from walk(v)
+                    elif isinstance(node, list):
+                        for item in node:
+                            yield from walk(item)
+                return " ".join(walk(data))[:max_chars]
+            except Exception:
+                return f"[BoxNote: {file_path.name}]"
+
+    except Exception as e:
+        return f"[Read error: {e}]"
+
+    return f"[Unsupported: {file_path.name}]"
+
+
+def generate_file_summary(file_name: str, snippet: str) -> str:
+    """
+    Ask the LLM to produce a 3–5 sentence summary of a single file.
+    Returns the summary string (falls back to a truncated snippet on failure).
+    """
+    prompt = (
+        f'Summarise the following content from a file called "{file_name}" '
+        f"in 3 to 5 concise sentences. Focus on: what the file is about, "
+        f"the key topics or data it contains, and who would find it useful. "
+        f"Do NOT include phrases like 'This file contains' or 'This document is about'. "
+        f"Write in plain prose. No bullet points. No markdown.\n\n"
+        f"Content:\n{snippet}"
+    )
+    try:
+        return call_llm_generate(prompt).strip()
+    except Exception:
+        # Graceful fallback: use first 300 chars of the snippet as the summary
+        return snippet[:300].strip()
+
+
+def build_file_summaries(
+    folder_name: str,
+    folder: pathlib.Path,
+    kb_root: pathlib.Path,
+    existing_cache: dict,
+    force: bool = False,
+) -> dict:
+    """
+    Generate 3–5 sentence LLM summaries for every indexable file in a folder.
+
+    Uses a content-hash cache (agents/vector_store/file_summaries.json) so the
+    LLM is only called for new or changed files.  Unchanged files are returned
+    directly from cache.
+
+    Args:
+        folder_name:    KB domain folder name (e.g. "BizOps")
+        folder:         Absolute path to the domain folder
+        kb_root:        KB root path (for computing relative cache keys)
+        existing_cache: Current contents of file_summaries.json (mutated in place)
+        force:          If True, regenerate all summaries regardless of cache
+
+    Returns:
+        Dict mapping "FolderName/file.ext" → { "summary": str, "hash": str }
+        (Only entries belonging to this folder — caller merges into full cache.)
+    """
+    import hashlib
+
+    files = [
+        f for f in sorted(folder.rglob("*"))
+        if f.is_file()
+        and f.suffix.lower() in INCLUDE_EXTS
+        and not should_skip(f)
+    ]
+
+    folder_summaries: dict[str, dict] = {}
+    new_count = 0
+
+    for f in files:
+        rel_key = str(f.relative_to(kb_root)).replace("\\", "/")
+        try:
+            file_hash = hashlib.md5(f.read_bytes()).hexdigest()
+        except Exception:
+            continue
+
+        cached = existing_cache.get(rel_key, {})
+        if not force and cached.get("hash") == file_hash and cached.get("summary"):
+            # Cache hit — reuse without calling the LLM
+            folder_summaries[rel_key] = cached
+            continue
+
+        # Cache miss — extract snippet and summarise
+        snippet = _extract_snippet_for_summary(f)
+        if not snippet or snippet.startswith("["):
+            # Extraction failed — store a minimal placeholder
+            folder_summaries[rel_key] = {
+                "summary": f.name,
+                "hash":    file_hash,
+            }
+            continue
+
+        print(f"    Summarising: {f.name}")
+        summary = generate_file_summary(f.name, snippet)
+        folder_summaries[rel_key] = {
+            "summary": summary,
+            "hash":    file_hash,
+        }
+        new_count += 1
+
+    if new_count:
+        print(f"  ✓ {new_count} new file summary/summaries generated for {folder_name}")
+    else:
+        print(f"  ✓ File summaries cached ({len(folder_summaries)} files, unchanged)")
+
+    return folder_summaries
+
+
 # ── README finder (shared by stub generator and stale-check) ─────────────────
 
 def _find_readme(folder: pathlib.Path) -> pathlib.Path | None:
@@ -716,6 +899,17 @@ def main():
         print("✓ available" if use_llm else "✗ not reachable (will use placeholder descriptions)")
         print()
 
+    # Load existing file summaries cache (shared across all domains).
+    # This cache persists between runs — the LLM is only called for new or
+    # changed files (content-hash based, same pattern as the vector index).
+    summaries_path  = agents_dir / "vector_store" / "file_summaries.json"
+    summaries_cache: dict[str, dict] = {}
+    if summaries_path.exists():
+        try:
+            summaries_cache = json.loads(summaries_path.read_text(encoding="utf-8"))
+        except Exception:
+            summaries_cache = {}
+
     domains_list = []
 
     for folder_name in folders:
@@ -793,6 +987,34 @@ def main():
                 "system_prompt": system_prompt,
             }
 
+        # ── Per-file summaries ────────────────────────────────────────────────
+        # Generate (or load from cache) a 3–5 sentence LLM summary for every
+        # file in this domain.  Summaries are stored in two places:
+        #   1. agents/vector_store/file_summaries.json  — persistent hash cache
+        #   2. entry["file_summaries"]                  — inline in domain_meta
+        #      (flat dict: { "FolderName/file.ext": "summary text", ... })
+        #
+        # The inline copy lets classify_intent() use per-file context for
+        # routing without reading a second file at query time.
+        if use_llm:
+            print(f"  Generating file summaries...")
+            folder_summaries = build_file_summaries(
+                folder_name    = folder_name,
+                folder         = folder,
+                kb_root        = kb_root,
+                existing_cache = summaries_cache,
+                force          = args.force,
+            )
+            # Merge back into the shared cache (written once after the loop)
+            summaries_cache.update(folder_summaries)
+            # Inline in domain_meta: flat map of path → summary string
+            entry["file_summaries"] = {
+                k: v["summary"] for k, v in folder_summaries.items()
+            }
+        else:
+            # --no-llm: carry forward whatever was already stored
+            entry["file_summaries"] = existing.get("file_summaries", {})
+
         domain_meta[folder_name] = entry
         domains_list.append(entry)
 
@@ -809,6 +1031,16 @@ def main():
         if key not in folders:
             del domain_meta[key]
             print(f"  🗑  Removed stale meta: {key}")
+
+    # ── Step 5b: write file_summaries.json cache ──────────────────────────────
+    if use_llm:
+        summaries_path.write_text(
+            json.dumps(summaries_cache, indent=2), encoding="utf-8"
+        )
+        total_summaries = sum(
+            1 for v in summaries_cache.values() if v.get("summary")
+        )
+        print(f"✓ file_summaries.json written ({total_summaries} file summaries)\n")
 
     # ── Step 6: write domain_meta.json ────────────────────────────────────────
     meta_path.write_text(json.dumps(domain_meta, indent=2), encoding="utf-8")

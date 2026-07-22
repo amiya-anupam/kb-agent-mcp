@@ -112,12 +112,27 @@ def classify_intent(
     if not domains:
         return {"domains": [], "needs_clarification": False, "clarification_question": ""}
 
-    domain_descriptions = "\n".join(
-        f'- "{d["folder_name"]}": {d.get("description", d["folder_name"])}'
-        for d in domains
-    )
     valid_domain_names = [d["folder_name"] for d in domains]
     fallback           = valid_domain_names[0] if valid_domain_names else ""
+
+    # Build domain descriptions: include per-file summaries when available so
+    # the router can match question content against actual file contents rather
+    # than just folder-level keywords.
+    domain_sections = []
+    for d in domains:
+        section = f'- "{d["folder_name"]}": {d.get("description", d["folder_name"])}'
+        file_summaries = d.get("file_summaries", {})
+        if file_summaries:
+            # Include up to 10 file summaries, one per line, indented
+            sample = list(file_summaries.items())[:10]
+            summary_lines = "\n".join(
+                f'    • {pathlib.Path(k).name}: {v[:120]}'
+                for k, v in sample
+            )
+            section += f"\n  Files in this domain:\n{summary_lines}"
+        domain_sections.append(section)
+
+    domain_descriptions = "\n".join(domain_sections)
 
     system_prompt = (
         "You are a routing agent for a KnowledgeBase system with these domains:\n"
