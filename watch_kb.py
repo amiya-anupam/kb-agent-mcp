@@ -81,6 +81,17 @@ LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 MODEL        = os.environ.get("KB_MODEL", "qwen3:14b")
 API_KEY      = os.environ.get("KB_API_KEY", "")
 
+# Stale-file threshold: warn when a file's mtime exceeds this many days.
+# Set to 0 to disable staleness checks entirely.
+_raw_stale = os.environ.get("KB_STALE_DAYS", "90")
+try:
+    STALE_DAYS = int(_raw_stale)
+except ValueError:
+    STALE_DAYS = 90
+
+# How often (seconds) to re-run the staleness check while the watcher is live.
+_STALE_CHECK_INTERVAL = 3600  # 1 hour
+
 _DEFAULT_BLOCKLIST = {
     "agents", ".git", "__pycache__", ".ds_store", "node_modules",
     ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
@@ -641,6 +652,44 @@ def _rename_folder_artifacts(old_name: str, new_name: str, cache: dict) -> bool:
 
     return cache_dirty
 
+# ── Stale-file checker ────────────────────────────────────────────────────────
+
+def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
+    """
+    Scan all indexed files across the given knowledge folders and return a list
+    of human-readable warning strings for any file whose mtime is older than
+    STALE_DAYS days, e.g.:
+
+        "⚠ BizOps: Q3_Renewal_Tracker.xlsx was last updated 112 days ago."
+
+    Returns an empty list when STALE_DAYS is 0 (feature disabled) or when
+    no files exceed the threshold.
+    """
+    if STALE_DAYS <= 0:
+        return []
+
+    now      = datetime.datetime.now()
+    cutoff   = datetime.timedelta(days=STALE_DAYS)
+    warnings: list[str] = []
+
+    for folder in folders:
+        folder_name = folder.name
+        for f in gather_files(folder):
+            try:
+                mtime     = datetime.datetime.fromtimestamp(f.stat().st_mtime)
+                age       = now - mtime
+                age_days  = age.days
+            except OSError:
+                continue
+
+            if age >= cutoff:
+                warnings.append(
+                    f"⚠ {folder_name}: {f.name} was last updated {age_days} days ago."
+                )
+
+    return warnings
+
+
 # ── generate.py trigger ───────────────────────────────────────────────────────
 
 def run_generate(reason: str):
@@ -720,7 +769,8 @@ class KBHandler(FileSystemEventHandler):
         self._known_folders:            set[str]     = {
             p.name for p in discover_knowledge_folders()
         }
-        self._cache: dict = _load_summary_cache()
+        self._cache:                    dict         = _load_summary_cache()
+        self._next_stale_check:         float        = time.time() + _STALE_CHECK_INTERVAL
 
     # ── Schedulers ────────────────────────────────────────────────────────────
 
@@ -805,6 +855,17 @@ class KBHandler(FileSystemEventHandler):
             self._pending_generate = None
             run_generate(reason)
             self._known_folders = {p.name for p in discover_knowledge_folders()}
+
+        # 6. Hourly stale-file check
+        if STALE_DAYS > 0 and now >= self._next_stale_check:
+            self._next_stale_check = now + _STALE_CHECK_INTERVAL
+            folders = [WATCH_ROOT / fn for fn in self._known_folders
+                       if (WATCH_ROOT / fn).is_dir()]
+            stale   = check_stale_files(folders)
+            if stale:
+                print("[KB Watcher] 🕐 Stale file check:", flush=True)
+                for w in stale:
+                    print(f"  {w}", flush=True)
 
     # ── watchdog callbacks ────────────────────────────────────────────────────
 
@@ -943,6 +1004,21 @@ def main():
             print(f"  → {folder.name}/ ({len(gather_files(folder))} files)", flush=True)
     else:
         print("  ⚠ No knowledge folders found — will watch for new ones", flush=True)
+
+    # Startup stale-file check
+    if STALE_DAYS > 0:
+        print(
+            f"[KB Watcher] Stale threshold: {STALE_DAYS} days "
+            f"(KB_STALE_DAYS — set to 0 to disable)",
+            flush=True,
+        )
+        stale_warnings = check_stale_files(folders)
+        if stale_warnings:
+            print(f"[KB Watcher] ⚠ Stale files detected:", flush=True)
+            for w in stale_warnings:
+                print(f"  {w}", flush=True)
+        else:
+            print(f"[KB Watcher] ✓ No stale files (all within {STALE_DAYS} days)", flush=True)
 
     handler  = KBHandler()
     observer = Observer()
