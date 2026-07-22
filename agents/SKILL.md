@@ -14,7 +14,7 @@ description: >
   ace docs, ace docs, bizops, bizops, cp4i docs, cp4i docs, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
-  python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "${QUESTION}"
+  python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
 ---
 
 # KnowledgeBase Agent Skill
@@ -23,7 +23,7 @@ execute: |
 
 When you ask Bob a question that triggers this skill, Bob runs:
 ```
-python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "<your question>"
+python3 <install-dir>/agents/agent_knowledgebase.py "<your question>"
 ```
 The Python script handles **all the AI work locally** (routing, retrieval, answering)
 using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays it back.
@@ -51,7 +51,7 @@ Just ask naturally — Bob detects the intent and runs the agent:
 ## How the pipeline works
 ```
 You → Bob (Claude) → detects skill trigger
-                   → runs: python3 agent_knowledgebase.py "<question>"
+                   → runs: python3 agents/agent_knowledgebase.py "<question>"
                              ↓
                         keyword_route()  ← fast, no LLM
                              ↓ (if ambiguous)
@@ -65,16 +65,13 @@ You → Bob (Claude) → detects skill trigger
 ```
 
 ## Setup
-Knowledge base root: `/Users/amiyaanupam/Desktop/KnowledgeBase`
-Domains discovered: ACE Docs, BizOps, CP4I Docs
-
-To add a new domain: create a folder with documents in `/Users/amiyaanupam/Desktop/KnowledgeBase`, then run:
+To add a new domain: create a folder with documents in your KB root, then run:
 ```
-python3 /Users/amiyaanupam/Desktop/KnowledgeBase/generate.py
+python3 scripts/generate.py
 ```
 
 ## Technical Details
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
 - LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER`
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)
-- Invocation: `python3 /Users/amiyaanupam/Desktop/KnowledgeBase/agents/agent_knowledgebase.py "<question>"`
+- Invocation: `python3 agents/agent_knowledgebase.py "<question>"`

@@ -57,7 +57,7 @@ def load_domain_meta() -> dict[str, dict]:
         print(
             f"[KnowledgeBase Agent] ✗ domain_meta.json is corrupt (invalid JSON): {e}\n"
             f"  Path: {META_PATH}\n"
-            f"  Fix:  python3 generate.py --force",
+            f"  Fix:  python3 scripts/generate.py --force",
             flush=True,
         )
         return {}
@@ -333,7 +333,7 @@ def call_sub_agent(
             "agent":   domain,
             "answer":  (
                 f"Domain '{domain}' not found in domain_meta.json. "
-                f"Run `python3 generate.py` to register new domains."
+                f"Run `python3 scripts/generate.py` to register new domains."
             ),
             "sources": [],
             "found":   False,
@@ -439,10 +439,10 @@ def ask_knowledgebase(question: str, format_flag: str | None = None) -> str:
                 f"No knowledge domains found in domain_meta.json.\n"
                 f"  Path: {META_PATH}\n"
                 f"  The file may be empty or corrupt. Run:\n"
-                f"    python3 generate.py --force"
+                f"    python3 scripts/generate.py --force"
             )
         return (
-            f"domain_meta.json not found. Run `python3 generate.py` first to "
+            f"domain_meta.json not found. Run `python3 scripts/generate.py` first to "
             f"discover folders and build the knowledge index.\n"
             f"  Expected at: {META_PATH}"
         )
@@ -491,7 +491,7 @@ def run_interactive():
     if domains:
         print(f"  Domains: {', '.join(d['folder_name'] for d in domains)}")
     else:
-        print(f"  ⚠ No domains found — run python3 generate.py first")
+        print(f"  ⚠ No domains found — run python3 scripts/generate.py first")
     print(f"  Type 'exit' · 'clear' to reset memory · 'memory' to show history")
     print(f"  Tip: prefix your question with --format <table|bullets|oneline|paragraph|numbered|json>")
     print(f"{'='*60}")

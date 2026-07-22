@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-watch_kb.py — KnowledgeBase Dynamic Watcher
---------------------------------------------
+scripts/watch_kb.py — KnowledgeBase Dynamic Watcher
+----------------------------------------------------
 Watches KB_ROOT for filesystem events and keeps everything in sync:
 
   FILE ADDED      → embed into vector index + update README AUTO-INDEX
   FILE MODIFIED   → re-embed into vector index + update README AUTO-INDEX
   FILE DELETED    → remove from vector index + summary cache + update README
   FILE RENAMED    → remove old path from index/cache + embed new path + update README
-  FOLDER CREATED  → run generate.py (builds index, creates agent, updates meta)
+  FOLDER CREATED  → run scripts/generate.py (builds index, creates agent, updates meta)
   FOLDER DELETED  → immediately delete agent .py + _index.json + meta entry
                     + all summary cache entries for that folder
   FOLDER RENAMED  → immediately rename agent .py + _index.json + meta entry
-                    + re-key summary cache entries; no full generate.py needed
+                    + re-key summary cache entries; no full scripts/generate.py needed
 
 README AUTO-INDEX block (written into each folder's README):
   <!-- KB:AUTO-INDEX:START -->
@@ -31,7 +31,7 @@ Configuration (env vars / .env):
   KB_IGNORE_FOLDERS Comma-separated extra folders to ignore
 
 Run:
-  python3 watch_kb.py
+  python3 scripts/watch_kb.py
 """
 
 import os
@@ -48,8 +48,8 @@ import hashlib
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# context_budget is in agents/ — add it to path before importing
-sys.path.insert(0, str(pathlib.Path(__file__).parent / "agents"))
+# context_budget is in agents/ at the repo root — resolve upward from scripts/
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "agents"))
 from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -66,7 +66,9 @@ def _load_env(root: pathlib.Path):
                 k, _, v = line.partition("=")
                 os.environ.setdefault(k.strip(), v.strip())
 
-SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+# scripts/ lives one level below the repo root — resolve upward so all
+# relative paths (agents/, .env, etc.) stay correct.
+SCRIPT_DIR = pathlib.Path(__file__).parent.parent.resolve()
 _load_env(SCRIPT_DIR)
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
@@ -693,12 +695,12 @@ def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
 # ── generate.py trigger ───────────────────────────────────────────────────────
 
 def run_generate(reason: str):
-    generate_script = SCRIPT_DIR / "generate.py"
+    generate_script = SCRIPT_DIR / "scripts" / "generate.py"
     if not generate_script.exists():
-        print(f"[KB Watcher] ⚠ generate.py not found — skipping agent rebuild", flush=True)
+        print(f"[KB Watcher] ⚠ scripts/generate.py not found — skipping agent rebuild", flush=True)
         return
 
-    print(f"[KB Watcher] 🔄 Running generate.py ({reason})...", flush=True)
+    print(f"[KB Watcher] 🔄 Running scripts/generate.py ({reason})...", flush=True)
     try:
         # Forward KB_ROOT explicitly so the subprocess always knows which root
         # to scan — even if the parent process set it via a .env file that the
@@ -989,7 +991,7 @@ def main():
             print(f"[KB Watcher]   Check KB_ROOT in your .env: {env_file}", flush=True)
         else:
             print(f"[KB Watcher]   Set KB_ROOT in {SCRIPT_DIR}/.env", flush=True)
-        print(f"[KB Watcher]   Or run:  python3 setup.py   to configure interactively.", flush=True)
+        print(f"[KB Watcher]   Or run:  python3 scripts/setup.py   to configure interactively.", flush=True)
         sys.exit(1)
 
     print(f"[KB Watcher] Starting — watching {WATCH_ROOT}", flush=True)

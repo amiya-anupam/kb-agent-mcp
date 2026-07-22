@@ -14,7 +14,7 @@ description: >
   - "/kb-install"
 
   IMPORTANT: This skill uses the execute block ONLY for the final automated
-  run (python3 setup.py --yes). All earlier steps — cloning the repo,
+  run (python3 scripts/setup.py --yes). All earlier steps — cloning the repo,
   choosing where to put it — are done interactively by Bob asking the user.
 
 instructions: |
@@ -38,12 +38,12 @@ instructions: |
 
   STEP 4 — Run the automated setup
     Once cloning is confirmed, tell the user to run ONE command:
-      python3 <INSTALL_DIR>/setup.py
+      python3 <INSTALL_DIR>/scripts/setup.py
     This single command handles everything:
       • installs Python dependencies
       • creates and configures .env (KB_ROOT is auto-set)
       • prompts for LLM provider (Ollama / OpenAI / Anthropic / passthrough)
-      • runs generate.py to build vector indexes
+      • runs scripts/generate.py to build vector indexes
       • installs the Bob skill to ~/.bob/skills/knowledgebase-agent/
 
   STEP 5 — Add knowledge documents
@@ -52,7 +52,7 @@ instructions: |
     If yes, copy them into folders inside <INSTALL_DIR> and I'll re-run
     the generator for you."
     If they say yes, ask for the folder name, then tell them to run:
-      python3 <INSTALL_DIR>/generate.py
+      python3 <INSTALL_DIR>/scripts/generate.py
 
   STEP 6 — Verify and finish
     Ask the user to type: /kb hello
@@ -78,25 +78,25 @@ Takes you from zero to a working KB agent in one conversation:
 
 ```
 You: "Here's the repo link, install the skill"
-Bob: asks where to clone → tells you to run setup.py → done
+Bob: asks where to clone → tells you to run scripts/setup.py → done
 ```
 
-## What setup.py does automatically
+## What scripts/setup.py does automatically
 
-When you run `python3 setup.py`, it:
+When you run `python3 scripts/setup.py`, it:
 
 1. Checks Python version (3.10+ required)
 2. Installs all Python dependencies (`pip install -r requirements.txt`)
 3. Creates `.env` with `KB_ROOT` pre-filled to your install location
 4. Prompts for your LLM choice (Ollama / OpenAI / Anthropic / skip)
-5. Runs `generate.py` — discovers folders, builds vector indexes, installs Bob skill
+5. Runs `scripts/generate.py` — discovers folders, builds vector indexes, installs Bob skill
 
 After that, the skill is live at `~/.bob/skills/knowledgebase-agent/SKILL.md`.
 
 ## Non-interactive mode (for automation)
 
 ```bash
-python3 setup.py --yes
+python3 scripts/setup.py --yes
 ```
 
 Skips all prompts, uses safe defaults (passthrough mode), and completes silently.
@@ -107,7 +107,7 @@ Useful if you want Bob to drive the entire setup without any human input.
 Drop files into any top-level folder, then:
 
 ```bash
-python3 generate.py
+python3 scripts/generate.py
 ```
 
 or just ask Bob: *"Re-run the KnowledgeBase generator"*

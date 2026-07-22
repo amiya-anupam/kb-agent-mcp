@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-generate.py — KnowledgeBase Agent Generator
---------------------------------------------
+scripts/generate.py — KnowledgeBase Agent Generator
+----------------------------------------------------
 Run this script once after cloning, or whenever you add/remove knowledge folders.
 
 What it does (in order):
@@ -14,13 +14,12 @@ What it does (in order):
   6.  Writes agents/vector_store/domain_meta.json
       (orchestrator reads this at runtime — no per-domain .py files needed)
   7.  Writes requirements.txt
-  8.  Writes README.md
-  9.  Writes agents/SKILL.md and auto-copies to ~/.bob/skills/ if Bob is installed
+  8.  Writes agents/SKILL.md and auto-copies to ~/.bob/skills/ if Bob is installed
 
 Usage:
-  python3 generate.py            # incremental (skip unchanged folders)
-  python3 generate.py --force    # regenerate everything from scratch
-  python3 generate.py --no-llm   # skip LLM steps (index + file gen only)
+  python3 scripts/generate.py            # incremental (skip unchanged folders)
+  python3 scripts/generate.py --force    # regenerate everything from scratch
+  python3 scripts/generate.py --no-llm   # skip LLM steps (index + file gen only)
 """
 
 import os
@@ -45,7 +44,9 @@ def load_env(root: pathlib.Path):
 
 # ── Config resolution ─────────────────────────────────────────────────────────
 
-SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+# scripts/ lives one level below the repo root — resolve upward so all
+# relative paths (agents/, .env, requirements.txt, etc.) stay correct.
+SCRIPT_DIR = pathlib.Path(__file__).parent.parent.resolve()
 
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
@@ -172,7 +173,7 @@ def call_llm_generate(prompt: str) -> str:
 
     # Ollama
     import importlib as _imp
-    _agents_dir = pathlib.Path(__file__).parent / "agents"
+    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
     if str(_agents_dir) not in sys.path:
         sys.path.insert(0, str(_agents_dir))
     _cb = _imp.import_module("context_budget")
@@ -545,12 +546,13 @@ def generate_skill_md(domains: list[dict], agents_dir: pathlib.Path, kb_root: pa
         kw for d in domains for kw in d["keywords"][:3]
     )
 
-    # IMPORTANT: agent_knowledgebase.py lives in SCRIPT_DIR/agents/ — it is
-    # always co-located with generate.py regardless of where KB_ROOT points.
-    # Using kb_root here would produce a broken path when KB_ROOT is an
-    # external folder (e.g. ~/Documents/MyDocs).
-    agent_script = agents_dir / "agent_knowledgebase.py"
-    generate_script = SCRIPT_DIR / "generate.py"
+    # Use SKILL_DIR-relative paths so agents/SKILL.md works on ANY machine
+    # after cloning — no absolute paths baked in at generate time.
+    # SKILL_DIR is the directory containing SKILL.md (i.e. agents/).
+    # The repo root is one level up: $(dirname $SKILL_DIR)
+    # agent_knowledgebase.py lives in the same agents/ folder as SKILL.md.
+    agent_rel  = "agents/agent_knowledgebase.py"   # relative to repo root
+    gen_rel    = "generate.py"                      # root shim, always present
 
     content = f"""\
 ---
@@ -567,7 +569,7 @@ description: >
   {trigger_keywords}, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
-  python3 {agent_script} "${{QUESTION}}"
+  python3 "${{SKILL_DIR}}/../{agent_rel.split('/')[-1]}" "${{QUESTION}}"
 ---
 
 # KnowledgeBase Agent Skill
@@ -576,7 +578,7 @@ execute: |
 
 When you ask Bob a question that triggers this skill, Bob runs:
 ```
-python3 {agent_script} "<your question>"
+python3 <install-dir>/{agent_rel} "<your question>"
 ```
 The Python script handles **all the AI work locally** (routing, retrieval, answering)
 using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays it back.
@@ -602,7 +604,7 @@ Just ask naturally — Bob detects the intent and runs the agent:
 ## How the pipeline works
 ```
 You → Bob (Claude) → detects skill trigger
-                   → runs: python3 agent_knowledgebase.py "<question>"
+                   → runs: python3 {agent_rel} "<question>"
                              ↓
                         keyword_route()  ← fast, no LLM
                              ↓ (if ambiguous)
@@ -616,19 +618,16 @@ You → Bob (Claude) → detects skill trigger
 ```
 
 ## Setup
-Knowledge base root: `{kb_root}`
-Domains discovered: {folder_names}
-
-To add a new domain: create a folder with documents in `{kb_root}`, then run:
+To add a new domain: create a folder with documents in your KB root, then run:
 ```
-python3 {generate_script}
+python3 {gen_rel}
 ```
 
 ## Technical Details
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
 - LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER`
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)
-- Invocation: `python3 {agent_script} "<question>"`
+- Invocation: `python3 {agent_rel} "<question>"`
 """
 
     # Write to agents/SKILL.md (in-repo copy)
@@ -689,7 +688,7 @@ def generate_readme(domains: list[dict], kb_root: pathlib.Path, out_path: pathli
 # KnowledgeBase Agent
 
 A fully dynamic, multi-domain knowledge base agent system.  
-Add a folder of documents → run `generate.py` → ask questions in natural language.
+Add a folder of documents → run `scripts/generate.py` → ask questions in natural language.
 
 ## Quick Start
 
@@ -709,7 +708,7 @@ cp .env.example .env
 #    e.g. mkdir "My Project" && cp *.pdf "My Project/"
 
 # 5. Run the generator (discovers folders, builds indexes, generates agents)
-python3 generate.py
+python3 scripts/generate.py
 
 # 6. Ask a question
 python3 agents/agent_knowledgebase.py "your question here"
@@ -737,7 +736,7 @@ Copy `.env.example` to `.env` and configure:
 
 1. Create a folder in `{kb_root}` (e.g. `mkdir "Sales Reports"`)
 2. Copy your documents into it
-3. Run `python3 generate.py`
+3. Run `python3 scripts/generate.py`
 
 That's it. The generator will:
 - Auto-discover the new folder
@@ -749,7 +748,7 @@ That's it. The generator will:
 ## Architecture
 
 ```
-generate.py                    ← run once to set everything up
+scripts/generate.py            ← run once to set everything up
 ├── agents/
 │   ├── agent_base.py          ← shared RAG logic (extract, embed, ask)
 │   ├── embeddings.py          ← dynamic vector index (Ollama/OpenAI/offline)
@@ -777,20 +776,20 @@ generate.py                    ← run once to set everything up
 | LM Studio / Jan | `custom` | Set `KB_LLM_BASE_URL` to local server URL |
 
 **No LLM?** Embeddings fall back to `sentence-transformers` (offline, ~80MB).  
-Run `generate.py --no-llm` to skip description/keyword generation.
+Run `scripts/generate.py --no-llm` to skip description/keyword generation.
 
 ## Watcher (auto-update on file changes)
 
 ```bash
-python3 watch_kb.py
+python3 scripts/watch_kb.py
 ```
 
-Watches for new top-level folders and file changes, then auto-triggers `generate.py`.
+Watches for new top-level folders and file changes, then auto-triggers `scripts/generate.py`.
 
 ## Bob AI Assistant Integration
 
-If you use [Bob](https://github.com/ibm/bob), the skill is auto-installed to  
-`~/.bob/skills/knowledgebase-agent/SKILL.md` when you run `generate.py`.
+If you use [Bob](https://github.com/ibm/bob), the skill is auto-installed to
+`~/.bob/skills/knowledgebase-agent/SKILL.md` when you run `scripts/generate.py`.
 """
     out_path.write_text(content, encoding="utf-8")
 
@@ -829,7 +828,7 @@ def main():
         else:
             print(f"  Set KB_ROOT in a .env file at: {SCRIPT_DIR}/.env")
             print(f"  Example:  KB_ROOT=/path/to/your/documents")
-        print(f"  Or run:   python3 setup.py   to configure the path interactively.")
+        print(f"  Or run:   python3 scripts/setup.py   to configure the path interactively.")
         sys.exit(1)
 
     # ── Step 1b: discover folders ─────────────────────────────────────────────
@@ -841,7 +840,7 @@ def main():
         sys.exit(1)
     if not folders:
         print(f"✗ No knowledge folders found under {kb_root}")
-        print(f"  Create a folder with documents and re-run generate.py")
+        print(f"  Create a folder with documents and re-run scripts/generate.py")
         sys.exit(1)
     print(f"Discovered {len(folders)} folder(s): {', '.join(folders)}\n")
 

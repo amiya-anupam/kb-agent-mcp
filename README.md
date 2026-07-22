@@ -51,39 +51,39 @@ cp /path/to/your/docs/*.pdf "My Project/"
 **Supported file types:** `.pdf` `.docx` `.pptx` `.xlsx` `.md` `.txt` `.csv` `.boxnote` `.ppt` `.doc`
 
 > Skip this step now if the user wants to add documents later. The agent will work with
-> zero folders — just run `python3 generate.py` again after adding documents.
+> zero folders — just run `python3 scripts/generate.py` again after adding documents.
 
 ---
 
 ### Step 3 — Run the installer
 
 ```bash
-python3 setup.py
+python3 scripts/setup.py
 ```
 
-`setup.py` handles everything in order:
+`scripts/setup.py` handles everything in order:
 
 1. Checks Python version (3.10+ required)
 2. Runs `pip install -r requirements.txt`
 3. Creates `.env` with `KB_ROOT` pre-filled to the current directory
 4. Asks which LLM provider to use (Ollama / OpenAI / Anthropic / passthrough)
-5. Runs `generate.py` — discovers folders, builds vector indexes, writes the agent skill
+5. Runs `scripts/generate.py` — discovers folders, builds vector indexes, writes the agent skill
 
 **Non-interactive mode** (no prompts, uses passthrough by default):
 ```bash
-python3 setup.py --yes
+python3 scripts/setup.py --yes
 ```
 
 **Custom install location:**
 ```bash
-python3 setup.py --kb-root /absolute/path/to/folder
+python3 scripts/setup.py --kb-root /absolute/path/to/folder
 ```
 
 ---
 
 ### Step 4 — Verify the installation
 
-After `setup.py` completes, the skill file exists at:
+After `scripts/setup.py` completes, the skill file exists at:
 
 ```
 ~/.bob/skills/knowledgebase-agent/SKILL.md
@@ -126,14 +126,14 @@ python3 agents/agent_knowledgebase.py "your question here"
 Drop files into any top-level folder, then:
 
 ```bash
-python3 generate.py
+python3 scripts/generate.py
 ```
 
 To add a completely new domain:
 ```bash
 mkdir "New Domain"
 cp /path/to/new/docs/* "New Domain/"
-python3 generate.py
+python3 scripts/generate.py
 ```
 
 ---
@@ -143,7 +143,7 @@ python3 generate.py
 | Problem | Solution |
 |---|---|
 | `pip install` fails | Run `python3 -m pip install --upgrade pip` first, then retry |
-| Skill file not found at `~/.bob/skills/` | Run `python3 generate.py` again |
+| Skill file not found at `~/.bob/skills/` | Run `python3 scripts/generate.py` again |
 | Agent returns empty answers | Check that your folders contain supported file types |
 | `python3` not found (Windows) | Use `python` instead of `python3` throughout |
 | Ollama not running | Either start it with `ollama serve` or choose passthrough mode |
@@ -153,7 +153,7 @@ python3 generate.py
 
 ## Environment Variables
 
-After running `setup.py`, your `.env` file is created automatically. Edit it to change settings:
+After running `scripts/setup.py`, your `.env` file is created automatically. Edit it to change settings:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -195,7 +195,7 @@ All token-affecting limits are tunable via env vars — no code changes needed:
 
 **No LLM?** No problem. Set `KB_LLM_PROVIDER=passthrough` or just leave Ollama stopped.
 Embeddings fall back to `sentence-transformers` (offline, ~80 MB download on first use).
-Run `generate.py --no-llm` to skip description/keyword generation entirely.
+Run `scripts/generate.py --no-llm` to skip description/keyword generation entirely.
 
 ---
 
@@ -278,16 +278,16 @@ You: List ACE deployment steps --format bullets
 ## Watcher (auto-update on file changes)
 
 ```bash
-python3 watch_kb.py
+python3 scripts/watch_kb.py
 ```
 
 Watches `KB_ROOT` for filesystem events and keeps everything in sync — no manual
-`generate.py` runs needed for day-to-day file changes.
+`scripts/generate.py` runs needed for day-to-day file changes.
 
 | Event | What happens |
 |---|---|
 | File added / modified / deleted inside existing folder | Re-embeds, updates index, rewrites README AUTO-INDEX block |
-| New top-level folder created | Triggers `generate.py` automatically |
+| New top-level folder created | Triggers `scripts/generate.py` automatically |
 | Folder deleted | Removes index and domain metadata |
 | Folder renamed | Renames index, re-keys domain metadata |
 
@@ -295,7 +295,7 @@ Watches `KB_ROOT` for filesystem events and keeps everything in sync — no manu
 
 The watcher automatically checks all indexed files against a configurable age threshold:
 
-- **Startup:** checks all files when `watch_kb.py` launches
+- **Startup:** checks all files when `scripts/watch_kb.py` launches
 - **Hourly:** re-checks every 60 minutes while the watcher is running
 - **Output:** prints a warning for each file over the threshold, e.g.:
   ```
@@ -309,14 +309,14 @@ The watcher automatically checks all indexed files against a configurable age th
 
 ---
 
-## How `generate.py` is triggered
+## How `scripts/generate.py` is triggered
 
 | Trigger | When |
 |---|---|
-| `python3 generate.py` | Manually — run after first clone, or to force rebuild |
-| `python3 generate.py --force` | Force regenerate everything from scratch |
-| `python3 generate.py --no-llm` | Skip LLM steps (index + skill file only) |
-| `watch_kb.py` (automatic) | Only when a **new top-level folder** is created |
+| `python3 scripts/generate.py` | Manually — run after first clone, or to force rebuild |
+| `python3 scripts/generate.py --force` | Force regenerate everything from scratch |
+| `python3 scripts/generate.py --no-llm` | Skip LLM steps (index + skill file only) |
+| `scripts/watch_kb.py` (automatic) | Only when a **new top-level folder** is created |
 
 ---
 
@@ -581,143 +581,72 @@ The watcher stayed alive but stopped responding to all filesystem events.
 
 All notable changes to this project are listed here, newest first.
 
+<!-- CHANGELOG_START -->
 ---
 
-### `f6acfdf` — Structured Answer Format Flag _(latest)_
+### `bcab415` — docs: update README and .env.example for all recent features _(latest)_
 
-**What changed:** `agents/agent_knowledgebase.py`
+README.md: - CLI Usage: new Structured Answer Format section with --format flag,   inline mode, NL
+phrase examples, and format table - Watcher: new Stale File Alerts subsection with startup/hourly
+cadence,   example output, and KB_STALE_DAYS reference - Environment Variables: added KB_STALE_DAYS
+and KB_PASSTHROUGH_FALLBACK rows - Architecture component map: added detect_format_intent(), format
+directive   injection, and confidence footer to agent_base.py description - Query flow diagram:
+added detect_format_intent step, format directive   injection, and confidence footer step to the
+flow - Changelog section (bottom): full entry for every commit since cf1ef9e —   f6acfdf (format
+flag), a50127c (stale watcher), f7d29b1 (confidence score),   202811e (auto-summarise), 045d9de
+(token efficiency), cfa5787 (error   handling), cf1ef9e (is_readme fix)
 
-Added the ability to control how the LLM formats its answer — via a `--format` CLI flag, an inline `--format` in interactive mode, or by including a natural-language phrase in your question.
-
-**New functions:**
-
-| Function | Location | Purpose |
-|---|---|---|
-| `detect_format_intent(question, explicit_flag)` | `agent_knowledgebase.py` | Detects `--format` flag or NL phrases; returns `(question, instruction)` |
-| `_apply_format_instruction(system_prompt, instruction)` | `agent_knowledgebase.py` | Appends `OUTPUT FORMAT DIRECTIVE` to system prompt |
-
-**Supported formats:**
-
-| `--format` | Aliases | LLM instruction |
-|---|---|---|
-| `table` | — | Markdown table with column headers |
-| `bullets` | `bullet`, `list` | Markdown bullet list |
-| `oneline` | `1line`, `one-line`, `one-liner` | Exactly one sentence |
-| `paragraph` | `prose`, `paragraphs` | Prose paragraphs |
-| `numbered` | `num`, `numbered-list` | Numbered Markdown list |
-| `json` | — | Raw JSON output |
-
-**Key behaviours:**
-- Explicit `--format` flag takes priority over any NL phrase in the question text
-- Unknown `--format` values are silently ignored — no crash
-- The directive is injected into `system_prompt` before `agent_base.ask()` is called, so it works in **both online and offline (passthrough) modes** — passthrough output already carries it in its `SYSTEM_PROMPT` block
-- `call_sub_agent`, `run_agents_parallel`, and `ask_knowledgebase` all accept the `format_instruction` / `format_flag` parameter — the full call chain is wired
-
-**Usage examples:**
-```bash
-python3 agents/agent_knowledgebase.py "What does CP4I include?" --format table
-python3 agents/agent_knowledgebase.py "List ACE steps" --format=bullets
-```
-```
-# Interactive
-You: What is ACE? --format oneline
-```
-```
-# Natural language (no flag)
-"Compare ACE and CP4I as a table"
-"In one sentence, what is the ACE toolkit?"
-```
+.env.example: - KB_LLM_PROVIDER: added passthrough to supported values list -
+KB_PASSTHROUGH_FALLBACK: new variable with full inline documentation - KB_STALE_DAYS: updated
+comment to mention startup + hourly cadence - KB_FORMAT_DEFAULT: new variable documenting the
+structured format flag   with all supported values and aliases
 
 ---
 
-### `a50127c` — Stale File Watcher Alert
+### `f6acfdf` — feat: structured answer format flag
 
-**What changed:** `watch_kb.py`, `.env.example`
+Add --format CLI flag and natural-language intent detection that injects a format directive into the
+system prompt before every LLM call.
 
-Added automatic detection and warning for files that have not been modified within a configurable number of days.
+Supported formats (canonical names + aliases):   table     — Markdown table with headers   bullets
+— Markdown bullet list  (aliases: bullet, list)   oneline   — single sentence       (aliases: 1line,
+one-line, one-liner)   paragraph — prose paragraphs      (aliases: prose, paragraphs)   numbered  —
+numbered Markdown list (aliases: num, numbered-list)   json      — raw JSON output
 
-**New function:** `check_stale_files(folders)` — iterates all indexed files using `gather_files()`, reads `st_mtime`, returns human-readable warning strings for any file over the threshold.
+Natural-language phrase detection (no flag required):   'give me a table', 'as bullet points', 'in
+one sentence',   'as a numbered list', 'return as json', 'as paragraphs', etc.
 
-**Key behaviours:**
-- Runs at **startup** (when `watch_kb.py` launches) and **hourly** (every `_STALE_CHECK_INTERVAL = 3600` seconds)
-- Threshold: `KB_STALE_DAYS` env var (default `90`). Set to `0` to disable entirely
-- `KBHandler._next_stale_check` stores the next scheduled check timestamp
-- `dispatch_pending()` step 6 fires the hourly re-scan
-- `.env.example` updated with `KB_STALE_DAYS` documentation
+Changes:   agents/agent_knowledgebase.py   - _FORMAT_INSTRUCTIONS dict: canonical format → system
+prompt instruction   - _FORMAT_PHRASE_MAP list: compiled regex patterns → format key   -
+_FORMAT_ALIASES dict: shorthands normalised to canonical names   - detect_format_intent(question,
+explicit_flag): returns (question, instruction)   - _apply_format_instruction(system_prompt,
+instruction): appends directive   - call_sub_agent: accepts format_instruction kwarg, applies before
+ask()   - run_agents_parallel: forwards format_instruction to all sub-agents   - ask_knowledgebase:
+accepts format_flag kwarg, calls detect_format_intent   - run_interactive: parses inline '--format
+X' from typed questions   - __main__: parses --format / --format=value from CLI argv
 
-**Example output:**
-```
-[KB Watcher] ⚠ Stale files detected:
+Passthrough path unaffected: format directive is appended to system_prompt before emit_passthrough
+is called, so the SYSTEM_PROMPT block in the passthrough output already carries the format
+instruction for Bob's Claude.
+
+---
+
+### `a50127c` — feat: stale file watcher alert
+
+Add KB_STALE_DAYS env var (default: 90 days) and check_stale_files() to watch_kb.py. Emits warnings
+for any indexed file whose mtime exceeds the configured threshold, e.g.:
+
   ⚠ BizOps: Q3_Renewal_Tracker.xlsx was last updated 112 days ago.
-  ⚠ BizOps: Pipeline_Report_Q1.xlsx was last updated 97 days ago.
-```
 
----
+Changes: - STALE_DAYS config: reads KB_STALE_DAYS, defaults to 90, ValueError-   safe for bad input;
+set to 0 to disable entirely - _STALE_CHECK_INTERVAL = 3600 (hourly re-scan cadence) -
+check_stale_files(folders): iterates gather_files() per domain,   reads st_mtime, compares against
+timedelta(days=STALE_DAYS), returns   list of warning strings; OSError on stat() silently skipped -
+main(): runs stale check at startup, prints warnings or clean-bill   message, shows configured
+threshold - KBHandler.__init__: adds _next_stale_check timestamp - dispatch_pending() step 6: hourly
+re-scan via _next_stale_check - .env.example: documents KB_STALE_DAYS with example output and
+disable instruction
 
-### `f7d29b1` — Confidence Score in Answer Footer
+No agent files modified. Feature is entirely self-contained in watch_kb.py.
 
-**What changed:** `agents/agent_base.py`, `agents/agent_knowledgebase.py`
-
-Every answer now ends with a confidence footer showing how certain the retrieval was.
-
-**New function:** `format_confidence_footer(sources)` — maps cosine score to a label and formats a source citation line.
-
-| Score | Label | Example footer |
-|---|---|---|
-| ≥ 0.80 | **High** | `🎯 Confidence: High (0.87) — Source: doc.pdf` |
-| ≥ 0.60 | **Medium** | `🎯 Confidence: Medium (0.71) — Source: doc.pdf` |
-| < 0.60 | **Low** | `🎯 Confidence: Low (0.54) — Source: doc.pdf` |
-| = 1.0 (README-first) | _(no label)_ | `📄 Source: README index (ACE Docs.md)` |
-
-**Key behaviours:**
-- `ask()` in `agent_base.py` attaches `confidence_footer` key to every return dict
-- `merge_answers()` in `agent_knowledgebase.py` appends it to the final answer
-- Passthrough path is unaffected — confidence footer is only relevant when a local LLM answered
-
----
-
-### `202811e` — Auto-Summarise Files on Ingest
-
-**What changed:** `generate.py`, `agents/agent_knowledgebase.py`
-
-When `generate.py` runs, it now generates a one-sentence LLM summary for every indexed file and stores it in `agents/vector_store/file_summaries.json`. The routing agent uses these summaries to make smarter domain decisions.
-
-**New functions in `generate.py`:**
-
-| Function | Purpose |
-|---|---|
-| `generate_file_summary(file_path)` | Extracts a text snippet and calls the LLM for a one-sentence summary |
-| `build_file_summaries(folders, no_llm)` | Iterates all files, applies MD5 content-hash caching, writes `file_summaries.json` |
-
-**Key behaviours:**
-- Summaries are **hash-cached** — the LLM is only called when a file changes (MD5 of content)
-- Skipped entirely when `--no-llm` is passed to `generate.py`
-- `classify_intent()` in `agent_knowledgebase.py` includes up to 10 per-file summaries per domain in the routing prompt — the router now matches question content against actual file contents, not just folder-level keywords
-
----
-
-### `045d9de` — Token Efficiency Optimisations (3 improvements)
-
-**What changed:** `agents/context_budget.py`, `agents/agent_base.py`, `watch_kb.py`
-
-Three targeted changes that reduced per-query token consumption by 48–77% for the common case:
-
-1. **README index mode** — simple questions use only the `AUTO-INDEX` block + brief intro (~2,000 tokens) instead of the full README (~6,000 tokens)
-2. **Collapse rules** — repeated/versioned files (e.g. weekly reports) are grouped into a single summary row in the AUTO-INDEX table
-3. **Narrow complex-question patterns** — `_COMPLEX_QUESTION_PATTERNS` regex was made intentionally narrow so casual phrasing ("tell me about", "describe") no longer triggers the expensive full-README path
-
----
-
-### `cfa5787` — Comprehensive Error Handling
-
-**What changed:** `agents/agent_base.py`, `agents/agent_knowledgebase.py`, `agents/embeddings.py`, `agents/memory.py`, `watch_kb.py`, `generate.py`
-
-Added actionable error messages with `Fix:` hints across all 6 core files. File permission errors, missing LLM endpoints, and corrupt JSON now print a human-readable diagnosis instead of a raw traceback.
-
----
-
-### `cf1ef9e` — `is_readme` NameError fix in `watch_kb.py`
-
-**Symptom:** Adding/modifying/deleting files inside an existing folder silently crashed the watcher observer thread after startup.
-
-**Fix:** Added the missing `is_readme(path)` helper that checks whether a given path is a README file (prevents infinite update loops when the watcher writes READMEs itself).
+<!-- CHANGELOG_END -->

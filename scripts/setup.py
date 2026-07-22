@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-setup.py — KnowledgeBase Agent: one-command installer
-------------------------------------------------------
+scripts/setup.py — KnowledgeBase Agent: one-command installer
+--------------------------------------------------------------
 Run this once after cloning (or after adding new knowledge folders).
 
 What it does:
@@ -10,12 +10,12 @@ What it does:
   3. Asks where to store knowledge documents (link existing folder or create new)
   4. Asks whether to use a local LLM or rely on the calling AI tool (passthrough)
   5. Creates .env with KB_ROOT and LLM settings pre-filled
-  6. Runs python3 generate.py to build indexes and install the agent skill
+  6. Runs scripts/generate.py to build indexes and install the agent skill
 
 Usage:
-  python3 setup.py                    # interactive
-  python3 setup.py --yes              # non-interactive (accept all defaults)
-  python3 setup.py --kb-root /path    # skip the root folder prompt
+  python3 scripts/setup.py                    # interactive
+  python3 scripts/setup.py --yes              # non-interactive (accept all defaults)
+  python3 scripts/setup.py --kb-root /path    # skip the root folder prompt
 
 After setup the skill is live at:
   ~/.bob/skills/knowledgebase-agent/SKILL.md
@@ -28,7 +28,9 @@ import pathlib
 import subprocess
 import textwrap
 
-SCRIPT_DIR = pathlib.Path(__file__).parent.resolve()
+# scripts/ lives one level below the repo root — resolve upward so all
+# relative paths (.env, requirements.txt, agents/, etc.) stay correct.
+SCRIPT_DIR = pathlib.Path(__file__).parent.parent.resolve()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -352,13 +354,13 @@ def check_knowledge_folders(kb_root: pathlib.Path, yes: bool):
 
 def run_generate(yes: bool):
     hdr("⑦ Running generate.py  (builds indexes + installs agent skill)")
-    gen = SCRIPT_DIR / "generate.py"
+    gen = SCRIPT_DIR / "scripts" / "generate.py"
     if not gen.exists():
-        err("generate.py not found — cannot continue")
+        err("scripts/generate.py not found — cannot continue")
         sys.exit(1)
     flags = ["--no-llm"] if yes else []
     # In non-interactive mode skip LLM description generation to keep it fast;
-    # user can run `python3 generate.py` separately to enrich descriptions.
+    # user can run `python3 scripts/generate.py` separately to enrich descriptions.
     rc = run([sys.executable, str(gen)] + flags)
     if rc != 0:
         err("generate.py exited with an error (see output above).")
@@ -366,7 +368,7 @@ def run_generate(yes: bool):
         err("  • KB_ROOT in .env points to a folder that doesn't exist")
         err("  • No knowledge subfolders with documents were found")
         err("  • A required Python package is missing (re-run: pip install -r requirements.txt)")
-        err("Re-run manually to see the full error:  python3 generate.py")
+        err("Re-run manually to see the full error:  python3 scripts/generate.py")
         sys.exit(1)
     ok("generate.py completed")
 
@@ -417,10 +419,10 @@ def print_done(kb_root: pathlib.Path):
     print()
     print("  To add more documents:")
     print(f"    1. Drop files into a folder inside {kb_root}/")
-    print(f"    2. Run:  python3 generate.py")
+    print(f"    2. Run:  python3 scripts/generate.py")
     print()
     print("  To keep indexes auto-updated as files change:")
-    print(f"    python3 watch_kb.py")
+    print(f"    python3 scripts/watch_kb.py")
     print()
 
 
@@ -433,9 +435,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Examples:
-              python3 setup.py                    # interactive (recommended)
-              python3 setup.py --yes              # non-interactive (all defaults)
-              python3 setup.py --kb-root /data/kb # skip the root folder prompt
+              python3 scripts/setup.py                    # interactive (recommended)
+              python3 scripts/setup.py --yes              # non-interactive (all defaults)
+              python3 scripts/setup.py --kb-root /data/kb # skip the root folder prompt
         """),
     )
     parser.add_argument("--yes",     action="store_true",
