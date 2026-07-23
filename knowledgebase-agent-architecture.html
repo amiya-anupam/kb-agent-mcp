@@ -226,11 +226,12 @@
   </div>
 
   <div class="note">
-    <strong>setup.py</strong> runs 10 steps: checks Python, installs deps, configures .env, runs generate.py, installs the knowledge-qa skill to <code>~/.bob/</code>, prewarms the uv package cache (so <code>uv run --offline</code> works on first use), and installs the knowledgebase-install skill.
+    <strong>setup.py</strong> runs 8 steps: checks Python, installs deps, configures .env, runs generate.py, and installs the knowledgebase-agent skill to <code>~/.bob/</code>.
     <br /><br />
     <strong>watch_kb.py</strong> — optional daemon you can run separately.
     Watches for file changes and updates vector indexes + README AUTO-INDEX blocks automatically.
     Only triggers <code>generate.py</code> when a <em>new top-level folder</em> is created.
+    Subprocess timeout configurable via <code>KB_GENERATE_TIMEOUT</code> (default: 900 s).
     <br /><br />
     <strong>scripts/ask.py</strong> — offline-capable CLI wrapper. Runs the agent subprocess, intercepts passthrough blocks, and re-sends context directly to Ollama. Falls back to printing raw document excerpts if Ollama is unreachable.
   </div>
@@ -304,8 +305,9 @@
       <div class="title">agent_base.ask() — Shared RAG pipeline</div>
       <div class="sub">
         Domain config read from <strong>domain_meta.json</strong> at runtime — no per-domain .py files needed.<br />
-        <strong>Strategy 1 (README-first):</strong> reads folder README · index block for simple questions · full README for complex ones<br />
-        <strong>Strategy 2 (fallback):</strong> calls embeddings.py → cosine similarity search → top-N files extracted
+        <strong>Data-question bypass:</strong> <code>_is_data_question()</code> detects revenue/numeric/breakdown questions → skips README entirely → goes straight to Strategy 2<br />
+        <strong>Strategy 1 (README-first, non-data questions):</strong> reads folder README · index block for simple questions · full README for complex ones<br />
+        <strong>Strategy 2 (RAG fallback / all data questions):</strong> calls embeddings.py → cosine similarity search → top-N files extracted · XLSX: cache-first from index summary, single-pass streaming aggregation on cache miss
       </div>
     </div>
     <div class="arrow">→</div>
@@ -462,21 +464,9 @@
         <td><span class="tag tag-local">local</span></td>
       </tr>
       <tr>
-        <td><code>scripts/sync_skill.sh</code></td>
-        <td>Dev utility</td>
-        <td>Mirrors ~/.bob/skills/knowledge-qa/ → skills/knowledge-qa/ in repo; --commit flag</td>
-        <td><span class="tag tag-local">local</span></td>
-      </tr>
-      <tr>
-        <td><code>skills/knowledge-qa/</code></td>
-        <td>Repo bundle</td>
-        <td>Bundled ingest.py, network_audit.py, SKILL.md — installed to ~/.bob/ by setup.py step 8</td>
-        <td><span class="tag tag-local">local</span></td>
-      </tr>
-      <tr>
         <td><code>watch_kb.py</code></td>
         <td>Optional daemon</td>
-        <td>Watches for file changes, keeps indexes + README current</td>
+        <td>Watches for file changes, keeps indexes + README current; <code>KB_GENERATE_TIMEOUT</code> controls generate.py subprocess timeout</td>
         <td><span class="tag tag-local">local</span></td>
       </tr>
       <tr>
@@ -488,7 +478,7 @@
       <tr>
         <td><code>agents/agent_base.py</code></td>
         <td>Shared RAG logic</td>
-        <td>README-first pipeline; text extract; LLM call; passthrough emit</td>
+        <td>Data-question bypass (<code>_is_data_question()</code>); README-first pipeline; cache-first XLSX aggregation; LLM call; passthrough emit</td>
         <td><span class="tag tag-local">core</span></td>
       </tr>
       <tr>
@@ -522,24 +512,6 @@
         <td><span class="tag tag-disk">disk</span></td>
       </tr>
       <tr>
-        <td><code>~/.bob/skills/knowledge-qa/ingest.py</code></td>
-        <td>Ingest script</td>
-        <td>Extracts text from 23 file formats; classifies confidentiality; enforces .noindex sentinel</td>
-        <td><span class="tag tag-local">skill</span></td>
-      </tr>
-      <tr>
-        <td><code>~/.bob/skills/knowledge-qa/network_audit.py</code></td>
-        <td>Network probe</td>
-        <td>Detects internet + cloud LLM; emits BLOCK / CAUTION / OFFLINE + randomized ack token</td>
-        <td><span class="tag tag-local">skill</span></td>
-      </tr>
-      <tr>
-        <td><code>~/.bob/skills/knowledge-qa/SKILL.md</code></td>
-        <td>QA skill config</td>
-        <td>Drives the ingest → consent gate → Q&amp;A flow; security rules; Step 2b consent gate</td>
-        <td><span class="tag tag-cloud">Bob</span></td>
-      </tr>
-      <tr>
         <td><code>agents/vector_store/session_memory.json</code></td>
         <td>Conversation memory</td>
         <td>Rolling 20-turn conversation history</td>
@@ -554,7 +526,7 @@
     </tbody>
   </table>
 
-  <div class="footer">Made with IBM Bob</div>
+  <div class="footer">Last updated: data-question bypass · cache-first XLSX · KB_GENERATE_TIMEOUT &nbsp;·&nbsp; Made with IBM Bob</div>
 </div>
 </body>
 </html>

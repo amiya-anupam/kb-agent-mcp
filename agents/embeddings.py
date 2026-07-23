@@ -261,17 +261,125 @@ def extract_text_snippet(file_path: pathlib.Path) -> str:
         elif ext in {".xlsx", ".xls"}:
             try:
                 import openpyxl
+
+                # ── Smart XLSX snippet ────────────────────────────────────────
+                # For large tabular files (revenue, pipeline data) generate a
+                # pre-aggregated summary stored in the index entry.
+                # extract_full_text() in agent_base.py will serve this cache
+                # at query time, avoiding the 50-100s open cost on big files.
+                #
+                # Same AGG_KEYWORDS and detection logic as agent_base.py so
+                # the cached summary is always in the expected format.
+                AGG_KEYWORDS = {
+                    "year": "Year", "quarter": "Quarter",
+                    "geography": "Geography", "market": "Market",
+                    "country": "Country",
+                    "finance family": "Finance Family",
+                    "revenue type": "Revenue Type",
+                    "on-prem or saas": "On-prem/SaaS",
+                    "division": "Division",
+                }
+
                 wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-                text = ""
-                for sheet in wb.worksheets[:2]:
-                    for row in sheet.iter_rows(max_row=30, values_only=True):
-                        row_text = " ".join(str(c) for c in row if c is not None)
-                        text += row_text + " "
-                        if len(text) >= SUMMARY_CHARS:
+                text_parts = []
+
+                for sheet in wb.worksheets:
+                    row_iter = sheet.iter_rows(values_only=True)
+                    try:
+                        hdr = next(row_iter)
+                    except StopIteration:
+                        continue
+                    headers = [str(c) if c is not None else "" for c in hdr]
+
+                    # Probe first 200 rows
+                    probe: list = []
+                    for row in row_iter:
+                        probe.append(row)
+                        if len(probe) >= 200:
                             break
-                    if len(text) >= SUMMARY_CHARS:
-                        break
-                return text[:SUMMARY_CHARS]
+                    is_large = len(probe) >= 200
+
+                    text_parts.append(f"[Sheet: {sheet.title}]")
+
+                    if is_large:
+                        # Detect numeric column
+                        num_ci: int | None = None
+                        for ci in range(len(headers) - 1, -1, -1):
+                            sample = [r[ci] for r in probe
+                                      if ci < len(r) and r[ci] is not None]
+                            if sample and all(isinstance(v, (int, float)) for v in sample):
+                                num_ci = ci
+                                break
+
+                        # Detect group-by columns
+                        group_cols: list[tuple[int, str]] = [
+                            (ci, AGG_KEYWORDS[h.lower().strip()])
+                            for ci, h in enumerate(headers)
+                            if h.lower().strip() in AGG_KEYWORDS
+                        ]
+
+                        if num_ci is not None and group_cols:
+                            # Single-pass streaming aggregation
+                            agg: dict[int, dict[str, float]] = {
+                                g_idx: {} for g_idx, _ in group_cols
+                            }
+                            row_count = len(probe)
+                            for row in probe:
+                                rev = row[num_ci] if num_ci < len(row) else None
+                                if not isinstance(rev, (int, float)):
+                                    continue
+                                for g_idx, _ in group_cols:
+                                    gval = (str(row[g_idx])
+                                            if g_idx < len(row) and row[g_idx] is not None
+                                            else "(blank)")
+                                    agg[g_idx][gval] = agg[g_idx].get(gval, 0.0) + rev
+                            for row in row_iter:
+                                row_count += 1
+                                rev = row[num_ci] if num_ci < len(row) else None
+                                if not isinstance(rev, (int, float)):
+                                    continue
+                                for g_idx, _ in group_cols:
+                                    gval = (str(row[g_idx])
+                                            if g_idx < len(row) and row[g_idx] is not None
+                                            else "(blank)")
+                                    agg[g_idx][gval] = agg[g_idx].get(gval, 0.0) + rev
+
+                            text_parts.append(
+                                f"Rows: {row_count}  |  Revenue column: '{headers[num_ci]}'\n"
+                            )
+                            for g_idx, g_label in group_cols:
+                                totals = agg[g_idx]
+                                if not totals:
+                                    continue
+                                grand = sum(totals.values())
+                                text_parts.append(f"--- By {g_label} ---")
+                                for k, v in sorted(totals.items(), key=lambda x: -x[1]):
+                                    text_parts.append(f"  {k}: {v:,.2f}")
+                                text_parts.append(f"  TOTAL: {grand:,.2f}\n")
+                        else:
+                            # No aggregatable structure → header + 30-row sample
+                            text_parts.append(
+                                "Headers: " + " | ".join(h for h in headers if h)
+                            )
+                            for row in probe[:30]:
+                                row_text = " | ".join(str(c) for c in row if c is not None)
+                                if row_text.strip():
+                                    text_parts.append(row_text)
+                    else:
+                        # Small sheet → first 30 rows
+                        for row in probe[:30]:
+                            row_text = " | ".join(str(c) for c in row if c is not None)
+                            if row_text.strip():
+                                text_parts.append(row_text)
+
+                    text_parts.append("")
+
+                wb.close()
+                result = "\n".join(text_parts)
+                # If aggregation produced something useful, return it (up to 8000 chars).
+                # Otherwise fall back to the plain summary cap.
+                cap = max(SUMMARY_CHARS, 8000)
+                return result[:cap] if result.strip() else f"XLSX: {file_path.name}"
             except Exception:
                 return f"XLSX: {file_path.name}"
 

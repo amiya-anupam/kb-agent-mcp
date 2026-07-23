@@ -61,6 +61,14 @@ def _kb_root() -> pathlib.Path:
     return pathlib.Path(__file__).parent.parent
 
 KB_ROOT      = _kb_root()
+VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
+
+def folder_to_safe_name(name: str) -> str:
+    """Convert a folder name to a safe snake_case identifier (e.g. 'ACE Docs' → 'ace_docs')."""
+    n = name.lower()
+    n = re.sub(r"[^a-z0-9]+", "_", n)
+    return n.strip("_")
+
 LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 MODEL        = os.environ.get("KB_MODEL", "qwen3:14b")
@@ -167,6 +175,28 @@ _COMPLEX_QUESTION_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Questions that require reading actual file data — the README AUTO-INDEX only
+# stores short summaries, so these must bypass README-first and use raw-file RAG
+# which calls extract_full_text() on the matched files directly.
+_DATA_QUESTION_PATTERNS = re.compile(
+    r"\b(revenue|total revenue|arr|mrr|acv|tcv|quota|attainment|"
+    r"how much|how many|what is the (number|count|total|sum|amount|value|"
+    r"figure|balance|price|cost|rate|percentage|percent|ratio|score|metric)|"
+    r"what (are|were) the (number|count|total|sum|figures|numbers|metrics|results|"
+    r"revenue|sales|deals|renewals|bookings|customers|accounts)|"
+    r"list (all|every|the|each)|show me (all|the|every)|give me (all|the)|"
+    r"breakdown|by (quarter|region|country|geography|market|segment|"
+    r"product|customer|account|industry|channel)|"
+    r"q[1-4]\s*20\d\d|20\d\d\s*q[1-4]|fy\s*20\d\d|"
+    r"ytd|yoy|qoq|mom|r4q|trailing|rolling)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_data_question(question: str) -> bool:
+    """Return True when the question asks for concrete data, numbers, or lists."""
+    return bool(_DATA_QUESTION_PATTERNS.search(question))
+
 
 # ── README helpers ────────────────────────────────────────────────────────────
 
@@ -243,9 +273,14 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
     """
     Return (context_text, source_label) for the README-first strategy.
 
-    Returns (None, "") if README is absent or too thin — caller should
-    fall back to raw-file RAG.
+    Returns (None, "") if README is absent, too thin, or the question is a
+    data/numeric question — caller should fall back to raw-file RAG.
     """
+    # Data questions need real file content, not README summaries.
+    # Short-circuit immediately so raw-file RAG opens and reads the actual files.
+    if _is_data_question(question):
+        return None, ""
+
     folder = KB_ROOT / folder_name
     readme = _find_readme(folder)
 
@@ -332,17 +367,169 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
         elif ext in {".xlsx", ".xls"}:
             try:
                 import openpyxl
-                wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-                text = ""
+
+                # ── Cache-first XLSX extraction ───────────────────────────────
+                # Large XLSX files (e.g. 100 MB+ revenue data) take 50-100s to
+                # open with openpyxl at query time — too slow for interactive use.
+                #
+                # Solution: serve from the pre-aggregated summary stored in the
+                # vector index by update_index_for_file() / build_index().
+                # If the cache has a rich summary (>200 chars), return it directly.
+                # Only fall back to live file read for small/uncached files.
+                idx_path = VECTOR_STORE / f"{folder_to_safe_name(file_path.parent.name)}_index.json"
+                if idx_path.exists():
+                    try:
+                        idx_data = json.loads(idx_path.read_text())
+                        rel_path = str(file_path.relative_to(KB_ROOT))
+                        for entry in idx_data.get("entries", []):
+                            if entry.get("path") == rel_path:
+                                cached = entry.get("summary", "")
+                                if len(cached) > 200:
+                                    return cached[:max_chars]
+                                break
+                    except Exception:
+                        pass  # cache miss → fall through to live read
+
+                # ── Live single-pass streaming XLSX extraction ────────────────
+                # For large tabular files (revenue, pipeline data) we aggregate
+                # into per-dimension totals in a single streaming pass instead of
+                # materialising all rows.  The file is opened exactly once.
+                #
+                # Algorithm:
+                #   1. Read header row → detect numeric column (last all-numeric
+                #      col in first 200 data rows) and categorical group-by cols
+                #      by matching well-known header names.
+                #   2. Continue streaming the rest of the file, accumulating
+                #      per-group totals on the fly.
+                #   3. Emit aggregated summary.  Falls back to first-200-rows dump
+                #      when no aggregatable structure is found.
+
+                AGG_KEYWORDS = {
+                    "year": "Year", "quarter": "Quarter",
+                    "geography": "Geography", "market": "Market",
+                    "country": "Country",
+                    "finance family": "Finance Family",
+                    "revenue type": "Revenue Type",
+                    "on-prem or saas": "On-prem/SaaS",
+                    "division": "Division",
+                }
+
+                text_parts = []
+                wb = openpyxl.load_workbook(
+                    str(file_path), read_only=True, data_only=True
+                )
                 for sheet in wb.worksheets:
-                    text += f"[Sheet: {sheet.title}]\n"
-                    for row in sheet.iter_rows(max_row=200, values_only=True):
-                        row_text = " | ".join(str(c) for c in row if c is not None)
-                        if row_text.strip():
-                            text += row_text + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
+                    row_iter = sheet.iter_rows(values_only=True)
+
+                    # ── Header row ────────────────────────────────────────────
+                    try:
+                        hdr = next(row_iter)
+                    except StopIteration:
+                        continue
+                    headers = [str(c) if c is not None else "" for c in hdr]
+
+                    # ── Probe: first 200 rows to detect column types ───────────
+                    probe: list = []
+                    for row in row_iter:
+                        probe.append(row)
+                        if len(probe) >= 200:
+                            break
+                    is_large = len(probe) >= 200
+
+                    text_parts.append(f"[Sheet: {sheet.title}]")
+
+                    if is_large:
+                        # Detect numeric column (last col all-numeric in probe)
+                        num_ci: int | None = None
+                        for ci in range(len(headers) - 1, -1, -1):
+                            sample = [r[ci] for r in probe
+                                      if ci < len(r) and r[ci] is not None]
+                            if sample and all(isinstance(v, (int, float)) for v in sample):
+                                num_ci = ci
+                                break
+
+                        # Detect group-by columns
+                        group_cols: list[tuple[int, str]] = [
+                            (ci, AGG_KEYWORDS[h.lower().strip()])
+                            for ci, h in enumerate(headers)
+                            if h.lower().strip() in AGG_KEYWORDS
+                        ]
+
+                        if num_ci is not None and group_cols:
+                            # ── Streaming aggregation (single pass) ───────────
+                            agg: dict[int, dict[str, float]] = {
+                                g_idx: {} for g_idx, _ in group_cols
+                            }
+                            row_count = len(probe)
+
+                            # Accumulate probe rows first
+                            for row in probe:
+                                rev = row[num_ci] if num_ci < len(row) else None
+                                if not isinstance(rev, (int, float)):
+                                    continue
+                                for g_idx, _ in group_cols:
+                                    gval = (str(row[g_idx])
+                                            if g_idx < len(row) and row[g_idx] is not None
+                                            else "(blank)")
+                                    agg[g_idx][gval] = agg[g_idx].get(gval, 0.0) + rev
+
+                            # Continue streaming remaining rows
+                            for row in row_iter:
+                                row_count += 1
+                                rev = row[num_ci] if num_ci < len(row) else None
+                                if not isinstance(rev, (int, float)):
+                                    continue
+                                for g_idx, _ in group_cols:
+                                    gval = (str(row[g_idx])
+                                            if g_idx < len(row) and row[g_idx] is not None
+                                            else "(blank)")
+                                    agg[g_idx][gval] = agg[g_idx].get(gval, 0.0) + rev
+
+                            text_parts.append(
+                                f"Rows: {row_count}  |  Revenue column: '{headers[num_ci]}'\n"
+                            )
+                            for g_idx, g_label in group_cols:
+                                totals = agg[g_idx]
+                                if not totals:
+                                    continue
+                                grand = sum(totals.values())
+                                text_parts.append(f"--- By {g_label} ---")
+                                for k, v in sorted(totals.items(), key=lambda x: -x[1]):
+                                    text_parts.append(f"  {k}: {v:,.2f}")
+                                text_parts.append(f"  TOTAL: {grand:,.2f}\n")
+                        else:
+                            # Large but no aggregatable structure → probe sample
+                            text_parts.append(
+                                f"Rows: 200+ (sample)  Columns: {len(headers)}"
+                            )
+                            text_parts.append(
+                                "Headers: " + " | ".join(h for h in headers if h) + "\n"
+                            )
+                            for row in probe[:100]:
+                                row_text = " | ".join(
+                                    str(c) for c in row if c is not None
+                                )
+                                if row_text.strip():
+                                    text_parts.append(row_text)
+                    else:
+                        # Small sheet — dump all rows verbatim
+                        text_parts.append(
+                            f"Rows: {len(probe)}  Columns: {len(headers)}"
+                        )
+                        text_parts.append(
+                            "Headers: " + " | ".join(h for h in headers if h) + "\n"
+                        )
+                        for row in probe:
+                            row_text = " | ".join(
+                                str(c) for c in row if c is not None
+                            )
+                            if row_text.strip():
+                                text_parts.append(row_text)
+
+                    text_parts.append("")  # blank line between sheets
+
+                wb.close()
+                return "\n".join(text_parts)[:max_chars]
             except Exception as e:
                 return f"[XLSX read error: {e}]"
 

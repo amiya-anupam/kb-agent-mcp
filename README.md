@@ -167,18 +167,8 @@ python3 scripts/generate.py
 | Ingest script (`ingest.py`) | **Nowhere** — 100% local | Always |
 | Q&A via local LLM (Ollama) | **Nowhere** | When Ollama is running |
 | Q&A via cloud LLM (passthrough / OpenAI / Anthropic) | Remote cloud API | When `KB_LLM_PROVIDER` ≠ `ollama` or Ollama is unreachable |
-| `uv` package install | PyPI (first run only) | Avoidable with `--offline` after first run |
 
 > **Rule of thumb:** If `KB_LLM_PROVIDER=ollama` and Ollama is reachable, zero document content leaves your machine. Use `KB_PASSTHROUGH_FALLBACK=false` to prevent silent fallback to passthrough.
-
-### Network audit (knowledge-qa skill)
-
-The `knowledge-qa` Bob skill ships with [`network_audit.py`](~/.bob/skills/knowledge-qa/network_audit.py) — a pre-session connectivity probe that:
-
-- Detects whether the machine has internet access
-- Classifies every possible network touchpoint as **BLOCK** (your data leaves), **CAUTION** (network call, not your data), or **INFO** (local only)
-- Emits a randomised one-time **acknowledgement token** when a BLOCK risk is active — you must type the token back to proceed (defeats prompt-injection auto-acknowledgement)
-- Never calls `socket.setdefaulttimeout()` — uses per-socket timeout to avoid process-wide side effects
 
 ### Ingest script hardening
 
@@ -238,6 +228,7 @@ After running `scripts/setup.py`, your `.env` file is created automatically. Edi
 | `KB_EMBED_MODEL` | `nomic-embed-text` | Embedding model (leave blank for offline fallback) |
 | `KB_IGNORE_FOLDERS` | _(empty)_ | Comma-separated extra folders to exclude from discovery |
 | `KB_STALE_DAYS` | `90` | Days before a file is flagged as stale by `watch_kb.py` (0 = disabled) |
+| `KB_GENERATE_TIMEOUT` | `900` | Timeout in seconds for the `generate.py` subprocess in `watch_kb.py` (increase for large folders) |
 | `KB_PASSTHROUGH_FALLBACK` | `true` | Auto-switch to passthrough when Ollama unreachable (`false` = disable) |
 
 ### Token budget variables (`agents/context_budget.py`)
@@ -405,7 +396,6 @@ The watcher automatically checks all indexed files against a configurable age th
 |                                                               |
 |  Bob's Claude (or any AI tool)                                |
 |    - detects skill trigger from your question                 |
-|    - runs knowledge-qa/ingest.py (direct, for Q&A)           |
 |    - runs agent_knowledgebase.py (subprocess, for agent)      |
 |    - relays the answer back to you                            |
 |    - passthrough mode: answers using retrieved context        |
@@ -414,25 +404,6 @@ The watcher automatically checks all indexed files against a configurable age th
          v                                      |
 +---------------------------------------------------------------+
 |  YOUR MACHINE  [fully offline once set up]                    |
-|                                                               |
-|  knowledge-qa skill (~/.bob/skills/knowledge-qa/)             |
-|    ingest.py                                                  |
-|      23 file formats extracted (pdf, docx, xlsx, pptx,        |
-|      html, rtf, json, yaml, xml, epub, eml, images, ...)     |
-|      confidentiality classification per file                  |
-|      _classify_confidentiality(): EML header → PDF meta →    |
-|        DOCX props → filename/path → text body                 |
-|      .noindex sentinel: hard-exclude entire folders           |
-|      output: JSON array { file, type, chars, text,           |
-|                           confidential, confidential_reason } |
-|    network_audit.py                                           |
-|      connectivity probe: BLOCK / CAUTION / INFO              |
-|      random ack token when BLOCK active                       |
-|                                                               |
-|  SKILL.md consent gate (knowledge-qa)                         |
-|    Step 2: 🔒 badge inventory for flagged files              |
-|    Step 2b: pause + yes/no/numbered consent before context    |
-|    Step 4: 🔒 prefix on all citations from flagged sources   |
 |                                                               |
 |  agent_knowledgebase.py  (orchestrator)                       |
 |    reads domain_meta.json to discover all domains             |
@@ -443,12 +414,15 @@ The watcher automatically checks all indexed files against a configurable age th
 |    (parallel ThreadPoolExecutor for multi-domain)             |
 |                                                               |
 |  agent_base.py  (shared RAG logic)                            |
-|    Strategy 1: README-first  (primary)                        |
+|    Data-question bypass: _is_data_question() skips README     |
+|      for numeric/revenue/breakdown questions → RAG directly   |
+|    Strategy 1: README-first  (primary, non-data questions)    |
 |      reads <Folder>/README.md AUTO-INDEX block                |
 |      simple question  -> index block + intro (8k chars)       |
 |      complex question -> full README (up to 24k chars)        |
-|    Strategy 2: vector search  (fallback)                      |
+|    Strategy 2: vector search  (fallback / data questions)     |
 |      cosine similarity over *_index.json                      |
+|      XLSX: cache-first (index summary) → streaming aggregation|
 |    format directive injected into system_prompt               |
 |    confidence footer (High/Medium/Low) appended               |
 |    calls Ollama or emits passthrough block                    |
@@ -461,15 +435,6 @@ The watcher automatically checks all indexed files against a configurable age th
 |    runs agent subprocess, intercepts passthrough blocks       |
 |    re-sends context + question directly to Ollama             |
 |    falls back to raw context if Ollama also unreachable       |
-|                                                               |
-|  scripts/sync_skill.sh  (dev utility)                         |
-|    mirrors ~/.bob/skills/knowledge-qa/ → skills/knowledge-qa/ |
-|    --commit flag auto-commits the sync to the repo            |
-|                                                               |
-|  skills/knowledge-qa/  (repo bundle)                          |
-|    ingest.py, network_audit.py, SKILL.md                      |
-|    installed to ~/.bob/ by setup.py step 8                    |
-|    kept in sync with ~/.bob/ via sync_skill.sh                |
 |                                                               |
 |  agents/vector_store/                                         |
 |    *_index.json         embeddings cache per domain           |
@@ -514,15 +479,7 @@ python3 scripts/setup.py
   │         │               ~/.bob/skills/knowledgebase-agent/SKILL.md
   │         │               (auto-copied so Bob knows the CLI command to run)
   │
-  ├─ 8.  install_knowledge_qa_skill()
-  │         copies skills/knowledge-qa/ → ~/.bob/skills/knowledge-qa/
-  │         (ingest.py + network_audit.py + SKILL.md bundled in repo)
-  │
-  ├─ 9.  prewarm_uv_cache()
-  │         downloads all 9 uv packages into local cache
-  │         so `uv run --offline` works immediately on a fresh clone
-  │
-  └─ 10. install_install_skill()
+  └─ 8.  install_install_skill()
             copies skills/knowledgebase-install/ → ~/.bob/
 
 watch_kb.py then generates the AUTO-INDEX block in each folder README
@@ -709,13 +666,33 @@ All notable changes to this project are listed here, newest first.
 <!-- CHANGELOG_START -->
 ---
 
-### _(latest)_ — `775c978` — chore: fix hardcoded paths in SKILL.md + ingest.py
+### _(latest)_ — feat: data-question bypass + cache-first XLSX aggregation + KB_GENERATE_TIMEOUT
 
-**`skills/knowledge-qa/SKILL.md`** (+ `~/.bob/skills/knowledge-qa/SKILL.md`)
-- Replaced 3 hardcoded `/Users/amiyaanupam/` absolute paths with `$SKILL_DIR`-relative references — the skill now works correctly on any machine regardless of username
+**`agents/agent_base.py`**
+- Added `_DATA_QUESTION_PATTERNS` regex and `_is_data_question()` — numeric/revenue/breakdown questions bypass README-first entirely and go straight to raw-file RAG
+- Added `VECTOR_STORE` path constant and `folder_to_safe_name()` helper
+- `_get_readme_context()` returns `(None, "")` immediately when `_is_data_question()` is True
+- `extract_full_text()` for `.xlsx/.xls`: checks vector index cache first (if cached summary >200 chars, returns it instantly); falls back to single-pass streaming aggregation detecting revenue + group-by columns
 
-**`skills/knowledge-qa/ingest.py`** (+ `~/.bob/skills/knowledge-qa/ingest.py`)
-- `ALLOWED_ROOTS` and default `FOLDER` now read `KB_ROOT` from `.env` via new `_load_env_file()` + `_kb_root()` helpers — no longer hardcoded to `~/Desktop/KnowledgeBase`
+**`agents/embeddings.py`**
+- `extract_text_snippet()` for `.xlsx/.xls`: replaced 30-row dump with single-pass streaming aggregation; for large sheets stores pre-aggregated totals (up to 8000 chars) as the index `summary` field — eliminating the ~52 s file-open cost at query time
+
+**`scripts/watch_kb.py`**
+- Added `KB_GENERATE_TIMEOUT` env var (default `900` s); `run_generate()` uses it and prints it; timeout error message includes a hint to increase the var
+
+---
+
+### — chore: remove knowledge-qa skill — replaced by knowledgebase-agent
+
+**`scripts/setup.py`**
+- Removed `install_knowledge_qa_skill()` and `prewarm_uv_cache()` steps — no longer needed
+- Setup flow reduced from 10 steps to 8
+
+**`agents/SKILL.md`** + **`~/.bob/skills/knowledgebase-agent/SKILL.md`**
+- Expanded trigger phrases and domain descriptions so Bob routes all document questions directly to the knowledgebase-agent skill
+- Removed `knowledge-qa` fallback reference
+
+**Deleted files:** `skills/knowledge-qa/`, `scripts/sync_skill.sh`
 
 ---
 
@@ -728,84 +705,6 @@ All notable changes to this project are listed here, newest first.
 - `KB_MODEL` and `KB_LLM_BASE_URL` respected from `.env`
 
 ---
-
-### `52de808` — feat: prewarm uv cache during setup for offline ingest
-
-**`scripts/setup.py`**
-- New `prewarm_uv_cache()` function (step ⑨ in setup flow) — downloads all 9 `uv` packages (`pypdf`, `python-docx`, `openpyxl`, `python-pptx`, `beautifulsoup4`, `striprtf`, `pyyaml`, `ebooklib`, `defusedxml`) into the local uv cache at install time
-- After setup, `uv run --offline` works immediately on the machine — no PyPI calls needed at ingest time
-
----
-
-### `f56305e` — feat: add scripts/sync_skill.sh
-
-**`scripts/sync_skill.sh`** _(new file)_
-- Shell script that mirrors `~/.bob/skills/knowledge-qa/` → `skills/knowledge-qa/` in the repo
-- `--commit` flag auto-commits the sync with a `chore: sync knowledge-qa skill files` message
-- Enables a "edit in `~/.bob/`, sync back to repo, push" developer workflow
-
----
-
-### `7b15f69` — feat: bundle knowledge-qa skill files + auto-install via setup.py
-
-**`skills/knowledge-qa/`** _(new directory)_
-- `ingest.py`, `network_audit.py`, `SKILL.md` are now bundled directly in the repo under `skills/knowledge-qa/`
-- Fresh clones contain the skill without requiring a separate download step
-
-**`scripts/setup.py`**
-- New `install_knowledge_qa_skill()` function (step ⑧ in setup flow) — copies `skills/knowledge-qa/` to `~/.bob/skills/knowledge-qa/` automatically during setup
-- Bob's knowledge-qa skill is ready to use immediately after `python3 scripts/setup.py`
-
----
-
-### _(previous)_ — feat: confidentiality classification + consent gate + .noindex sentinel
-
-**`~/.bob/skills/knowledge-qa/ingest.py`**
-- Added `_classify_confidentiality()` — scans text body, filename/path, PDF metadata, DOCX core properties, and EML `Sensitivity` header for 16 confidentiality signal keywords
-- All output entries now carry two new fields: `confidential: bool` and `confidential_reason: str`
-- `extract_pdf()` and `extract_docx()` now return `(text, meta)` tuples to surface document-level metadata for classification
-- `extract_eml()` now returns `(text, sensitivity)` tuple to surface the `Sensitivity` header
-- Added `_TUPLE_EXTRACTORS` set and updated main dispatch loop to unpack tuple results per extractor type
-- Added `.noindex` folder sentinel — any directory containing a `.noindex` file is entirely skipped during `rglob`; implemented via `_in_noindex_dirs` pre-computed set + `_in_noindex_folder()` helper
-- `[TRUNCATED]` sentinel entry now also carries `confidential: false, confidential_reason: ""`
-
-**`~/.bob/skills/knowledge-qa/SKILL.md`**
-- Step 2 inventory now shows `🔒` badge and detection reason for flagged files
-- New Step 2b — confidential consent gate: pauses before loading context, lists flagged files, accepts yes / no / numbered selection
-- Step 3 updated: respects Step 2b exclusions when loading context
-- Citation format updated: `🔒` prefix on citations from confidential sources
-- New "Excluded confidential files" rule: excluded files are never quoted even on direct request
-- Notes section updated: confidentiality classification detail + `.noindex` sentinel usage
-
-**`README.md`**
-- New "Confidentiality classification" subsection under Security & Privacy: signal source table, skill behaviour walkthrough, `.noindex` sentinel usage example
-
----
-
-### _(previous)_ — security: knowledge-qa skill hardening + expanded file format support
-
-**`~/.bob/skills/knowledge-qa/ingest.py`**
-- Added support for 7 new file formats: `.html`/`.htm`, `.rtf`, `.json`, `.yaml`/`.yml`, `.xml`, `.epub`, `.eml`
-- 11 security vulnerabilities patched (see Security & Privacy section)
-- `_validate_folder()`: path traversal prevention — folder argument validated against an allowlist; any path outside exits with code 2
-- Symlink traversal fix: all symlinks skipped unconditionally in `rglob` walk
-- XML bomb / XXE fix: replaced `xml.etree.ElementTree` with `defusedxml` for all XML parsing
-- Image memory guard: size check before loading — files over 50 MB skipped
-- EML recursion bomb fix: MIME walk depth-limited to 50 parts
-- Error sanitisation: exception messages stripped of absolute paths before entering LLM context
-- Aggregate output cap: hard stop at 10,000,000 chars across all files with truncation sentinel
-
-**`~/.bob/skills/knowledge-qa/network_audit.py`** _(new file)_
-- Pre-session connectivity probe — detects internet and classifies every network touchpoint as BLOCK / CAUTION / INFO
-- Per-socket timeout instead of `socket.setdefaulttimeout()` (global mutation fix)
-- Randomised one-time acknowledgement token when BLOCK touchpoints are active — defeats prompt-injection bypass
-
-**`~/.bob/skills/knowledge-qa/SKILL.md`**
-- Security & Privacy section added above Step 1 — mandatory network audit before every session
-- Block warning now uses randomised token (not fixed phrase)
-- `--with defusedxml` added to all `uv run` commands
-- `--offline` mode documented for zero-network ingest after first run
-- Notes section updated: path allowlist, symlink skip, error sanitisation, aggregate cap, image size guard
 
 **`requirements.txt`**
 - Added: `python-docx`, `beautifulsoup4`, `striprtf`, `pyyaml`, `ebooklib`, `defusedxml`

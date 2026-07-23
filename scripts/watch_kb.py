@@ -694,13 +694,27 @@ def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
 
 # ── generate.py trigger ───────────────────────────────────────────────────────
 
+# Configurable via KB_GENERATE_TIMEOUT (seconds). Default 900s (15 min) to
+# handle large folders with many files needing LLM summarisation. The old
+# hard-coded 300s was too short for BizOps (72 files × ~4s each ≈ 288s minimum).
+_raw_gen_timeout = os.environ.get("KB_GENERATE_TIMEOUT", "900")
+try:
+    _GENERATE_TIMEOUT = int(_raw_gen_timeout)
+except ValueError:
+    _GENERATE_TIMEOUT = 900
+
+
 def run_generate(reason: str):
     generate_script = SCRIPT_DIR / "scripts" / "generate.py"
     if not generate_script.exists():
         print(f"[KB Watcher] ⚠ scripts/generate.py not found — skipping agent rebuild", flush=True)
         return
 
-    print(f"[KB Watcher] 🔄 Running scripts/generate.py ({reason})...", flush=True)
+    print(
+        f"[KB Watcher] 🔄 Running scripts/generate.py ({reason}, "
+        f"timeout={_GENERATE_TIMEOUT}s)...",
+        flush=True,
+    )
     try:
         # Forward KB_ROOT explicitly so the subprocess always knows which root
         # to scan — even if the parent process set it via a .env file that the
@@ -712,14 +726,18 @@ def run_generate(reason: str):
             capture_output=False,
             cwd=str(SCRIPT_DIR),
             env=env,
-            timeout=300,
+            timeout=_GENERATE_TIMEOUT,
         )
         if result.returncode == 0:
             print(f"[KB Watcher] ✓ generate.py completed", flush=True)
         else:
             print(f"[KB Watcher] ✗ generate.py exited {result.returncode}", flush=True)
     except subprocess.TimeoutExpired:
-        print(f"[KB Watcher] ✗ generate.py timed out after 300s", flush=True)
+        print(
+            f"[KB Watcher] ✗ generate.py timed out after {_GENERATE_TIMEOUT}s "
+            f"(set KB_GENERATE_TIMEOUT env var to increase)",
+            flush=True,
+        )
     except Exception as e:
         print(f"[KB Watcher] ✗ generate.py failed: {e}", flush=True)
 

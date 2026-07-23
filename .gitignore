@@ -52,7 +52,7 @@ ACE Docs/
 BizOps/
 CP4I Docs/
 
-# ── skills/ directory — only knowledge-qa/ is tracked ──────────
+# ── skills/ directory ───────────────────────────────────────────
 # Prevent generate.py from treating skills/ as a knowledge domain
 # and committing auto-generated README stubs.
 skills/*.md

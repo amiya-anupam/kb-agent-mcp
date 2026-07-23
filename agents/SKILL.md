@@ -3,15 +3,22 @@ name: knowledgebase-agent
 description: >
   Multi-domain KnowledgeBase agent. Routes questions to the correct
   specialist sub-agent automatically based on your knowledge folders.
-  Use when asking about any content in your KnowledgeBase.
+  Use when asking about any content in your KnowledgeBase — including
+  documents, spreadsheets, revenue data, product specs, migration guides,
+  or any files stored in your knowledge folders.
 
   Current domains (3):
-  - **ACE Docs**: Knowledge domain: ACE Docs
-  - **BizOps**: Knowledge domain: BizOps
-  - **CP4I Docs**: Knowledge domain: CP4I Docs
+  - **ACE Docs**: IBM App Connect Enterprise — revenue, migration, specs, guides
+  - **BizOps**: Business operations — renewals, deals, tracking, financials
+  - **CP4I Docs**: Cloud Pak for Integration — architecture, deployment, docs
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  ace docs, ace docs, bizops, bizops, cp4i docs, cp4i docs, what does my KnowledgeBase say, /kb, /agent
+  what does my KnowledgeBase say, /kb, /agent,
+  ACE, ACE revenue, App Connect, IIB, migration,
+  CP4I, Cloud Pak, integration,
+  BizOps, renewals, deals, revenue, financials,
+  what is the revenue, show me data, find in my documents,
+  what do my files say, search my knowledge base
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
