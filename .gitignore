@@ -51,3 +51,8 @@ agents/vector_store/*.json
 ACE Docs/
 BizOps/
 CP4I Docs/
+
+# ── skills/ directory — only knowledge-qa/ is tracked ──────────
+# Prevent generate.py from treating skills/ as a knowledge domain
+# and committing auto-generated README stubs.
+skills/*.md
