@@ -403,7 +403,71 @@ def install_knowledge_qa_skill():
         warn(f"Could not install knowledge-qa skill: {e}")
 
 
-# ── Step 7: install the knowledgebase-install skill ───────────────────────────
+# ── Step 7: pre-warm uv cache for knowledge-qa ingest.py ─────────────────────
+
+# Exact package list must stay in sync with skills/knowledge-qa/SKILL.md
+_UV_PACKAGES = [
+    "pypdf",
+    "python-docx",
+    "openpyxl",
+    "python-pptx",
+    "beautifulsoup4",
+    "striprtf",
+    "pyyaml",
+    "ebooklib",
+    "defusedxml",
+]
+
+
+def prewarm_uv_cache():
+    """Run a no-op uv invocation so all ingest.py dependencies are downloaded
+    and cached while internet is available.
+
+    After this step the user can run:
+        uv run --offline --with pypdf ... ingest.py
+    with zero network calls — even on a fresh machine.
+
+    Silently skips if:
+      - uv is not installed (not an error — Bob skill still works with internet)
+      - internet is not reachable (skip to avoid a hanging timeout)
+      - the prewarm exits non-zero for any other reason
+    """
+    hdr("⑧ Pre-warming uv cache for offline ingest")
+
+    uv = shutil.which("uv")
+    if not uv:
+        warn("uv not found — skipping cache prewarm.")
+        info("Install uv later:  curl -LsSf https://astral.sh/uv/install.sh | sh")
+        info("Then re-run:       uv run --with pypdf ... ingest.py")
+        return
+
+    # Build the uv command: run python -c '' (no-op) with all required packages.
+    # This forces uv to resolve + download every package without executing any
+    # real code, populating its local cache for future --offline runs.
+    ingest_script = SCRIPT_DIR / "skills" / "knowledge-qa" / "ingest.py"
+    if not ingest_script.exists():
+        warn("skills/knowledge-qa/ingest.py not found — skipping cache prewarm.")
+        return
+
+    with_flags = []
+    for pkg in _UV_PACKAGES:
+        with_flags += ["--with", pkg]
+
+    cmd = [uv, "run"] + with_flags + ["python", "-c", ""]
+
+    info(f"Downloading {len(_UV_PACKAGES)} packages into uv cache…")
+    info("(This runs once. Subsequent offline runs need no network.)")
+
+    rc = subprocess.run(cmd, capture_output=True).returncode
+    if rc == 0:
+        ok("uv cache primed — ingest.py can now run fully offline with --offline flag.")
+    else:
+        warn("uv cache prewarm exited non-zero — may need internet on first ingest run.")
+        info("Re-run manually once online:  " +
+             "uv run " + " ".join(with_flags) + " python -c ''")
+
+
+# ── Step 8: install the knowledgebase-install skill ───────────────────────────
 
 def install_install_skill():
     """Copy agents/install_skill.md → ~/.bob/skills/knowledgebase-install/SKILL.md
@@ -493,6 +557,7 @@ def main():
     check_knowledge_folders(kb_root, args.yes)
     run_generate(args.yes)
     install_knowledge_qa_skill()
+    prewarm_uv_cache()
     install_install_skill()
     print_done(kb_root)
 
