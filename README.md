@@ -395,56 +395,77 @@ The watcher automatically checks all indexed files against a configurable age th
 
 ## Architecture
 
+> For the complete technical reference — call graphs, security model, every decision tree, all environment variables — see **[ARCHITECTURE.md](ARCHITECTURE.md)** (18 sections, ground-truth from source).
+
 ### Component map
 
 ```
-+-------------------------------------------------------+
-|  CLOUD  [internet required]                           |
-|                                                       |
-|  Bob's Claude (or any AI tool)                        |
-|    - detects skill trigger from your question         |
-|    - runs the local agent as a subprocess             |
-|    - relays the answer back to you                    |
-|    - passthrough mode: answers using retrieved context|
-|    NOTE: never sees your raw document files           |
-+-------------------------------------------------------+
-         |  subprocess                   ^  stdout
-         v                               |
-+-------------------------------------------------------+
-|  YOUR MACHINE  [fully offline once set up]            |
-|                                                       |
-|  watch_kb.py  (daemon, always running)                |
-|    watches KB_ROOT for file/folder changes            |
-|    keeps *_index.json + README AUTO-INDEX current     |
-|                                                       |
-|  agent_knowledgebase.py  (orchestrator)               |
-|    reads domain_meta.json to discover all domains     |
-|    detect_format_intent() -- --format flag or NL      |
-|    keyword_route()   -- fast match, no LLM            |
-|    classify_intent() -- Ollama call only if ambiguous |
-|    dispatches to agent_base.ask() per domain          |
-|    (parallel ThreadPoolExecutor for multi-domain)     |
-|                                                       |
-|  agent_base.py  (shared RAG logic)                    |
-|    Strategy 1: README-first  (primary)                |
-|      reads <Folder>/README.md AUTO-INDEX block        |
-|      simple question  -> index block + intro          |
-|      complex question -> full README (up to 24k chars)|
-|    Strategy 2: vector search  (fallback)              |
-|      cosine similarity over *_index.json              |
-|    format directive injected into system_prompt       |
-|    confidence footer (High/Medium/Low) appended       |
-|    calls Ollama or emits passthrough block            |
-|                                                       |
-|  agents/vector_store/                                 |
-|    *_index.json         embeddings cache per domain   |
-|    domain_meta.json     descriptions + keywords       |
-|    file_summaries.json  LLM summary per file          |
-|    session_memory.json  conversation history          |
-|                                                       |
-|  <Folder>/README.md     primary retrieval context     |
-|    <!-- KB:AUTO-INDEX:START --> ... <!-- END -->       |
-+-------------------------------------------------------+
++---------------------------------------------------------------+
+|  CLOUD  [internet required]                                   |
+|                                                               |
+|  Bob's Claude (or any AI tool)                                |
+|    - detects skill trigger from your question                 |
+|    - runs knowledge-qa/ingest.py (direct, for Q&A)           |
+|    - runs agent_knowledgebase.py (subprocess, for agent)      |
+|    - relays the answer back to you                            |
+|    - passthrough mode: answers using retrieved context        |
++---------------------------------------------------------------+
+         |  subprocess / execute_command        ^  stdout
+         v                                      |
++---------------------------------------------------------------+
+|  YOUR MACHINE  [fully offline once set up]                    |
+|                                                               |
+|  knowledge-qa skill (~/.bob/skills/knowledge-qa/)             |
+|    ingest.py                                                  |
+|      23 file formats extracted (pdf, docx, xlsx, pptx,        |
+|      html, rtf, json, yaml, xml, epub, eml, images, ...)     |
+|      confidentiality classification per file                  |
+|      _classify_confidentiality(): EML header → PDF meta →    |
+|        DOCX props → filename/path → text body                 |
+|      .noindex sentinel: hard-exclude entire folders           |
+|      output: JSON array { file, type, chars, text,           |
+|                           confidential, confidential_reason } |
+|    network_audit.py                                           |
+|      connectivity probe: BLOCK / CAUTION / INFO              |
+|      random ack token when BLOCK active                       |
+|                                                               |
+|  SKILL.md consent gate (knowledge-qa)                         |
+|    Step 2: 🔒 badge inventory for flagged files              |
+|    Step 2b: pause + yes/no/numbered consent before context    |
+|    Step 4: 🔒 prefix on all citations from flagged sources   |
+|                                                               |
+|  agent_knowledgebase.py  (orchestrator)                       |
+|    reads domain_meta.json to discover all domains             |
+|    detect_format_intent() -- --format flag or NL              |
+|    keyword_route()   -- fast match, no LLM                    |
+|    classify_intent() -- Ollama call only if ambiguous         |
+|    dispatches to agent_base.ask() per domain                  |
+|    (parallel ThreadPoolExecutor for multi-domain)             |
+|                                                               |
+|  agent_base.py  (shared RAG logic)                            |
+|    Strategy 1: README-first  (primary)                        |
+|      reads <Folder>/README.md AUTO-INDEX block                |
+|      simple question  -> index block + intro (8k chars)       |
+|      complex question -> full README (up to 24k chars)        |
+|    Strategy 2: vector search  (fallback)                      |
+|      cosine similarity over *_index.json                      |
+|    format directive injected into system_prompt               |
+|    confidence footer (High/Medium/Low) appended               |
+|    calls Ollama or emits passthrough block                    |
+|                                                               |
+|  watch_kb.py  (daemon)                                        |
+|    watches KB_ROOT for file/folder changes                    |
+|    keeps *_index.json + README AUTO-INDEX current             |
+|                                                               |
+|  agents/vector_store/                                         |
+|    *_index.json         embeddings cache per domain           |
+|    domain_meta.json     descriptions + keywords               |
+|    session_memory.json  conversation history                  |
+|                                                               |
+|  <Folder>/README.md     primary retrieval context             |
+|    <!-- KB:AUTO-INDEX:START --> ... <!-- END -->               |
+|  <Folder>/.noindex      sentinel: skip entire folder          |
++---------------------------------------------------------------+
 ```
 
 ### Setup flow — run once
