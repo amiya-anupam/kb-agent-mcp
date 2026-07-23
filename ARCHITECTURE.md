@@ -126,9 +126,12 @@
 | `context_budget.py` | `agents/` | Single source of truth for all char/token budgets, compaction logic |
 | `memory.py` | `agents/` | Disk-backed multi-turn conversation history with session timeout |
 | `generate.py` | `scripts/` | Full rebuild — folder discovery, index, domain_meta.json, SKILL.md |
-| `setup.py` | `scripts/` | First-run installer — clones, installs deps, writes .env |
+| `setup.py` | `scripts/` | First-run installer — installs deps, writes .env, installs skills, prewarms uv cache |
+| `ask.py` | `scripts/` | Offline-capable CLI wrapper — runs agent, handles passthrough→Ollama re-send, raw-context fallback |
+| `sync_skill.sh` | `scripts/` | Mirrors `~/.bob/skills/knowledge-qa/` into `skills/knowledge-qa/` in the repo; supports `--commit` flag |
 | `watch_kb.py` | `scripts/` | Filesystem watcher daemon — incremental index updates on file changes |
 | `update_changelog.py` | `scripts/` | Appends git log entries to README.md changelog |
+| `skills/knowledge-qa/` | repo root | Bundled copies of `ingest.py`, `network_audit.py`, `SKILL.md` — installed to `~/.bob/` by `setup.py` |
 | `domain_meta.json` | `agents/vector_store/` | Runtime: per-domain config — folder, description, keywords, system_prompt, top_n |
 | `<domain>_index.json` | `agents/vector_store/` | Runtime: vector embeddings for RAG fallback |
 | `session_memory.json` | `agents/vector_store/` | Runtime: conversation history + timestamp |
@@ -142,10 +145,18 @@ User runs: python3 scripts/setup.py
      │
      ▼
 scripts/setup.py
-  1. Check prerequisites (python3, pip, git)
-  2. pip install -r requirements.txt
-  3. Create .env from .env.example (if not present)
-  4. Run scripts/generate.py
+   1. Check Python version (≥ 3.10 required)
+   2. pip install -r requirements.txt
+   3. Prompt for KB_ROOT folder (or use --kb-root flag)
+   4. Prompt for LLM provider + model (or default to Ollama passthrough)
+   5. Write .env from choices (if not present)
+   6. Verify at least one knowledge folder exists in KB_ROOT
+   7. Run scripts/generate.py (see below)
+   8. install_knowledge_qa_skill() — copies skills/knowledge-qa/ → ~/.bob/skills/knowledge-qa/
+   9. prewarm_uv_cache() — downloads all 9 uv packages (pypdf, python-docx, openpyxl,
+      python-pptx, beautifulsoup4, striprtf, pyyaml, ebooklib, defusedxml) into local
+      uv cache so `uv run --offline` works from day 1 on a fresh clone
+  10. install_install_skill() — copies skills/knowledgebase-install/ → ~/.bob/
      │
      ▼
 scripts/generate.py
@@ -602,7 +613,7 @@ History injection into LLM calls:
 
 | Control | Implementation | Guards against |
 |---|---|---|
-| Path traversal | `_validate_folder()` — resolves path, checks against `ALLOWED_ROOTS` (`~/Desktop/KnowledgeBase`, `/tmp`). `sys.exit(2)` on failure | Malicious `--folder` argument escaping KB root |
+| Path traversal | `_validate_folder()` — resolves path, checks against `ALLOWED_ROOTS` (reads `KB_ROOT` from `.env`; falls back to `~/Desktop/KnowledgeBase`). `sys.exit(2)` on failure | Malicious `--folder` argument escaping KB root |
 | Symlink traversal | `if f.is_symlink(): continue` in `rglob` loop | Symlinks pointing outside the allowed root |
 | XML bomb / XXE | `defusedxml.ElementTree` replaces `xml.etree.ElementTree` | Billion Laughs attack, quadratic blowup, XXE injection |
 | Image memory bomb | `path.stat().st_size > MAX_IMAGE_MB * 1024 * 1024` → skip before `read_bytes()` | Decompression of large images exhausting RAM |
@@ -671,9 +682,17 @@ History injection into LLM calls:
 
   scripts/
     generate.py                   ← full rebuild (domains + index + SKILL.md)
-    setup.py                      ← first-run installer
+    setup.py                      ← first-run installer (10 steps)
+    ask.py                        ← offline-capable CLI wrapper (passthrough→Ollama re-send)
+    sync_skill.sh                 ← mirrors ~/.bob/skills/knowledge-qa/ → skills/knowledge-qa/
     watch_kb.py                   ← filesystem watcher daemon
     update_changelog.py           ← appends git log to README
+
+  skills/
+    knowledge-qa/
+      SKILL.md                    ← bundled skill source (synced from ~/.bob/ via sync_skill.sh)
+      ingest.py                   ← bundled ingest script
+      network_audit.py            ← bundled network audit script
 
   <DomainFolder>/                 ← your knowledge folders
     README.md                     ← hand-written + AUTO-INDEX block
@@ -682,7 +701,7 @@ History injection into LLM calls:
 
 ~/.bob/skills/
   knowledge-qa/
-    SKILL.md                      ← Bob skill (knowledge-qa)
+    SKILL.md                      ← Bob skill (knowledge-qa) — installed by setup.py step 8
     ingest.py                     ← file extractor script
     network_audit.py              ← connectivity probe
   knowledgebase-agent/
@@ -748,4 +767,4 @@ Skill layer (no Python imports — runs as subprocess):
 
 ---
 
-*Last updated: confidentiality classification + consent gate + .noindex sentinel (commit `80baddb`)*
+*Last updated: fix hardcoded paths in SKILL.md + ingest.py; add ask.py, sync_skill.sh, uv prewarm, bundle skills/knowledge-qa/ (commit `775c978`)*

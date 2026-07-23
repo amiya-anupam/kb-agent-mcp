@@ -227,6 +227,21 @@
         <div class="block-title">~/.bob/skills/knowledge-qa/network_audit.py</div>
         <div class="block-sub">Connectivity probe. Detects internet reachability + cloud LLM. Emits <strong>BLOCK</strong> / <strong>CAUTION</strong> / <strong>OFFLINE</strong> status + a randomized <code>acknowledge_token</code> per run.</div>
       </div>
+      <div class="block">
+        <div class="tag tag-script">CLI wrapper</div>
+        <div class="block-title">scripts/ask.py</div>
+        <div class="block-sub">Offline-capable wrapper around agent_knowledgebase.py. Intercepts <code>&lt;&lt;&lt;KB_PASSTHROUGH&gt;&gt;&gt;</code> blocks and re-sends context + question directly to Ollama. Falls back to raw document excerpts if Ollama is also unreachable.</div>
+      </div>
+      <div class="block">
+        <div class="tag tag-script">dev utility</div>
+        <div class="block-title">scripts/sync_skill.sh</div>
+        <div class="block-sub">Mirrors <code>~/.bob/skills/knowledge-qa/</code> → <code>skills/knowledge-qa/</code> in the repo. Pass <code>--commit</code> to auto-commit the sync.</div>
+      </div>
+      <div class="block">
+        <div class="tag tag-script">repo bundle</div>
+        <div class="block-title">skills/knowledge-qa/</div>
+        <div class="block-sub">Bundled copies of <code>ingest.py</code>, <code>network_audit.py</code>, <code>SKILL.md</code>. Installed to <code>~/.bob/</code> by <code>setup.py</code> step 8. Kept in sync via <code>sync_skill.sh</code>.</div>
+      </div>
     </div>
   </div>
 
@@ -286,10 +301,10 @@
 
 
   
-  <div class="section-hdr">② Setup Flow (run once, or on new folder)</div>
+  <div class="section-hdr">② Setup Flow (run once: python3 scripts/setup.py)</div>
 
   <div class="flow-wrap">
-    <div class="flow-title">python3 generate.py</div>
+    <div class="flow-title">python3 scripts/setup.py — 10 steps</div>
     <div class="flow">
       <div class="step">
         <div class="step-num grn">1</div>
@@ -335,6 +350,22 @@
           <div class="step-actor grn">watch_kb.py</div>
           <div class="step-text">Already running. Builds AUTO-INDEX block for each folder's README using LLM-generated per-file summaries</div>
           <div class="step-note">This is the primary context source for all future queries</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num grn">7</div>
+        <div class="step-body">
+          <div class="step-actor grn">setup.py → install_knowledge_qa_skill()</div>
+          <div class="step-text">Copies <code>skills/knowledge-qa/</code> (bundled in repo) → <code>~/.bob/skills/knowledge-qa/</code></div>
+          <div class="step-note">Bob's knowledge-qa skill is ready to use immediately — no separate download needed</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num grn">8</div>
+        <div class="step-body">
+          <div class="step-actor grn">setup.py → prewarm_uv_cache()</div>
+          <div class="step-text">Downloads all 9 uv packages (pypdf, python-docx, openpyxl, python-pptx, beautifulsoup4, striprtf, pyyaml, ebooklib, defusedxml) into local uv cache</div>
+          <div class="step-note">Enables <code>uv run --offline</code> from day 1 — ingest makes zero PyPI calls after this step</div>
         </div>
       </div>
     </div>
@@ -607,6 +638,18 @@
       <td><span class="ok">✅ Local</span></td>
       <td>pypdf, python-pptx, openpyxl — all local file I/O</td>
     </tr>
+    <tr>
+      <td>uv package install (ingest deps)</td>
+      <td>setup.py → prewarm_uv_cache()</td>
+      <td><span class="net">🌐 Internet</span></td>
+      <td>One-time at setup. After prewarm, <code>uv run --offline</code> needs no network. Pass <code>--offline</code> to guarantee zero PyPI calls.</td>
+    </tr>
+    <tr>
+      <td>Skill sync (dev workflow)</td>
+      <td>scripts/sync_skill.sh</td>
+      <td><span class="ok">✅ Local</span></td>
+      <td>Pure file copy — no network call. Git push is a separate manual step.</td>
+    </tr>
   </table>
 
 
@@ -643,6 +686,21 @@
       <td><code>agent_knowledgebase.py</code> run</td>
       <td>Answer text to stdout<br />Updated <code>session_memory.json</code></td>
       <td>Every Bob invocation</td>
+    </tr>
+    <tr>
+      <td><code>scripts/sync_skill.sh</code></td>
+      <td>Updated <code>skills/knowledge-qa/</code> in repo (3 files)</td>
+      <td>Run manually by developer after editing <code>~/.bob/skills/knowledge-qa/</code></td>
+    </tr>
+    <tr>
+      <td><code>setup.py</code> step 8</td>
+      <td><code>~/.bob/skills/knowledge-qa/</code> (3 files installed)</td>
+      <td>Once at setup time (or re-run setup.py to update)</td>
+    </tr>
+    <tr>
+      <td><code>setup.py</code> step 9</td>
+      <td>uv local cache (~/.cache/uv) populated with 9 packages</td>
+      <td>Once at setup time</td>
     </tr>
   </table>
 

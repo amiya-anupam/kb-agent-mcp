@@ -457,6 +457,20 @@ The watcher automatically checks all indexed files against a configurable age th
 |    watches KB_ROOT for file/folder changes                    |
 |    keeps *_index.json + README AUTO-INDEX current             |
 |                                                               |
+|  scripts/ask.py  (CLI wrapper)                                |
+|    runs agent subprocess, intercepts passthrough blocks       |
+|    re-sends context + question directly to Ollama             |
+|    falls back to raw context if Ollama also unreachable       |
+|                                                               |
+|  scripts/sync_skill.sh  (dev utility)                         |
+|    mirrors ~/.bob/skills/knowledge-qa/ → skills/knowledge-qa/ |
+|    --commit flag auto-commits the sync to the repo            |
+|                                                               |
+|  skills/knowledge-qa/  (repo bundle)                          |
+|    ingest.py, network_audit.py, SKILL.md                      |
+|    installed to ~/.bob/ by setup.py step 8                    |
+|    kept in sync with ~/.bob/ via sync_skill.sh                |
+|                                                               |
 |  agents/vector_store/                                         |
 |    *_index.json         embeddings cache per domain           |
 |    domain_meta.json     descriptions + keywords               |
@@ -471,30 +485,45 @@ The watcher automatically checks all indexed files against a configurable age th
 ### Setup flow — run once
 
 ```
-Your document folders           generate.py
-  "My Domain"/       -------->    |
-  "Other Domain"/                 | 1. discover folders with indexable files
-  <any folder>/                   | 2. build *_index.json  (embed every file)
-                                  | 3. call LLM -> description + keywords
-                                  | 4. write domain_meta.json
-                                  | 5. write agents/SKILL.md
-                                  v
-                            agents/
-                              agent_base.py          core RAG pipeline
-                              embeddings.py          vector index
-                              memory.py              session memory
-                              agent_knowledgebase.py data-driven orchestrator
-                              context_budget.py      token budget engine
-                              SKILL.md               AI skill definition
-                              vector_store/
-                                <folder>_index.json
-                                domain_meta.json
-                                file_summaries.json
-                                session_memory.json
-                                  |
-                                  v
-                     ~/.bob/skills/knowledgebase-agent/SKILL.md
-                     (auto-copied so Bob knows the CLI command to run)
+python3 scripts/setup.py
+  │
+  ├─ 1-6.  check Python, pip install, choose KB_ROOT + LLM, write .env, verify folders
+  │
+  ├─ 7.  run scripts/generate.py
+  │         │
+  │         │  Your document folders
+  │         │    "My Domain"/       ──►  1. discover folders with indexable files
+  │         │    "Other Domain"/         2. build *_index.json  (embed every file)
+  │         │    <any folder>/           3. call LLM → description + keywords
+  │         │                            4. write domain_meta.json
+  │         │                            5. write agents/SKILL.md
+  │         │                            v
+  │         │                      agents/
+  │         │                        agent_base.py          core RAG pipeline
+  │         │                        embeddings.py          vector index
+  │         │                        memory.py              session memory
+  │         │                        agent_knowledgebase.py data-driven orchestrator
+  │         │                        context_budget.py      token budget engine
+  │         │                        SKILL.md               AI skill definition
+  │         │                        vector_store/
+  │         │                          <folder>_index.json
+  │         │                          domain_meta.json
+  │         │                          session_memory.json
+  │         │                            │
+  │         │                            v
+  │         │               ~/.bob/skills/knowledgebase-agent/SKILL.md
+  │         │               (auto-copied so Bob knows the CLI command to run)
+  │
+  ├─ 8.  install_knowledge_qa_skill()
+  │         copies skills/knowledge-qa/ → ~/.bob/skills/knowledge-qa/
+  │         (ingest.py + network_audit.py + SKILL.md bundled in repo)
+  │
+  ├─ 9.  prewarm_uv_cache()
+  │         downloads all 9 uv packages into local cache
+  │         so `uv run --offline` works immediately on a fresh clone
+  │
+  └─ 10. install_install_skill()
+            copies skills/knowledgebase-install/ → ~/.bob/
 
 watch_kb.py then generates the AUTO-INDEX block in each folder README
 (one-sentence LLM summary per file -- this is the primary retrieval context)
@@ -680,7 +709,56 @@ All notable changes to this project are listed here, newest first.
 <!-- CHANGELOG_START -->
 ---
 
-### _(latest)_ — feat: confidentiality classification + consent gate + .noindex sentinel
+### _(latest)_ — `775c978` — chore: fix hardcoded paths in SKILL.md + ingest.py
+
+**`skills/knowledge-qa/SKILL.md`** (+ `~/.bob/skills/knowledge-qa/SKILL.md`)
+- Replaced 3 hardcoded `/Users/amiyaanupam/` absolute paths with `$SKILL_DIR`-relative references — the skill now works correctly on any machine regardless of username
+
+**`skills/knowledge-qa/ingest.py`** (+ `~/.bob/skills/knowledge-qa/ingest.py`)
+- `ALLOWED_ROOTS` and default `FOLDER` now read `KB_ROOT` from `.env` via new `_load_env_file()` + `_kb_root()` helpers — no longer hardcoded to `~/Desktop/KnowledgeBase`
+
+---
+
+### `96c0a61` — feat: add scripts/ask.py — offline-capable CLI wrapper
+
+**`scripts/ask.py`** _(new file)_
+- Wraps `agent_knowledgebase.py` as a subprocess, capturing stdout
+- Detects `<<<KB_PASSTHROUGH>>>` blocks in output — when present, extracts question + context and re-sends directly to Ollama `localhost:11434/api/chat`
+- Falls back to printing raw retrieved context if Ollama is also unreachable, so the user always gets document excerpts even with zero network
+- `KB_MODEL` and `KB_LLM_BASE_URL` respected from `.env`
+
+---
+
+### `52de808` — feat: prewarm uv cache during setup for offline ingest
+
+**`scripts/setup.py`**
+- New `prewarm_uv_cache()` function (step ⑨ in setup flow) — downloads all 9 `uv` packages (`pypdf`, `python-docx`, `openpyxl`, `python-pptx`, `beautifulsoup4`, `striprtf`, `pyyaml`, `ebooklib`, `defusedxml`) into the local uv cache at install time
+- After setup, `uv run --offline` works immediately on the machine — no PyPI calls needed at ingest time
+
+---
+
+### `f56305e` — feat: add scripts/sync_skill.sh
+
+**`scripts/sync_skill.sh`** _(new file)_
+- Shell script that mirrors `~/.bob/skills/knowledge-qa/` → `skills/knowledge-qa/` in the repo
+- `--commit` flag auto-commits the sync with a `chore: sync knowledge-qa skill files` message
+- Enables a "edit in `~/.bob/`, sync back to repo, push" developer workflow
+
+---
+
+### `7b15f69` — feat: bundle knowledge-qa skill files + auto-install via setup.py
+
+**`skills/knowledge-qa/`** _(new directory)_
+- `ingest.py`, `network_audit.py`, `SKILL.md` are now bundled directly in the repo under `skills/knowledge-qa/`
+- Fresh clones contain the skill without requiring a separate download step
+
+**`scripts/setup.py`**
+- New `install_knowledge_qa_skill()` function (step ⑧ in setup flow) — copies `skills/knowledge-qa/` to `~/.bob/skills/knowledge-qa/` automatically during setup
+- Bob's knowledge-qa skill is ready to use immediately after `python3 scripts/setup.py`
+
+---
+
+### _(previous)_ — feat: confidentiality classification + consent gate + .noindex sentinel
 
 **`~/.bob/skills/knowledge-qa/ingest.py`**
 - Added `_classify_confidentiality()` — scans text body, filename/path, PDF metadata, DOCX core properties, and EML `Sensitivity` header for 16 confidentiality signal keywords

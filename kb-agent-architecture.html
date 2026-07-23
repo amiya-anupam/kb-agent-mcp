@@ -176,7 +176,7 @@
 
   <!-- ─────────────────────── SETUP ─────────────────────── -->
 
-  <div class="section-label">① Setup — run once: python3 generate.py</div>
+  <div class="section-label">① Setup — run once: python3 scripts/setup.py (10 steps)</div>
 
   <div class="flow-row">
     <div class="box box-doc" style="min-width:200px">
@@ -226,9 +226,13 @@
   </div>
 
   <div class="note">
+    <strong>setup.py</strong> runs 10 steps: checks Python, installs deps, configures .env, runs generate.py, installs the knowledge-qa skill to <code>~/.bob/</code>, prewarms the uv package cache (so <code>uv run --offline</code> works on first use), and installs the knowledgebase-install skill.
+    <br /><br />
     <strong>watch_kb.py</strong> — optional daemon you can run separately.
     Watches for file changes and updates vector indexes + README AUTO-INDEX blocks automatically.
     Only triggers <code>generate.py</code> when a <em>new top-level folder</em> is created.
+    <br /><br />
+    <strong>scripts/ask.py</strong> — offline-capable CLI wrapper. Runs the agent subprocess, intercepts passthrough blocks, and re-sends context directly to Ollama. Falls back to printing raw document excerpts if Ollama is unreachable.
   </div>
 
 
@@ -449,6 +453,24 @@
         <td><code>generate.py</code></td>
         <td>Setup script</td>
         <td>Discovers folders, builds everything</td>
+        <td><span class="tag tag-local">local</span></td>
+      </tr>
+      <tr>
+        <td><code>scripts/ask.py</code></td>
+        <td>CLI wrapper</td>
+        <td>Offline-capable wrapper — handles passthrough→Ollama re-send; raw-context fallback</td>
+        <td><span class="tag tag-local">local</span></td>
+      </tr>
+      <tr>
+        <td><code>scripts/sync_skill.sh</code></td>
+        <td>Dev utility</td>
+        <td>Mirrors ~/.bob/skills/knowledge-qa/ → skills/knowledge-qa/ in repo; --commit flag</td>
+        <td><span class="tag tag-local">local</span></td>
+      </tr>
+      <tr>
+        <td><code>skills/knowledge-qa/</code></td>
+        <td>Repo bundle</td>
+        <td>Bundled ingest.py, network_audit.py, SKILL.md — installed to ~/.bob/ by setup.py step 8</td>
         <td><span class="tag tag-local">local</span></td>
       </tr>
       <tr>
