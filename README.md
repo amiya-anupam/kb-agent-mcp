@@ -195,6 +195,33 @@ The `ingest.py` extraction script includes the following security controls:
 | Per-file text cap | 50,000 chars per file |
 | Total aggregate cap | 10,000,000 chars across all files — hard stop with truncation sentinel |
 
+### Confidentiality classification
+
+Every extracted file is automatically scanned for sensitivity signals. The result is surfaced in the Q&A skill as a consent gate — you choose whether to include flagged files in the session.
+
+| Signal source | What is checked |
+|---|---|
+| **Text body** | Case-insensitive scan for keywords: `CONFIDENTIAL`, `INTERNAL USE ONLY`, `NOT FOR DISTRIBUTION`, `NOT FOR SHARING`, `DO NOT SHARE`, `DO NOT DISTRIBUTE`, `PROPRIETARY`, `RESTRICTED`, `PRIVILEGED`, `IBM CONFIDENTIAL`, `COMPANY CONFIDENTIAL`, `FOR INTERNAL USE`, `CLASSIFICATION:`, `SENSITIVE`, `TOP SECRET`, `PRIVATE AND CONFIDENTIAL` |
+| **Filename / folder path** | Same keyword list applied to the full path string |
+| **PDF metadata** | `/Keywords` and `/Subject` fields from the PDF information dictionary |
+| **DOCX core properties** | `category` and `keywords` fields from the document's core properties |
+| **EML header** | `Sensitivity:` header — matches `confidential`, `company-confidential`, `personal`, `private`, `restricted` |
+
+**How it works in the skill:**
+1. Step 2 shows `🔒` next to flagged files in the inventory, with the detection reason
+2. Step 2b pauses and asks: include flagged files? (yes / no / pick by number)
+3. Excluded files are never loaded into the LLM context — their content is replaced with a placeholder
+4. Included flagged files are answered normally, with `🔒` prefix on all citations from them
+
+**`.noindex` sentinel — hard exclusion:**
+Place an empty file named `.noindex` inside any subfolder to prevent **all** files in that folder (and nested subfolders) from being extracted at all — they won't even appear in the inventory. Use this for truly off-limits directories:
+```
+~/Desktop/KnowledgeBase/
+  passwords/
+    .noindex          ← drop this empty file here
+    my-passwords.txt  ← never extracted, never in context
+```
+
 ---
 
 ## Environment Variables
@@ -632,7 +659,31 @@ All notable changes to this project are listed here, newest first.
 <!-- CHANGELOG_START -->
 ---
 
-### _(latest)_ — security: knowledge-qa skill hardening + expanded file format support
+### _(latest)_ — feat: confidentiality classification + consent gate + .noindex sentinel
+
+**`~/.bob/skills/knowledge-qa/ingest.py`**
+- Added `_classify_confidentiality()` — scans text body, filename/path, PDF metadata, DOCX core properties, and EML `Sensitivity` header for 16 confidentiality signal keywords
+- All output entries now carry two new fields: `confidential: bool` and `confidential_reason: str`
+- `extract_pdf()` and `extract_docx()` now return `(text, meta)` tuples to surface document-level metadata for classification
+- `extract_eml()` now returns `(text, sensitivity)` tuple to surface the `Sensitivity` header
+- Added `_TUPLE_EXTRACTORS` set and updated main dispatch loop to unpack tuple results per extractor type
+- Added `.noindex` folder sentinel — any directory containing a `.noindex` file is entirely skipped during `rglob`; implemented via `_in_noindex_dirs` pre-computed set + `_in_noindex_folder()` helper
+- `[TRUNCATED]` sentinel entry now also carries `confidential: false, confidential_reason: ""`
+
+**`~/.bob/skills/knowledge-qa/SKILL.md`**
+- Step 2 inventory now shows `🔒` badge and detection reason for flagged files
+- New Step 2b — confidential consent gate: pauses before loading context, lists flagged files, accepts yes / no / numbered selection
+- Step 3 updated: respects Step 2b exclusions when loading context
+- Citation format updated: `🔒` prefix on citations from confidential sources
+- New "Excluded confidential files" rule: excluded files are never quoted even on direct request
+- Notes section updated: confidentiality classification detail + `.noindex` sentinel usage
+
+**`README.md`**
+- New "Confidentiality classification" subsection under Security & Privacy: signal source table, skill behaviour walkthrough, `.noindex` sentinel usage example
+
+---
+
+### _(previous)_ — security: knowledge-qa skill hardening + expanded file format support
 
 **`~/.bob/skills/knowledge-qa/ingest.py`**
 - Added support for 7 new file formats: `.html`/`.htm`, `.rtf`, `.json`, `.yaml`/`.yml`, `.xml`, `.epub`, `.eml`
