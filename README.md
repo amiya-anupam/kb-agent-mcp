@@ -48,7 +48,14 @@ mkdir "My Project"
 cp /path/to/your/docs/*.pdf "My Project/"
 ```
 
-**Supported file types:** `.pdf` `.docx` `.pptx` `.xlsx` `.md` `.txt` `.csv` `.boxnote` `.ppt` `.doc`
+**Supported file types:**
+
+| Category | Extensions |
+|---|---|
+| Documents | `.pdf` `.docx` `.pptx` `.xlsx` `.xls` `.md` `.txt` `.csv` |
+| Web & structured data | `.html` `.htm` `.rtf` `.json` `.yaml` `.yml` `.xml` `.epub` `.eml` |
+| Box Notes | `.boxnote` |
+| Images | `.png` `.jpg` `.jpeg` `.gif` `.webp` (visual analysis via AI vision) |
 
 > Skip this step now if the user wants to add documents later. The agent will work with
 > zero folders — just run `python3 scripts/generate.py` again after adding documents.
@@ -148,6 +155,45 @@ python3 scripts/generate.py
 | `python3` not found (Windows) | Use `python` instead of `python3` throughout |
 | Ollama not running | Either start it with `ollama serve` or choose passthrough mode |
 | Permission denied on `.env` | Run `chmod 644 .env` |
+
+---
+
+## 🔒 Security & Privacy
+
+### Data residency — what leaves your machine
+
+| Operation | Goes to | Condition |
+|---|---|---|
+| Ingest script (`ingest.py`) | **Nowhere** — 100% local | Always |
+| Q&A via local LLM (Ollama) | **Nowhere** | When Ollama is running |
+| Q&A via cloud LLM (passthrough / OpenAI / Anthropic) | Remote cloud API | When `KB_LLM_PROVIDER` ≠ `ollama` or Ollama is unreachable |
+| `uv` package install | PyPI (first run only) | Avoidable with `--offline` after first run |
+
+> **Rule of thumb:** If `KB_LLM_PROVIDER=ollama` and Ollama is reachable, zero document content leaves your machine. Use `KB_PASSTHROUGH_FALLBACK=false` to prevent silent fallback to passthrough.
+
+### Network audit (knowledge-qa skill)
+
+The `knowledge-qa` Bob skill ships with [`network_audit.py`](~/.bob/skills/knowledge-qa/network_audit.py) — a pre-session connectivity probe that:
+
+- Detects whether the machine has internet access
+- Classifies every possible network touchpoint as **BLOCK** (your data leaves), **CAUTION** (network call, not your data), or **INFO** (local only)
+- Emits a randomised one-time **acknowledgement token** when a BLOCK risk is active — you must type the token back to proceed (defeats prompt-injection auto-acknowledgement)
+- Never calls `socket.setdefaulttimeout()` — uses per-socket timeout to avoid process-wide side effects
+
+### Ingest script hardening
+
+The `ingest.py` extraction script includes the following security controls:
+
+| Control | Detail |
+|---|---|
+| Path traversal prevention | `sys.argv[1]` validated against an allowlist (`~/Desktop/KnowledgeBase`, `/tmp`) — any path outside exits with code 2 |
+| Symlink traversal prevention | All symlinks skipped unconditionally during `rglob` walk |
+| XML bomb / XXE prevention | All XML parsing uses `defusedxml` — stdlib `ElementTree` is not used |
+| Image memory guard | Images over 50 MB are skipped before loading — only the path is emitted |
+| EML recursion bomb prevention | MIME walk depth-limited to 50 parts per email |
+| Error message sanitisation | Exception text stripped of absolute paths before entering LLM context |
+| Per-file text cap | 50,000 chars per file |
+| Total aggregate cap | 10,000,000 chars across all files — hard stop with truncation sentinel |
 
 ---
 
@@ -510,18 +556,20 @@ RAG fallback is always ~4,100 tok regardless of domain — bounded by `top_n=4 �
 
 ### What needs internet vs. what is offline
 
-| Operation | Runs on | Network |
-|---|---|---|
-| Skill trigger detection | AI tool / Bob's Claude | Internet |
-| Answer relay to you | AI tool / Bob's Claude | Internet |
-| Passthrough Q&A | AI tool / Bob's Claude | Internet |
-| Intent classification | Ollama (local) | Local only |
-| Q&A answering | Ollama (local) | Local only |
-| Text embedding | Ollama / sentence-transformers | Local only |
-| File summary generation | Ollama (local) | Local only |
-| Vector index search | numpy / scikit-learn | Local only |
-| File watching | OS filesystem events | Local only |
-| Document reading | pypdf / pptx / openpyxl | Local only |
+| Operation | Runs on | Network | Notes |
+|---|---|---|---|
+| Skill trigger detection | AI tool / Bob's Claude | **Internet** | Cloud LLM only |
+| Answer relay to you | AI tool / Bob's Claude | **Internet** | Cloud LLM only |
+| Passthrough Q&A | AI tool / Bob's Claude | **Internet** | Cloud LLM only |
+| `uv` package install | PyPI | **Internet** (first run) | Use `--offline` after first run |
+| Intent classification | Ollama (local) | Local only | — |
+| Q&A answering | Ollama (local) | Local only | — |
+| Text embedding | Ollama / sentence-transformers | Local only | — |
+| File summary generation | Ollama (local) | Local only | — |
+| Vector index search | numpy / scikit-learn | Local only | — |
+| File watching | OS filesystem events | Local only | — |
+| Document reading | pypdf / docx / openpyxl / bs4 / defusedxml | Local only | All extraction is offline |
+| Network audit probe | TCP to 8.8.8.8:53 | **Internet** (check only) | No data sent; connectivity detection only |
 
 ---
 
@@ -584,7 +632,42 @@ All notable changes to this project are listed here, newest first.
 <!-- CHANGELOG_START -->
 ---
 
-### `bcab415` — docs: update README and .env.example for all recent features _(latest)_
+### _(latest)_ — security: knowledge-qa skill hardening + expanded file format support
+
+**`~/.bob/skills/knowledge-qa/ingest.py`**
+- Added support for 7 new file formats: `.html`/`.htm`, `.rtf`, `.json`, `.yaml`/`.yml`, `.xml`, `.epub`, `.eml`
+- 11 security vulnerabilities patched (see Security & Privacy section)
+- `_validate_folder()`: path traversal prevention — folder argument validated against an allowlist; any path outside exits with code 2
+- Symlink traversal fix: all symlinks skipped unconditionally in `rglob` walk
+- XML bomb / XXE fix: replaced `xml.etree.ElementTree` with `defusedxml` for all XML parsing
+- Image memory guard: size check before loading — files over 50 MB skipped
+- EML recursion bomb fix: MIME walk depth-limited to 50 parts
+- Error sanitisation: exception messages stripped of absolute paths before entering LLM context
+- Aggregate output cap: hard stop at 10,000,000 chars across all files with truncation sentinel
+
+**`~/.bob/skills/knowledge-qa/network_audit.py`** _(new file)_
+- Pre-session connectivity probe — detects internet and classifies every network touchpoint as BLOCK / CAUTION / INFO
+- Per-socket timeout instead of `socket.setdefaulttimeout()` (global mutation fix)
+- Randomised one-time acknowledgement token when BLOCK touchpoints are active — defeats prompt-injection bypass
+
+**`~/.bob/skills/knowledge-qa/SKILL.md`**
+- Security & Privacy section added above Step 1 — mandatory network audit before every session
+- Block warning now uses randomised token (not fixed phrase)
+- `--with defusedxml` added to all `uv run` commands
+- `--offline` mode documented for zero-network ingest after first run
+- Notes section updated: path allowlist, symlink skip, error sanitisation, aggregate cap, image size guard
+
+**`requirements.txt`**
+- Added: `python-docx`, `beautifulsoup4`, `striprtf`, `pyyaml`, `ebooklib`, `defusedxml`
+
+**`README.md`**
+- Supported file types table expanded with all new formats
+- New Security & Privacy section with data residency table and ingest hardening table
+- "What needs internet" table updated: added `uv` PyPI install row, network audit probe row, updated document reading row
+
+---
+
+### `bcab415` — docs: update README and .env.example for all recent features
 
 README.md: - CLI Usage: new Structured Answer Format section with --format flag,   inline mode, NL
 phrase examples, and format table - Watcher: new Stale File Alerts subsection with startup/hourly

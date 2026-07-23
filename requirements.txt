@@ -9,8 +9,14 @@ watchdog>=4.0.0
 
 # ── File format support (required for full document coverage) ─
 pypdf>=4.0.0          # PDF reading
+python-docx>=1.1.0    # DOCX reading
 python-pptx>=1.0.0    # PPTX/PPT reading
 openpyxl>=3.1.0       # XLSX/XLS reading
+beautifulsoup4>=4.12  # HTML / HTM / EML body stripping
+striprtf>=0.0.26      # RTF markup removal
+pyyaml>=6.0           # YAML / YML parsing
+ebooklib>=0.18        # EPUB chapter extraction
+defusedxml>=0.7       # XML parsing — safe against XML bomb / XXE attacks
 
 # ── Offline embedding fallback (optional but recommended) ─────
 # Install this if you don't have Ollama or an OpenAI API key.
