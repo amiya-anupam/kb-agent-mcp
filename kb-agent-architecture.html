@@ -164,7 +164,7 @@
 <div class="page">
 
   <h1>KnowledgeBase Agent — System Architecture</h1>
-  <p class="subtitle">Everything runs locally on your machine. Two paths: <strong>Setup</strong> (once) and <strong>Query</strong> (every question).</p>
+  <p class="subtitle">Everything runs locally on your machine. Three paths: <strong>Setup</strong> (once), <strong>Knowledge-QA ingest</strong> (on demand), and <strong>Query</strong> (every question).</p>
 
   <div class="legend">
     <div class="legend-item"><div class="dot" style="background:#dbeafe;border:1.5px solid #93c5fd"></div> Core Python script</div>
@@ -347,9 +347,67 @@
   </div>
 
 
+  <!-- ─────────────────────── KNOWLEDGE-QA INGEST ─────────────────────── -->
+
+  <div class="section-label">③ Knowledge-QA Skill — Ingest &amp; Security (on demand)</div>
+
+  <div class="note">
+    Triggered when you ask Bob to answer questions about files in <code>~/Desktop/KnowledgeBase/</code>.
+    Runs entirely as a Bob skill — separate from the agent query flow above.
+  </div>
+
+  <div class="flow-row" style="margin-top:8px">
+    <div class="step-num" style="background:#7c5cd8">0</div>
+    <div class="box box-script" style="flex:1">
+      <div class="title">network_audit.py — connectivity probe</div>
+      <div class="sub">Checks internet reachability + detects cloud LLM. Emits BLOCK / CAUTION / OFFLINE status + a randomized <code>acknowledge_token</code>.</div>
+    </div>
+  </div>
+  <div class="arrow-down" style="margin-left:20px">↓ <span style="font-size:11px;color:#94a3b8;margin-left:4px">BLOCK → stop; CAUTION → warn + continue; OFFLINE → continue silently</span></div>
+
+  <div class="flow-row">
+    <div class="step-num" style="background:#7c5cd8">1</div>
+    <div class="box box-script" style="flex:1">
+      <div class="title">ingest.py — text extraction (23 formats)</div>
+      <div class="sub">
+        Reads every file in KnowledgeBase recursively. Skips symlinks + <code>.noindex</code>-marked folders.<br />
+        Formats: <strong>PDF, DOCX, XLSX/XLS, PPTX, TXT/MD/CSV, .boxnote, HTML, RTF, JSON, YAML, XML, EPUB, EML, PNG/JPG/GIF/WEBP</strong><br />
+        Output: JSON array — each entry: <code>{ file, type, chars, text, confidential, confidential_reason }</code>
+      </div>
+    </div>
+    <div class="arrow">→<div class="label">uv run</div></div>
+    <div class="box box-warn" style="min-width:150px">
+      <div class="title">Confidentiality classification</div>
+      <div class="sub">Checks EML Sensitivity header → PDF metadata → DOCX core props → filename → text body. Never redacts — flags only.</div>
+    </div>
+  </div>
+  <div class="arrow-down" style="margin-left:20px">↓ <span style="font-size:11px;color:#94a3b8;margin-left:4px">if confidential:true entries found</span></div>
+
+  <div class="flow-row">
+    <div class="step-num" style="background:#7c5cd8">2</div>
+    <div class="box box-warn" style="flex:1">
+      <div class="title">Consent gate (Step 2b in SKILL.md)</div>
+      <div class="sub">
+        🔒 Flagged files listed to user before any content enters LLM context.<br />
+        User chooses: <strong>yes</strong> (include all) · <strong>no</strong> (exclude all) · <strong>1,2…</strong> (include specific).<br />
+        Runs even in offline/local LLM mode — separate from the network BLOCK gate.
+      </div>
+    </div>
+  </div>
+  <div class="arrow-down" style="margin-left:20px">↓ <span style="font-size:11px;color:#94a3b8;margin-left:4px">approved content loaded into Bob context</span></div>
+
+  <div class="flow-row">
+    <div class="step-num" style="background:#7c5cd8">3</div>
+    <div class="box box-llm" style="flex:1">
+      <div class="title">Bob (Claude) — Q&amp;A over your documents</div>
+      <div class="sub">Holds all approved <code>text</code> fields in context. Answers questions with citations. Never re-runs ingest unless user requests refresh.</div>
+    </div>
+  </div>
+
+
   <!-- ─────────────────────── PASSTHROUGH ─────────────────────── -->
 
-  <div class="section-label">③ Passthrough mode — when Ollama is not running</div>
+  <div class="section-label">④ Passthrough mode — when Ollama is not running</div>
 
   <div class="box-row">
     <div class="box box-script" style="flex:1">
@@ -376,7 +434,7 @@
 
   <!-- ─────────────────────── FILES TABLE ─────────────────────── -->
 
-  <div class="section-label">Files on your machine</div>
+  <div class="section-label">⑤ Files on your machine</div>
   <table>
     <thead>
       <tr>
@@ -442,10 +500,22 @@
         <td><span class="tag tag-disk">disk</span></td>
       </tr>
       <tr>
-        <td><code>agents/vector_store/file_summaries.json</code></td>
-        <td>Summary cache</td>
-        <td>One-sentence LLM summary per file (keyed by content hash)</td>
-        <td><span class="tag tag-disk">disk</span></td>
+        <td><code>~/.bob/skills/knowledge-qa/ingest.py</code></td>
+        <td>Ingest script</td>
+        <td>Extracts text from 23 file formats; classifies confidentiality; enforces .noindex sentinel</td>
+        <td><span class="tag tag-local">skill</span></td>
+      </tr>
+      <tr>
+        <td><code>~/.bob/skills/knowledge-qa/network_audit.py</code></td>
+        <td>Network probe</td>
+        <td>Detects internet + cloud LLM; emits BLOCK / CAUTION / OFFLINE + randomized ack token</td>
+        <td><span class="tag tag-local">skill</span></td>
+      </tr>
+      <tr>
+        <td><code>~/.bob/skills/knowledge-qa/SKILL.md</code></td>
+        <td>QA skill config</td>
+        <td>Drives the ingest → consent gate → Q&amp;A flow; security rules; Step 2b consent gate</td>
+        <td><span class="tag tag-cloud">Bob</span></td>
       </tr>
       <tr>
         <td><code>agents/vector_store/session_memory.json</code></td>

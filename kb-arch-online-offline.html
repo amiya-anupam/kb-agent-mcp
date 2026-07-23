@@ -217,6 +217,16 @@
         <div class="block-title">agents/context_budget.py</div>
         <div class="block-sub">Single source of truth for all token budgets. Compacts README index blocks at both write-time (watcher) and query-time (agent). Defines collapse rules for repeated-version file groups.</div>
       </div>
+      <div class="block">
+        <div class="tag tag-script">skill script</div>
+        <div class="block-title">~/.bob/skills/knowledge-qa/ingest.py</div>
+        <div class="block-sub">Extracts text from 23 formats (PDF, DOCX, XLSX, PPTX, MD, CSV, HTML, RTF, JSON, YAML, XML, EPUB, EML, images…). Classifies confidentiality. Skips symlinks + <code>.noindex</code> folders. Run via <code>uv run</code> — zero network calls.</div>
+      </div>
+      <div class="block">
+        <div class="tag tag-script">skill script</div>
+        <div class="block-title">~/.bob/skills/knowledge-qa/network_audit.py</div>
+        <div class="block-sub">Connectivity probe. Detects internet reachability + cloud LLM. Emits <strong>BLOCK</strong> / <strong>CAUTION</strong> / <strong>OFFLINE</strong> status + a randomized <code>acknowledge_token</code> per run.</div>
+      </div>
     </div>
   </div>
 
@@ -240,9 +250,9 @@
         <div class="block-sub">LLM-generated descriptions + keywords per domain. Used for fast keyword routing before LLM classification.</div>
       </div>
       <div class="block">
-        <div class="tag tag-file">summary cache</div>
-        <div class="block-title">agents/vector_store/<br />file_summaries.json</div>
-        <div class="block-sub">One-sentence LLM summary per file, keyed by content hash. Populates each folder's README AUTO-INDEX block.</div>
+        <div class="tag tag-file">sentinel</div>
+        <div class="block-title">&lt;Folder&gt;/.noindex</div>
+        <div class="block-sub">Empty file. Place inside any subfolder to prevent ALL files in it (and nested subfolders) from being extracted by ingest.py — regardless of type or consent gate.</div>
       </div>
       <div class="block">
         <div class="tag tag-file">session memory</div>
@@ -363,7 +373,7 @@
         <div class="step-num grn">4</div>
         <div class="step-body">
           <div class="step-actor grn">watch_kb → Ollama (qwen3:14b)</div>
-          <div class="step-text">Generates one-sentence summary for changed file → caches in <code>file_summaries.json</code></div>
+          <div class="step-text">Generates one-sentence summary for changed file → used to rebuild README AUTO-INDEX block</div>
           <div class="step-note">Uses text snippet as fallback if LLM unreachable</div>
         </div>
       </div>
@@ -380,14 +390,68 @@
 
   
   <div class="decision">
-    ⚡ <strong>Folder deleted</strong> → immediately deletes agent .py + _index.json + domain_meta entry (no debounce, no generate.py)<br />
-    ⚡ <strong>Folder renamed</strong> → immediately renames all artifacts inline (no generate.py)<br />
-    ⚡ <strong>New folder</strong> → debounced 5s → triggers generate.py to build full new agent
+    ⚡ <strong>Folder deleted</strong> → immediately deletes <code>*_index.json</code> + domain_meta entry (no debounce, no generate.py)<br />
+    ⚡ <strong>Folder renamed</strong> → immediately renames index .json + re-keys domain_meta entry inline<br />
+    ⚡ <strong>New folder</strong> → debounced 5s → triggers generate.py to build full new domain
   </div>
 
 
   
-  <div class="section-hdr">④ Query Flow — What happens when you ask Bob a question</div>
+  <div class="section-hdr">④ Knowledge-QA Skill — Ingest &amp; Security Flow</div>
+
+  <div class="flow-wrap">
+    <div class="flow-title">You ask Bob a question about files in ~/Desktop/KnowledgeBase/</div>
+    <div class="flow">
+      <div class="step">
+        <div class="step-num alt">0</div>
+        <div class="step-body">
+          <div class="step-actor alt">network_audit.py</div>
+          <div class="step-text">Connectivity probe runs first. Detects internet + cloud LLM type.</div>
+          <div class="step-note">BLOCK → stop with ⛔ warning + random token gate · CAUTION → ⚠️ notice then continue · OFFLINE → ✅ continue silently</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num alt">1</div>
+        <div class="step-body">
+          <div class="step-actor alt">ingest.py (via uv run)</div>
+          <div class="step-text">Reads KnowledgeBase recursively. Extracts text from 23 formats. Skips symlinks + <code>.noindex</code> folders. Caps at 50k chars/file, 10M chars total.</div>
+          <div class="step-note">Each entry → <code>{ file, type, chars, text, confidential, confidential_reason }</code></div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num alt">1b</div>
+        <div class="step-body">
+          <div class="step-actor alt">_classify_confidentiality() — inside ingest.py</div>
+          <div class="step-text">Tags each entry: EML Sensitivity header → PDF metadata → DOCX core props → filename/path → text body (first match wins). Never redacts.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num alt">2</div>
+        <div class="step-body">
+          <div class="step-actor alt">SKILL.md — Step 2: Inventory report</div>
+          <div class="step-text">Bob displays file list. Non-confidential = plain bullet. Confidential = 🔒 prefix + reason.</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num alt">2b</div>
+        <div class="step-body">
+          <div class="step-actor alt">SKILL.md — Step 2b: Consent gate</div>
+          <div class="step-text">If any <code>confidential:true</code> entries: pauses. Lists flagged files. User picks <strong>yes</strong> / <strong>no</strong> / numbered subset before content enters LLM context.</div>
+          <div class="step-note">Runs even in offline/local-LLM mode — separate layer from the network BLOCK gate above</div>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num alt">3</div>
+        <div class="step-body">
+          <div class="step-actor alt">Bob (Claude) — Q&amp;A</div>
+          <div class="step-text">Holds approved <code>text</code> fields in context. Answers questions with source citations (🔒 prefix for confidential sources). Excluded files are never reproduced even if asked.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <div class="section-hdr">⑤ Query Flow — What happens when you ask Bob a question</div>
 
   <div class="flow-wrap">
     <div class="flow-title">You → Bob → agent_knowledgebase.py → answer</div>
@@ -468,7 +532,7 @@
 
 
   
-  <div class="section-hdr">⑤ What Needs Internet vs. What Is Offline</div>
+  <div class="section-hdr">⑥ What Needs Internet vs. What Is Offline</div>
 
   <table>
     <tr>
@@ -547,7 +611,7 @@
 
 
   
-  <div class="section-hdr">⑥ File-to-Artifact Map (what generates what)</div>
+  <div class="section-hdr">⑦ File-to-Artifact Map (what generates what)</div>
 
   <table>
     <tr>
@@ -562,17 +626,17 @@
     </tr>
     <tr>
       <td><code>watch_kb.py</code> — file event</td>
-      <td>Updated <code>*_index.json</code> entry<br />Updated <code>file_summaries.json</code> entry<br />Updated <code>README.md</code> AUTO-INDEX block</td>
+      <td>Updated <code>*_index.json</code> entry<br />Updated <code>README.md</code> AUTO-INDEX block</td>
       <td>Debounced 5s after file add / modify / delete / rename</td>
     </tr>
     <tr>
       <td><code>watch_kb.py</code> — folder delete</td>
-      <td>Deletes <code>agent_&lt;safe&gt;.py</code><br />Deletes <code>&lt;safe&gt;_index.json</code><br />Removes entry from <code>domain_meta.json</code></td>
+      <td>Deletes <code>&lt;safe&gt;_index.json</code><br />Removes entry from <code>domain_meta.json</code></td>
       <td>Immediately (no debounce)</td>
     </tr>
     <tr>
       <td><code>watch_kb.py</code> — folder rename</td>
-      <td>Renames agent .py + index .json<br />Re-keys domain_meta + file_summaries</td>
+      <td>Renames <code>*_index.json</code><br />Re-keys <code>domain_meta.json</code> entry</td>
       <td>Immediately (no debounce)</td>
     </tr>
     <tr>
