@@ -373,7 +373,37 @@ def run_generate(yes: bool):
     ok("generate.py completed")
 
 
-# ── Step 6: install the knowledgebase-install skill ───────────────────────────
+# ── Step 6: install the knowledge-qa skill ────────────────────────────────────
+
+def install_knowledge_qa_skill():
+    """Copy skills/knowledge-qa/ → ~/.bob/skills/knowledge-qa/
+
+    This installs ingest.py, network_audit.py, and SKILL.md — the three files
+    that provide confidentiality classification, the network audit gate, and
+    the consent gate (Step 2b).  Without this step a fresh clone has none of
+    those security enhancements.
+    """
+    src_dir = SCRIPT_DIR / "skills" / "knowledge-qa"
+    if not src_dir.is_dir():
+        warn("skills/knowledge-qa/ not found in repo — skipping knowledge-qa skill install")
+        return
+
+    bob_home = pathlib.Path.home() / ".bob"
+    if not bob_home.exists():
+        return  # Bob not installed — silently skip
+
+    dest_dir = bob_home / "skills" / "knowledge-qa"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for src_file in src_dir.iterdir():
+            if src_file.is_file():
+                shutil.copy2(src_file, dest_dir / src_file.name)
+        ok(f"knowledge-qa skill installed: {dest_dir}/")
+    except Exception as e:
+        warn(f"Could not install knowledge-qa skill: {e}")
+
+
+# ── Step 7: install the knowledgebase-install skill ───────────────────────────
 
 def install_install_skill():
     """Copy agents/install_skill.md → ~/.bob/skills/knowledgebase-install/SKILL.md
@@ -397,14 +427,17 @@ def install_install_skill():
 # ── Done ──────────────────────────────────────────────────────────────────────
 
 def print_done(kb_root: pathlib.Path):
-    skill = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-agent" / "SKILL.md"
+    skill         = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-agent" / "SKILL.md"
     install_skill = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-install" / "SKILL.md"
+    qa_skill      = pathlib.Path.home() / ".bob" / "skills" / "knowledge-qa" / "SKILL.md"
     hdr("✅  Setup complete!")
     print()
     if skill.exists():
         print(_color("32", "  Bob skill installed:") + f" {skill}")
         if install_skill.exists():
             print(_color("32", "  Install skill installed:") + f" {install_skill}")
+        if qa_skill.exists():
+            print(_color("32", "  Knowledge-QA skill installed:") + f" {qa_skill}")
         print()
         print("  Ask Bob a question to get started:")
         print("    \"What does my KnowledgeBase say about X?\"")
@@ -459,6 +492,7 @@ def main():
     setup_env(kb_root, llm_config)
     check_knowledge_folders(kb_root, args.yes)
     run_generate(args.yes)
+    install_knowledge_qa_skill()
     install_install_skill()
     print_done(kb_root)
 
