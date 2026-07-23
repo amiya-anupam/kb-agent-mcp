@@ -56,14 +56,81 @@ import re
 import os
 from pathlib import Path
 
+
+# --------------------------------------------------------------------------- #
+# Load .env so KB_ROOT is available when run via uv (no shell env inheritance) #
+# --------------------------------------------------------------------------- #
+
+def _load_env_file() -> None:
+    """
+    Try to read a .env file so KB_ROOT is available when ingest.py is
+    launched directly via uv (which may not inherit the shell environment).
+
+    Search order:
+      1. KB_ROOT env var already set → look for .env beside it
+      2. Walk up from ingest.py looking for a .env file (finds the repo root
+         regardless of where the skill was installed)
+      3. ~/Desktop/KnowledgeBase/.env  (common default location)
+    """
+    # Already loaded by caller
+    if os.environ.get("_KB_ENV_LOADED"):
+        return
+
+    candidates: list[Path] = []
+
+    # 1. Beside KB_ROOT if already set in environment
+    kb = os.environ.get("KB_ROOT", "").strip()
+    if kb:
+        candidates.append(Path(kb).expanduser() / ".env")
+
+    # 2. Walk up from this file until we find a .env (stops at filesystem root).
+    #    Works when ingest.py is run directly from the repo (not from ~/.bob/).
+    here = Path(__file__).resolve().parent
+    for parent in [here] + list(here.parents):
+        candidates.append(parent / ".env")
+        if parent == parent.parent:   # filesystem root
+            break
+
+    # 3. Common install locations: the KB root is often ~/Desktop/KnowledgeBase
+    #    or ~/KnowledgeBase (the two defaults offered by setup.py).
+    candidates.append(Path.home() / "Desktop" / "KnowledgeBase" / ".env")
+    candidates.append(Path.home() / "KnowledgeBase" / ".env")
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        content = candidate.read_text(encoding="utf-8")
+        # Only treat this as the KB .env if it contains KB_ROOT.
+        # Skips unrelated .env files (e.g. ~/.bob/.env) encountered during walk-up.
+        if "KB_ROOT" not in content:
+            continue
+        for line in content.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                os.environ.setdefault(k.strip(), v.strip())
+        os.environ["_KB_ENV_LOADED"] = "1"
+        break
+
+_load_env_file()
+
+
 # --------------------------------------------------------------------------- #
 # Configuration / limits                                                        #
 # --------------------------------------------------------------------------- #
 
+def _kb_root() -> Path:
+    """Return the KB_ROOT from env, falling back to ~/Desktop/KnowledgeBase."""
+    raw = os.environ.get("KB_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.home() / "Desktop" / "KnowledgeBase"
+
+
 # Roots the folder argument must resolve inside (prevents path traversal).
-# Only the Desktop KnowledgeBase and /tmp (for tests) are allowed.
+# KB_ROOT (from .env) is always allowed; /tmp is allowed for tests.
 ALLOWED_ROOTS = [
-    Path.home() / "Desktop" / "KnowledgeBase",
+    _kb_root(),
     Path("/tmp"),
 ]
 
@@ -126,7 +193,7 @@ def _validate_folder(raw: str) -> Path:
 
 
 FOLDER = _validate_folder(sys.argv[1]) if len(sys.argv) > 1 \
-         else (Path.home() / "Desktop" / "KnowledgeBase").resolve()
+         else _kb_root().resolve()
 
 TEXT_TYPES  = {".pdf", ".docx", ".xlsx", ".xls", ".pptx", ".txt", ".md", ".csv"}
 WEB_TYPES   = {".html", ".htm", ".rtf", ".json", ".yaml", ".yml", ".xml", ".epub", ".eml"}

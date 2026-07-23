@@ -22,7 +22,7 @@ You are a document Q&A assistant. When this skill activates, follow these steps 
 Before ingesting any files, run the network audit script:
 
 ```bash
-python3 /Users/amiyaanupam/.bob/skills/knowledge-qa/network_audit.py
+python3 "$SKILL_DIR/network_audit.py"
 ```
 
 Parse the JSON output and check two fields:
@@ -67,7 +67,7 @@ Never make a silent internet call. The user must always see why.
 ## Step 1 — Ingest the KnowledgeBase folder
 
 Run the ingestion script using `execute_command`. This recursively extracts text from every
-supported file in `~/Desktop/KnowledgeBase/` and all its subfolders.
+supported file in the KnowledgeBase folder and all its subfolders.
 
 ```bash
 uv run \
@@ -80,14 +80,14 @@ uv run \
   --with pyyaml \
   --with ebooklib \
   --with defusedxml \
-  /Users/amiyaanupam/.bob/skills/knowledge-qa/ingest.py
+  "$SKILL_DIR/ingest.py"
 ```
 
 > **Offline mode** (no PyPI calls after first run): add `--offline` between `uv run` and the first `--with` flag. This forces uv to use only its local package cache and makes zero network requests:
 > ```bash
 > uv run --offline --with pypdf --with python-docx --with openpyxl --with python-pptx \
 >   --with beautifulsoup4 --with striprtf --with pyyaml --with ebooklib --with defusedxml \
->   /Users/amiyaanupam/.bob/skills/knowledge-qa/ingest.py
+>   "$SKILL_DIR/ingest.py"
 > ```
 
 - `uv` auto-installs dependencies on first run — this may take 10–20 seconds the first time.
@@ -210,7 +210,7 @@ go back to **Step 1** and re-run the ingest script to pick up newly added files.
 ## Notes
 
 - The folder path can be overridden by passing a different path as an argument:
-  `/Users/amiyaanupam/.bob/skills/knowledge-qa/ingest.py /path/to/other/folder`
+  `"$SKILL_DIR/ingest.py" /path/to/other/folder`
   **Security**: The argument is validated against an allowlist of roots (`~/Desktop/KnowledgeBase`, `/tmp`). Paths outside this list are rejected — this prevents path traversal attacks.
 - Symlinks inside the KnowledgeBase folder are silently skipped. They are never followed, even if they point to a location inside the allowed root.
 - Text is capped at 50,000 characters per file. Very large files will be truncated; let the user know if this happens (chars will be exactly 50,000).
