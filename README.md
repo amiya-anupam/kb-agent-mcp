@@ -408,12 +408,17 @@ The watcher automatically checks all indexed files against a configurable age th
 |  agent_knowledgebase.py  (orchestrator)                       |
 |    reads domain_meta.json to discover all domains             |
 |    detect_format_intent() -- --format flag or NL              |
-|    keyword_route()   -- fast match, no LLM                    |
-|    classify_intent() -- Ollama call only if ambiguous         |
-|    dispatches to agent_base.ask() per domain                  |
-|    (parallel ThreadPoolExecutor for multi-domain)             |
+|    keyword_route() + _keyword_confidence()                    |
+|      fast match, no LLM; confident if 1 domain >= 2 hits OR  |
+|      one domain has >=3x hits of any other (dominant-match)   |
+|    classify_intent() -- local LLM only if keyword ambiguous   |
+|    call_sub_agent() -- loads agents/agent_<domain>.py via     |
+|      importlib; falls back to agent_base.ask() if no file     |
+|    run_agents_parallel() -- ThreadPoolExecutor fan-out        |
 |                                                               |
 |  agent_base.py  (shared RAG logic)                            |
+|    _apply_format_instruction() — appends OUTPUT FORMAT        |
+|      DIRECTIVE to system_prompt (imported by sub-agents too)  |
 |    Data-question bypass: _is_data_question() skips README     |
 |      for numeric/revenue/breakdown questions → RAG directly   |
 |    Strategy 1: README-first  (primary, non-data questions)    |
@@ -423,7 +428,7 @@ The watcher automatically checks all indexed files against a configurable age th
 |    Strategy 2: vector search  (fallback / data questions)     |
 |      cosine similarity over *_index.json                      |
 |      XLSX: cache-first (index summary) → streaming aggregation|
-|    format directive injected into system_prompt               |
+|      _pre_ranked_results kwarg: sub-agents can pin files      |
 |    confidence footer (High/Medium/Low) appended               |
 |    calls Ollama or emits passthrough block                    |
 |                                                               |
@@ -510,7 +515,11 @@ agent_knowledgebase.py  [local]
  |       calls local LLM (uses file_summaries for richer routing)
  |       returns: which domain(s) to route to
  |
- +---> dispatch to domain agent(s) via agent_base.ask()
+ +---> dispatch to domain agent(s) via call_sub_agent()
+         |
+         +-- checks for agents/agent_<domain>.py first
+         |     present  -> module.domain_ask() (domain-specific logic)
+         |     absent   -> agent_base.ask() directly
          |
          +-- format_instruction injected into system_prompt
          |     _apply_format_instruction() appends OUTPUT FORMAT DIRECTIVE
@@ -666,7 +675,31 @@ All notable changes to this project are listed here, newest first.
 <!-- CHANGELOG_START -->
 ---
 
-### _(latest)_ — feat: data-question bypass + cache-first XLSX aggregation + KB_GENERATE_TIMEOUT
+### _(latest)_ — chore: repo cleanup + agent improvements
+
+**Routing & dispatch**
+- `agent_knowledgebase.py`: `_keyword_confidence()` now uses a dominant-match rule — one domain with ≥3× the keyword hits of any other is treated as confident, routing queries like "ACE and CP4I revenue" to BizOps without calling the LLM
+- `call_sub_agent()`: checks for `agents/agent_<safe>.py` first; if present, loads it via `importlib` and calls `module.domain_ask()` — enables domain-specific retrieval logic without modifying shared code
+
+**`agent_base.py`**
+- `_apply_format_instruction()` moved here from `agent_knowledgebase.py` so per-domain sub-agent files can import it without circular dependency
+- `ask()` accepts `_pre_ranked_results` kwarg — sub-agents can pass pre-ordered file results (used by BizOps to pin Revenue files)
+
+**`agents/agent_bizops.py`** _(generated)_
+- Revenue-file pinning in `domain_ask()` — `*Revenue*.xlsx` files are always included first in search results for data questions
+
+**`scripts/generate.py`**
+- `generate_sub_agent()` restored — writes `agents/agent_<safe>.py` per domain after index build
+
+**Repo hygiene**
+- Removed: `kb-arch-online-offline.html`, `knowledgebase-agent-architecture.html` (one-off HTML artifacts)
+- Removed: `agents/vector_store/requirements_txt_index.json` (orphaned index)
+- Removed: `__pycache__/` at repo root (stale pyc from old script paths)
+- Added `.bob/` and `*.html` to `.gitignore`
+
+---
+
+### — feat: data-question bypass + cache-first XLSX aggregation + KB_GENERATE_TIMEOUT
 
 **`agents/agent_base.py`**
 - Added `_DATA_QUESTION_PATTERNS` regex and `_is_data_question()` — numeric/revenue/breakdown questions bypass README-first entirely and go straight to raw-file RAG
