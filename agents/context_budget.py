@@ -91,9 +91,9 @@ _BUDGETS: dict[str, int] = {
     "rag_file":     int(os.environ.get("KB_BUDGET_RAG_FILE",     "4000")),
     "history":      int(os.environ.get("KB_BUDGET_HISTORY",         "4")),  # turns
     # ── Index-time ──────────────────────────────────────────────────────────
-    "summary":      int(os.environ.get("KB_BUDGET_SUMMARY",       "100")),
+    "summary":      int(os.environ.get("KB_BUDGET_SUMMARY",       "500")),
     # ── Embedding ───────────────────────────────────────────────────────────
-    "embed_chars":  int(os.environ.get("KB_BUDGET_EMBED_CHARS",  "8000")),
+    "embed_chars":  int(os.environ.get("KB_BUDGET_EMBED_CHARS",  "3500")),
     # ── LLM runtime ─────────────────────────────────────────────────────────
     "min_readme":   int(os.environ.get("KB_MIN_README_CHARS",     "200")),
     "num_ctx":      int(os.environ.get("KB_NUM_CTX",            "32768")),

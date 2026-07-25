@@ -299,6 +299,19 @@ def _extract_snippet_for_summary(file_path: pathlib.Path, max_chars: int = 2000)
 
         elif ext in {".xlsx", ".xls"}:
             try:
+                # Large XLSX files (>50 MB) must use the streaming aggregator —
+                # openpyxl takes 80+ seconds to load a 160 MB file and only reads
+                # the first 40 rows, producing a generic header dump.  The streaming
+                # aggregator uses raw XML iterparse, reads all rows in one pass, and
+                # returns a structured revenue/data summary with actual totals.
+                MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
+                if file_path.stat().st_size > MAX_XLSX_BYTES:
+                    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
+                    if str(_agents_dir) not in sys.path:
+                        sys.path.insert(0, str(_agents_dir))
+                    from agent_base import _stream_xlsx_aggregate
+                    return _stream_xlsx_aggregate(file_path, max_chars)
+
                 import openpyxl
                 wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
                 text = ""
@@ -530,9 +543,199 @@ def generate_readme_stub(folder_name: str, folder: pathlib.Path, description: st
 
 
 
-def generate_orchestrator(domains: list[dict], agents_dir: pathlib.Path):
-    """No-op: orchestrator reads domain_meta.json dynamically at runtime."""
-    pass
+def generate_sub_agent(domain: dict, agents_dir: pathlib.Path):
+    """
+    Write agents/agent_<safe>.py for one domain.
+
+    The file is a thin, standalone module that:
+      • Imports agent_base.ask() for all shared RAG logic
+      • Overrides only what is domain-specific (system_prompt, top_n, max_chars)
+      • Can be run directly:  python3 agents/agent_bizops.py "question"
+
+    Domain-specific retrieval hooks are injected here so they live alongside
+    the domain definition — not scattered across agent_base.py as global hacks.
+    """
+    folder_name  = domain["folder_name"]
+    safe         = domain["safe_name"]
+    agent_name   = domain["agent_name"]
+    description  = domain["description"]
+    system_prompt = domain.get("system_prompt", (
+        f"You are the {agent_name}, a specialist in the {folder_name} knowledge domain.\n"
+        f"Domain description: {description}\n"
+        f"You answer questions strictly based on the provided document context.\n"
+        f"Be concise, accurate, and cite which document your answer came from.\n"
+        f"If the answer is not in the provided context, say so clearly — do not guess.\n"
+        f"Format your answer in clean markdown."
+    ))
+    top_n     = domain.get("top_n", 4)
+    max_chars = domain.get("max_chars", 6000)
+
+    # ── Domain-specific ask() override (injected per domain) ─────────────────
+    # For most domains, the ask() function is a straight pass-through to
+    # agent_base.ask().  For domains that need custom retrieval logic (e.g.
+    # always pinning certain file types), a domain_ask() override is injected.
+    #
+    # Convention: if the domain's safe_name matches a known override key, inject
+    # extra code; otherwise the override is just a direct call to agent_base.ask().
+
+    # Keys that signal "this domain needs a custom ask override"
+    _REVENUE_DOMAINS = {"bizops"}  # extend as needed
+
+    if safe in _REVENUE_DOMAINS:
+        domain_ask_body = textwrap.dedent(f"""\
+        def domain_ask(question, history, format_instruction=""):
+            \"\"\"
+            BizOps-specific ask: always pins *Revenue*.xlsx files to the top
+            of the context for data/revenue questions so the LLM reads
+            authoritative Rev Act @ PC numbers before CRM Won-Deals files.
+            \"\"\"
+            import json, pathlib, sys
+            sys.path.insert(0, str(pathlib.Path(__file__).parent))
+            from agent_base import (
+                ask as _base_ask, _is_data_question,
+                folder_to_safe_name, KB_ROOT, VECTOR_STORE,
+                _apply_format_instruction,
+            )
+            from embeddings import search
+
+            fmt_prompt = _apply_format_instruction(SYSTEM_PROMPT, format_instruction)
+
+            # For non-data questions delegate entirely to base
+            if not _is_data_question(question):
+                return _base_ask(
+                    question=question,
+                    folder_name=FOLDER_NAME,
+                    agent_name=AGENT_NAME,
+                    system_prompt=fmt_prompt,
+                    conversation_history=history,
+                    top_n=TOP_N,
+                    max_chars=MAX_CHARS,
+                )
+
+            # Data question: run base search then pin Revenue files to front
+            results = search(question, FOLDER_NAME, top_n=TOP_N)
+            if results:
+                result_paths = {{r["path"] for r in results}}
+                safe_name = folder_to_safe_name(FOLDER_NAME)
+                idx_path  = VECTOR_STORE / f"{{safe_name}}_index.json"
+                if idx_path.exists():
+                    try:
+                        idx_data = json.loads(idx_path.read_text())
+                        for entry in idx_data.get("entries", []):
+                            name = entry.get("name", "")
+                            if ("revenue" in name.lower()
+                                    and name.lower().endswith(".xlsx")
+                                    and entry.get("path") not in result_paths):
+                                results.append({{
+                                    "path":   entry["path"],
+                                    "name":   name,
+                                    "score":  1.0,
+                                    "folder": FOLDER_NAME,
+                                }})
+                                result_paths.add(entry["path"])
+                    except Exception:
+                        pass
+
+                def _rev_priority(r):
+                    n = r.get("name", "").lower()
+                    return 0 if ("revenue" in n and n.endswith(".xlsx")) else 1
+                results = sorted(results, key=_rev_priority)
+
+            # Delegate the rest (extraction + LLM call) to base, bypassing its
+            # own search by passing the pre-ordered result list via the
+            # _pre_ranked_results kwarg (added to agent_base.ask below).
+            return _base_ask(
+                question=question,
+                folder_name=FOLDER_NAME,
+                agent_name=AGENT_NAME,
+                system_prompt=fmt_prompt,
+                conversation_history=history,
+                top_n=TOP_N,
+                max_chars=MAX_CHARS,
+                _pre_ranked_results=results,
+            )
+        """)
+    else:
+        domain_ask_body = textwrap.dedent(f"""\
+        def domain_ask(question, history, format_instruction=""):
+            import sys, pathlib
+            sys.path.insert(0, str(pathlib.Path(__file__).parent))
+            from agent_base import ask as _base_ask, _apply_format_instruction
+            fmt_prompt = _apply_format_instruction(SYSTEM_PROMPT, format_instruction)
+            return _base_ask(
+                question=question,
+                folder_name=FOLDER_NAME,
+                agent_name=AGENT_NAME,
+                system_prompt=fmt_prompt,
+                conversation_history=history,
+                top_n=TOP_N,
+                max_chars=MAX_CHARS,
+            )
+        """)
+
+    # Escape the system prompt for embedding in Python source
+    sp_escaped = system_prompt.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+
+    # Build content at column-0.  Do NOT use textwrap.dedent on a template
+    # that is itself indented inside a function — dedent strips the indentation
+    # of the template lines, not the interpolated values, causing mismatches.
+    lines = [
+        "#!/usr/bin/env python3",
+        '"""',
+        f"agents/agent_{safe}.py — {agent_name}",
+        "Auto-generated by scripts/generate.py — do not edit manually.",
+        "To regenerate:  python3 scripts/generate.py",
+        "",
+        f"Domain:  {folder_name}",
+        f"Desc:    {description}",
+        "",
+        "Can be run standalone:",
+        f'  python3 agents/agent_{safe}.py "your question"',
+        '"""',
+        "",
+        "import sys",
+        "import pathlib",
+        "",
+        "sys.path.insert(0, str(pathlib.Path(__file__).parent))",
+        "",
+        "from agent_base import _load_env",
+        "_load_env()",
+        "",
+        f"FOLDER_NAME   = {folder_name!r}",
+        f"AGENT_NAME    = {agent_name!r}",
+        f'SYSTEM_PROMPT = """{sp_escaped}"""',
+        f"TOP_N         = {top_n}",
+        f"MAX_CHARS     = {max_chars}",
+        "",
+        "# ── Domain-specific ask() ─────────────────────────────────────────────────",
+        "",
+        domain_ask_body,
+        "# ── Standalone entry point ────────────────────────────────────────────────",
+        "",
+        "def main():",
+        "    from memory import get_history, add_turn",
+        "    import sys as _sys",
+        "    if len(_sys.argv) < 2:",
+        '        print(f"Usage: python3 {__file__!r} \\"question\\"")',
+        "        _sys.exit(1)",
+        "    question = _sys.argv[1]",
+        "    history  = get_history()",
+        "    result   = domain_ask(question, history)",
+        '    answer   = result.get("answer", "")',
+        "    print(answer)",
+        "    add_turn(question, answer)",
+        "",
+        "",
+        'if __name__ == "__main__":',
+        "    main()",
+        "",
+    ]
+    content = "\n".join(lines)
+
+    out_path = agents_dir / f"agent_{safe}.py"
+    out_path.write_text(content, encoding="utf-8")
+    print(f"  ✓ agent_{safe}.py written")
+    return out_path
 
 
 # ── SKILL.md generator ────────────────────────────────────────────────────────
@@ -1016,6 +1219,9 @@ def main():
 
         domain_meta[folder_name] = entry
         domains_list.append(entry)
+
+        # Generate (or regenerate) per-domain agent file
+        generate_sub_agent(entry, agents_dir)
 
         # Create README stub for folders that don't have one yet
         folder_path = kb_root / folder_name

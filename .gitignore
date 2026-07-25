@@ -1,6 +1,9 @@
 # ── Environment ───────────────────────────────────────────────
 .env
 
+# ── Bob scratch / session files ───────────────────────────────
+.bob/
+
 # ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -43,6 +46,9 @@ agents/vector_store/*.json
 # ── Logs ──────────────────────────────────────────────────────
 *.log
 .watch.log
+
+# ── One-off HTML artifacts ────────────────────────────────────
+*.html
 
 # ── Knowledge folder contents (private / local data) ─────────
 # Knowledge folders contain private documents — never commit them.

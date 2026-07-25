@@ -69,6 +69,19 @@ def folder_to_safe_name(name: str) -> str:
     n = re.sub(r"[^a-z0-9]+", "_", n)
     return n.strip("_")
 
+
+def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
+    """
+    Append a format instruction to a system prompt.
+
+    Defined here (agent_base) so per-domain sub-agent files can import it
+    without importing from agent_knowledgebase (which would create a circular
+    dependency).  agent_knowledgebase imports and re-exports this function.
+    """
+    if not format_instruction:
+        return system_prompt
+    return system_prompt + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
+
 LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 MODEL        = os.environ.get("KB_MODEL", "qwen3:14b")
@@ -317,6 +330,217 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
     return context, label
 
 
+
+# ── Streaming aggregator for very large XLSX files ────────────────────────────
+# Uses zipfile + xml.etree.ElementTree iterparse so the file is never fully
+# loaded into memory.  Aggregates numeric columns by detected group-by columns.
+# Called by extract_full_text() when file size > 50 MB.
+
+def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> str:
+    """
+    Stream-aggregate a large XLSX file using raw XML parsing.
+    Returns a markdown summary of totals by detected group-by dimensions.
+    """
+    import zipfile
+    import xml.etree.ElementTree as ET
+    from collections import defaultdict
+
+    AGG_KEYWORDS = {
+        # ── Product columns first (most semantically relevant for search) ──
+        "ut lvl 30 name dynamic": "Product (UT L30)",
+        "ut l30 name": "Product (UT L30)",
+        "ut l30": "Product (UT L30)",
+        "product family name": "Product Family",
+        "reporting product family": "Reporting Product Family",
+        "product": "Product",
+        # ── Time columns ──
+        "year": "Year", "quarter": "Quarter",
+        "quarter in year": "Quarter In Year",
+        # ── Standard finance columns ──
+        "geography": "Geography",
+        "geography name": "Geography",
+        "market": "Market",
+        "market name": "Market",
+        "country": "Country",
+        "finance family": "Finance Family",
+        "revenue type": "Revenue Type",
+        "reporting revenue type name": "Revenue Type",
+        "on-prem or saas": "On-prem/SaaS",
+        "division": "Division",
+        # ── CRM deal columns ──
+        "classification name": "Classification",
+        "frozen client lifecycle name": "Client Lifecycle",
+        # ── Renewal / ELA columns ──
+        "status": "Status",
+    }
+
+    PREFERRED_NUM_COLS = [
+        "won", "total(cy cw won @ pc)", "rev act @ pc",
+        "amount", "oppty value", "total",
+    ]
+
+    try:
+        with zipfile.ZipFile(str(file_path), "r") as zf:
+            # Find worksheets
+            sheet_names: list[tuple[str, str]] = []  # (sheet_name, zip_path)
+            try:
+                wb_xml = ET.fromstring(zf.read("xl/workbook.xml"))
+                ns = {"w": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                for sheet_el in wb_xml.findall(".//w:sheet", ns):
+                    r_id = sheet_el.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+                    name = sheet_el.get("name", r_id)
+                    sheet_names.append((name, r_id))
+            except Exception:
+                sheet_names = [("Sheet1", "rId1")]
+
+            # Map rId → actual zip path via workbook.xml.rels
+            rid_to_path: dict[str, str] = {}
+            try:
+                rels_xml = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+                for rel in rels_xml:
+                    rid_to_path[rel.get("Id", "")] = "xl/" + rel.get("Target", "").lstrip("/")
+            except Exception:
+                pass
+
+            # Load shared strings
+            shared: list[str] = []
+            try:
+                ss_xml = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+                ns_ss = {"w": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+                for si in ss_xml.findall("w:si", ns_ss):
+                    parts = [t.text or "" for t in si.findall(".//w:t", ns_ss)]
+                    shared.append("".join(parts))
+            except Exception:
+                pass
+
+            def cell_value(cell_el) -> object:
+                """Convert a <c> element to its Python value."""
+                t = cell_el.get("t", "")  # type attribute
+                v_el = cell_el.find("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}v")
+                raw = v_el.text if v_el is not None else None
+                if raw is None:
+                    return None
+                if t == "s":  # shared string index
+                    try:
+                        return shared[int(raw)]
+                    except (IndexError, ValueError):
+                        return raw
+                try:
+                    f = float(raw)
+                    return int(f) if f == int(f) else f
+                except ValueError:
+                    return raw
+
+            text_parts: list[str] = []
+
+            for sheet_name, r_id in sheet_names:
+                zip_path = rid_to_path.get(r_id, "")
+                if not zip_path or zip_path not in zf.namelist():
+                    # Try common fallback paths
+                    for candidate in [f"xl/worksheets/sheet1.xml",
+                                      f"xl/worksheets/{sheet_name}.xml"]:
+                        if candidate in zf.namelist():
+                            zip_path = candidate
+                            break
+                if not zip_path or zip_path not in zf.namelist():
+                    continue
+
+                text_parts.append(f"[Sheet: {sheet_name}]")
+
+                headers: list[str] = []
+                agg: dict[int, dict[str, float]] = {}
+                num_ci: int | None = None
+                group_cols: list[tuple[int, str]] = []
+                row_count = 0
+
+                ns_ws = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                with zf.open(zip_path) as ws_f:
+                    for event, elem in ET.iterparse(ws_f, events=("end",)):
+                        if elem.tag != f"{{{ns_ws}}}row":
+                            continue
+                        cells = list(elem)
+                        vals = [cell_value(c) for c in cells]
+
+                        if row_count == 0:
+                            # Header row
+                            headers = [str(v) if v is not None else "" for v in vals]
+                            h_lower = [h.lower().strip() for h in headers]
+
+                            # Detect preferred numeric column
+                            for pref in PREFERRED_NUM_COLS:
+                                if pref in h_lower:
+                                    num_ci = h_lower.index(pref)
+                                    break
+
+                            # Detect group-by columns, sorted by AGG_KEYWORDS priority
+                            _agg_order = list(AGG_KEYWORDS.keys())
+                            group_cols = sorted(
+                                [
+                                    (ci, AGG_KEYWORDS[h])
+                                    for ci, h in enumerate(h_lower)
+                                    if h in AGG_KEYWORDS
+                                ],
+                                key=lambda x: _agg_order.index(
+                                    next(k for k in _agg_order if AGG_KEYWORDS[k] == x[1])
+                                ),
+                            )
+                            _seen: set[str] = set()
+                            group_cols = [
+                                (ci, lbl) for ci, lbl in group_cols
+                                if lbl not in _seen and not _seen.add(lbl)  # type: ignore[func-returns-value]
+                            ]
+                            agg = {g_idx: defaultdict(float) for g_idx, _ in group_cols}
+                            row_count += 1
+                            elem.clear()
+                            continue
+
+                        row_count += 1
+
+                        # Determine numeric value — use preferred col or last numeric
+                        num_val: float | None = None
+                        if num_ci is not None and num_ci < len(vals):
+                            v = vals[num_ci]
+                            if isinstance(v, (int, float)):
+                                num_val = float(v)
+                        if num_val is None:
+                            # Fallback: last numeric value in row
+                            for v in reversed(vals):
+                                if isinstance(v, (int, float)):
+                                    num_val = float(v)
+                                    break
+
+                        if num_val is not None:
+                            for g_idx, _ in group_cols:
+                                gval = (str(vals[g_idx])
+                                        if g_idx < len(vals) and vals[g_idx] is not None
+                                        else "(blank)")
+                                agg[g_idx][gval] += num_val
+
+                        elem.clear()
+
+                rev_col_name = headers[num_ci] if num_ci is not None and num_ci < len(headers) else "numeric"
+                text_parts.append(f"Rows: {row_count - 1}  |  Revenue column: '{rev_col_name}'")
+
+                if group_cols and agg:
+                    for g_idx, g_label in group_cols:
+                        totals = dict(agg[g_idx])
+                        if not totals:
+                            continue
+                        grand = sum(totals.values())
+                        text_parts.append(f"--- By {g_label} ---")
+                        for k, v in sorted(totals.items(), key=lambda x: -x[1])[:50]:
+                            text_parts.append(f"  {k}: {v:,.2f}")
+                        text_parts.append(f"  TOTAL: {grand:,.2f}\n")
+                else:
+                    text_parts.append(f"Columns: {', '.join(h for h in headers[:20] if h)}")
+                text_parts.append("")
+
+        return "\n".join(text_parts)[:max_chars]
+
+    except Exception as e:
+        return f"[Large XLSX stream error: {e}] File: {file_path.name}"
+
+
 # ── Full text extractor ───────────────────────────────────────────────────────
 
 def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> str:
@@ -369,13 +593,11 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
                 import openpyxl
 
                 # ── Cache-first XLSX extraction ───────────────────────────────
-                # Large XLSX files (e.g. 100 MB+ revenue data) take 50-100s to
-                # open with openpyxl at query time — too slow for interactive use.
-                #
-                # Solution: serve from the pre-aggregated summary stored in the
-                # vector index by update_index_for_file() / build_index().
-                # If the cache has a rich summary (>200 chars), return it directly.
-                # Only fall back to live file read for small/uncached files.
+                # Serve from the pre-aggregated summary stored in the vector
+                # index by build_index().  If the cache has a rich summary
+                # (>200 chars), return it directly.  This MUST run before the
+                # >50 MB guard so large files skip the 50s streaming parse when
+                # a cached summary is already available.
                 idx_path = VECTOR_STORE / f"{folder_to_safe_name(file_path.parent.name)}_index.json"
                 if idx_path.exists():
                     try:
@@ -390,35 +612,84 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
                     except Exception:
                         pass  # cache miss → fall through to live read
 
+                # ── Guard: very large XLSX files (>50 MB) ─────────────────────
+                # openpyxl takes 80+ seconds to open a 160 MB file. For such
+                # files we use a fast streaming XML+iterparse approach instead.
+                MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
+                if file_path.stat().st_size > MAX_XLSX_BYTES:
+                    return _stream_xlsx_aggregate(file_path, max_chars)
+
                 # ── Live single-pass streaming XLSX extraction ────────────────
                 # For large tabular files (revenue, pipeline data) we aggregate
                 # into per-dimension totals in a single streaming pass instead of
                 # materialising all rows.  The file is opened exactly once.
                 #
                 # Algorithm:
-                #   1. Read header row → detect numeric column (last all-numeric
-                #      col in first 200 data rows) and categorical group-by cols
-                #      by matching well-known header names.
+                #   1. Read header row → detect numeric column (preferred by
+                #      well-known names, else last all-numeric col in probe)
+                #      and categorical group-by cols by matching header names.
                 #   2. Continue streaming the rest of the file, accumulating
                 #      per-group totals on the fly.
                 #   3. Emit aggregated summary.  Falls back to first-200-rows dump
                 #      when no aggregatable structure is found.
 
                 AGG_KEYWORDS = {
+                    # ── Product columns first (most semantically relevant for search) ──
+                    "ut lvl 30 name dynamic": "Product (UT L30)",
+                    "ut l30 name": "Product (UT L30)",
+                    "ut l30": "Product (UT L30)",
+                    "product family name": "Product Family",
+                    "reporting product family": "Reporting Product Family",
+                    "product": "Product",
+                    # ── Time columns ──
                     "year": "Year", "quarter": "Quarter",
-                    "geography": "Geography", "market": "Market",
+                    "quarter in year": "Quarter In Year",
+                    # ── Standard finance columns ──
+                    "geography": "Geography",
+                    "geography name": "Geography",
+                    "market": "Market",
+                    "market name": "Market",
                     "country": "Country",
                     "finance family": "Finance Family",
                     "revenue type": "Revenue Type",
+                    "reporting revenue type name": "Revenue Type",
                     "on-prem or saas": "On-prem/SaaS",
                     "division": "Division",
+                    # ── CRM deal columns ──
+                    "classification name": "Classification",
+                    "frozen client lifecycle name": "Client Lifecycle",
+                    # ── Renewal / ELA columns ──
+                    "status": "Status",
                 }
+
+                # Preferred numeric column names (checked before falling back
+                # to last-all-numeric heuristic).  For CRM exports the relevant
+                # column is "Won", not the last numeric column.
+                PREFERRED_NUM_COLS = [
+                    "won", "total(cy cw won @ pc)", "rev act @ pc",
+                    "amount", "oppty value", "total",
+                ]
 
                 text_parts = []
                 wb = openpyxl.load_workbook(
                     str(file_path), read_only=True, data_only=True
                 )
-                for sheet in wb.worksheets:
+
+                # ── Sort sheets: largest first so the most data-rich sheet
+                # is processed first and dominates the context output.
+                def _sheet_row_count(s) -> int:
+                    try:
+                        return s.max_row or 0
+                    except Exception:
+                        return 0
+
+                sorted_sheets = sorted(
+                    wb.worksheets,
+                    key=_sheet_row_count,
+                    reverse=True,
+                )
+
+                for sheet in sorted_sheets:
                     row_iter = sheet.iter_rows(values_only=True)
 
                     # ── Header row ────────────────────────────────────────────
@@ -439,20 +710,42 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
                     text_parts.append(f"[Sheet: {sheet.title}]")
 
                     if is_large:
-                        # Detect numeric column (last col all-numeric in probe)
+                        # Detect numeric column: try preferred names first,
+                        # then fall back to last all-numeric col in probe.
                         num_ci: int | None = None
-                        for ci in range(len(headers) - 1, -1, -1):
-                            sample = [r[ci] for r in probe
-                                      if ci < len(r) and r[ci] is not None]
-                            if sample and all(isinstance(v, (int, float)) for v in sample):
-                                num_ci = ci
-                                break
+                        h_lower = [h.lower().strip() for h in headers]
+                        for pref in PREFERRED_NUM_COLS:
+                            if pref in h_lower:
+                                ci = h_lower.index(pref)
+                                sample = [r[ci] for r in probe
+                                          if ci < len(r) and r[ci] is not None]
+                                if sample and all(isinstance(v, (int, float)) for v in sample):
+                                    num_ci = ci
+                                    break
+                        if num_ci is None:
+                            for ci in range(len(headers) - 1, -1, -1):
+                                sample = [r[ci] for r in probe
+                                          if ci < len(r) and r[ci] is not None]
+                                if sample and all(isinstance(v, (int, float)) for v in sample):
+                                    num_ci = ci
+                                    break
 
-                        # Detect group-by columns
-                        group_cols: list[tuple[int, str]] = [
-                            (ci, AGG_KEYWORDS[h.lower().strip()])
-                            for ci, h in enumerate(headers)
-                            if h.lower().strip() in AGG_KEYWORDS
+                        # Detect group-by columns, sorted by AGG_KEYWORDS priority
+                        _agg_order = list(AGG_KEYWORDS.keys())
+                        group_cols: list[tuple[int, str]] = sorted(
+                            [
+                                (ci, AGG_KEYWORDS[h.lower().strip()])
+                                for ci, h in enumerate(headers)
+                                if h.lower().strip() in AGG_KEYWORDS
+                            ],
+                            key=lambda x: _agg_order.index(
+                                next(k for k in _agg_order if AGG_KEYWORDS[k] == x[1])
+                            ),
+                        )
+                        _seen_labels: set[str] = set()
+                        group_cols = [
+                            (ci, label) for ci, label in group_cols
+                            if label not in _seen_labels and not _seen_labels.add(label)  # type: ignore[func-returns-value]
                         ]
 
                         if num_ci is not None and group_cols:
@@ -738,6 +1031,7 @@ def ask(
     conversation_history: list[dict] | None = None,
     top_n: int = 4,
     max_chars: int | None = None,
+    _pre_ranked_results: list[dict] | None = None,
 ) -> dict:
     """
     README-first RAG pipeline for a single folder domain.
@@ -757,6 +1051,14 @@ def ask(
         conversation_history: Optional prior messages for multi-turn context
         top_n:                Number of files to retrieve (fallback RAG only)
         max_chars:            Max chars to extract per file (fallback RAG only)
+        _pre_ranked_results:  Optional pre-ordered search results supplied by a
+                              domain-specific sub-agent.  When provided, skips
+                              the vector search step and uses these results
+                              directly.  This is the sub-agent hook: each
+                              domain's agent_<safe>.py can do its own retrieval
+                              (with domain-specific re-ranking, pinning, etc.)
+                              and hand the sorted list to ask() for extraction
+                              + LLM dispatch.
 
     Returns:
         { "agent", "answer", "sources", "found" }
@@ -811,10 +1113,15 @@ def ask(
     # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
     print(f"  [{agent_name}] Falling back to raw-file RAG (no usable README)")
 
-    sys.path.insert(0, str(pathlib.Path(__file__).parent))
-    from embeddings import search
-
-    results = search(question, folder_name, top_n=top_n)
+    # A sub-agent (agents/agent_<safe>.py) may supply pre-ranked results so
+    # its domain-specific retrieval logic (pinning, re-ranking) runs before
+    # this function is called.  Use them directly; skip the vector search.
+    if _pre_ranked_results is not None:
+        results = _pre_ranked_results
+    else:
+        sys.path.insert(0, str(pathlib.Path(__file__).parent))
+        from embeddings import search
+        results = search(question, folder_name, top_n=top_n)
 
     if not results:
         return {
@@ -823,6 +1130,52 @@ def ask(
             "sources": [],
             "found":   False,
         }
+
+    # ── Revenue-file pin + boost ──────────────────────────────────────────────
+    # For data/revenue questions the authoritative source is always
+    # "*Revenue*.xlsx" files — NOT CRM/Won-Deals files.  Two steps:
+    #
+    # 1. PIN: scan the folder index for Revenue report files and inject them
+    #    into the result list even if vector search ranked them outside top_n.
+    #    This handles multi-product queries where the combined embedding drifts
+    #    away from individual file summaries.
+    #
+    # 2. SORT: put all Revenue files first so the LLM reads the authoritative
+    #    Rev Act @ PC numbers before any CRM Won column values.
+    if _is_data_question(question):
+        # Build a set of paths already in results
+        result_paths = {r["path"] for r in results}
+
+        # Load the folder index to find Revenue files not in the current results
+        safe_name  = folder_to_safe_name(folder_name)
+        idx_path   = VECTOR_STORE / f"{safe_name}_index.json"
+        if idx_path.exists():
+            try:
+                idx_data = json.loads(idx_path.read_text())
+                for entry in idx_data.get("entries", []):
+                    name = entry.get("name", "")
+                    if ("revenue" in name.lower() and name.lower().endswith(".xlsx")
+                            and entry.get("path") not in result_paths):
+                        # Pin this Revenue file at score=1.0 (pinned, not from search)
+                        results.append({
+                            "path":  entry["path"],
+                            "name":  name,
+                            "score": 1.0,
+                            "folder": folder_name,
+                        })
+                        result_paths.add(entry["path"])
+                        print(
+                            f"  [{agent_name}] 📌 Pinned revenue file: {name}",
+                            flush=True,
+                        )
+            except Exception:
+                pass  # index unreadable → fall through with original results
+
+        # Sort: Revenue Report files first, everything else preserves its order
+        def _revenue_priority(r: dict) -> int:
+            name = r.get("name", "").lower()
+            return 0 if ("revenue" in name and name.endswith(".xlsx")) else 1
+        results = sorted(results, key=_revenue_priority)
 
     context_blocks = []
     sources        = []

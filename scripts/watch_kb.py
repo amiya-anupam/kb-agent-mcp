@@ -333,6 +333,19 @@ def extract_snippet(file_path: pathlib.Path) -> str:
             return text[:SUMMARY_EXTRACT_CHARS]
 
         elif ext in {".xlsx", ".xls"}:
+            # Large XLSX files (>50 MB) must use the streaming aggregator —
+            # openpyxl takes 80+ seconds and produces only 30-row header dumps
+            # which result in generic "XLSX file" summaries.  We delegate to
+            # agent_base._stream_xlsx_aggregate() which produces a meaningful
+            # revenue/data breakdown in 30-50s using raw XML iterparse.
+            MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
+            if file_path.stat().st_size > MAX_XLSX_BYTES:
+                try:
+                    from agent_base import _stream_xlsx_aggregate
+                    return _stream_xlsx_aggregate(file_path, SUMMARY_EXTRACT_CHARS)
+                except Exception as e:
+                    return f"[Large XLSX stream error: {e}]"
+
             import openpyxl
             wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
             text = ""
@@ -419,6 +432,15 @@ def generate_file_summary(file_path: pathlib.Path) -> str:
     snippet = extract_snippet(file_path)
     if not snippet or snippet.startswith("["):
         return f"{file_path.suffix.upper().lstrip('.')} file"
+
+    # For large XLSX files the snippet IS the streaming aggregate — a structured
+    # multi-line breakdown of revenue/data by dimension.  Collapsing it to 20
+    # words would destroy all the numeric detail the agents need.  Return it as-is.
+    MAX_XLSX_BYTES = 50 * 1024 * 1024
+    if (file_path.suffix.lower() in {".xlsx", ".xls"}
+            and file_path.stat().st_size > MAX_XLSX_BYTES):
+        return snippet  # keep full structured summary
+
     if not _llm_available():
         return snippet.replace("\n", " ").strip()[:200] or file_path.name
     prompt = (

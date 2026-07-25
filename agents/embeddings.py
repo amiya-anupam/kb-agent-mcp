@@ -262,6 +262,22 @@ def extract_text_snippet(file_path: pathlib.Path) -> str:
             try:
                 import openpyxl
 
+                # ── Skip very large XLSX files (>50 MB) ───────────────────────
+                # openpyxl needs to decompress the entire ZIP — a 160 MB file
+                # takes 80+ seconds.  Return a lightweight summary instead so
+                # generate.py completes in reasonable time.  The entry still
+                # gets indexed (with a descriptive name-based summary) and
+                # extract_full_text() in agent_base.py handles the same guard
+                # so the file won't be opened at query time either.
+                MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
+                if file_path.stat().st_size > MAX_XLSX_BYTES:
+                    return (
+                        f"XLSX (large file — {file_path.stat().st_size // (1024*1024)} MB): "
+                        f"{file_path.name}\n"
+                        f"This file is too large to index inline. "
+                        f"Query it by mentioning the filename or its topic."
+                    )
+
                 # ── Smart XLSX snippet ────────────────────────────────────────
                 # For large tabular files (revenue, pipeline data) generate a
                 # pre-aggregated summary stored in the index entry.
@@ -271,19 +287,63 @@ def extract_text_snippet(file_path: pathlib.Path) -> str:
                 # Same AGG_KEYWORDS and detection logic as agent_base.py so
                 # the cached summary is always in the expected format.
                 AGG_KEYWORDS = {
+                    # ── Product columns first (most semantically relevant for search) ──
+                    "ut lvl 30 name dynamic": "Product (UT L30)",
+                    "ut l30 name": "Product (UT L30)",
+                    "ut l30": "Product (UT L30)",
+                    "product family name": "Product Family",
+                    "reporting product family": "Reporting Product Family",
+                    "product": "Product",
+                    # ── Time columns ──
                     "year": "Year", "quarter": "Quarter",
-                    "geography": "Geography", "market": "Market",
+                    "quarter in year": "Quarter In Year",
+                    # ── Standard finance columns ──
+                    "geography": "Geography",
+                    "geography name": "Geography",
+                    "market": "Market",
+                    "market name": "Market",
                     "country": "Country",
                     "finance family": "Finance Family",
                     "revenue type": "Revenue Type",
+                    "reporting revenue type name": "Revenue Type",
                     "on-prem or saas": "On-prem/SaaS",
                     "division": "Division",
+                    # ── CRM deal columns ──
+                    "classification name": "Classification",
+                    "frozen client lifecycle name": "Client Lifecycle",
+                    # ── Renewal / ELA columns ──
+                    "status": "Status",
                 }
+
+                # Preferred numeric column names (checked before falling back
+                # to last-all-numeric heuristic). For CRM exports the relevant
+                # column is "Won", not the last numeric column.
+                PREFERRED_NUM_COLS = [
+                    "won", "total(cy cw won @ pc)", "rev act @ pc",
+                    "amount", "oppty value", "total",
+                ]
 
                 wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
                 text_parts = []
 
-                for sheet in wb.worksheets:
+                # ── Sort sheets: largest first so the most data-rich sheet
+                # is processed first and dominates the index summary.
+                # This fixes files where the active sheet is a tiny pivot
+                # (e.g. "1.Whitespace dormant") and the main data is in a
+                # sheet called "page" with 400+ rows.
+                def _sheet_row_count(s) -> int:
+                    try:
+                        return s.max_row or 0
+                    except Exception:
+                        return 0
+
+                sorted_sheets = sorted(
+                    wb.worksheets,
+                    key=_sheet_row_count,
+                    reverse=True,
+                )
+
+                for sheet in sorted_sheets:
                     row_iter = sheet.iter_rows(values_only=True)
                     try:
                         hdr = next(row_iter)
@@ -302,20 +362,44 @@ def extract_text_snippet(file_path: pathlib.Path) -> str:
                     text_parts.append(f"[Sheet: {sheet.title}]")
 
                     if is_large:
-                        # Detect numeric column
+                        # Detect numeric column: try preferred names first,
+                        # then fall back to last all-numeric col in probe.
                         num_ci: int | None = None
-                        for ci in range(len(headers) - 1, -1, -1):
-                            sample = [r[ci] for r in probe
-                                      if ci < len(r) and r[ci] is not None]
-                            if sample and all(isinstance(v, (int, float)) for v in sample):
-                                num_ci = ci
-                                break
+                        h_lower = [h.lower().strip() for h in headers]
+                        for pref in PREFERRED_NUM_COLS:
+                            if pref in h_lower:
+                                ci = h_lower.index(pref)
+                                sample = [r[ci] for r in probe
+                                          if ci < len(r) and r[ci] is not None]
+                                if sample and all(isinstance(v, (int, float)) for v in sample):
+                                    num_ci = ci
+                                    break
+                        if num_ci is None:
+                            for ci in range(len(headers) - 1, -1, -1):
+                                sample = [r[ci] for r in probe
+                                          if ci < len(r) and r[ci] is not None]
+                                if sample and all(isinstance(v, (int, float)) for v in sample):
+                                    num_ci = ci
+                                    break
 
-                        # Detect group-by columns
-                        group_cols: list[tuple[int, str]] = [
-                            (ci, AGG_KEYWORDS[h.lower().strip()])
-                            for ci, h in enumerate(headers)
-                            if h.lower().strip() in AGG_KEYWORDS
+                        # Detect group-by columns, sorted by AGG_KEYWORDS priority
+                        # so that Product appears before Geography in the summary.
+                        _agg_order = list(AGG_KEYWORDS.keys())
+                        group_cols: list[tuple[int, str]] = sorted(
+                            [
+                                (ci, AGG_KEYWORDS[h.lower().strip()])
+                                for ci, h in enumerate(headers)
+                                if h.lower().strip() in AGG_KEYWORDS
+                            ],
+                            key=lambda x: _agg_order.index(
+                                next(k for k in _agg_order if AGG_KEYWORDS[k] == x[1])
+                            ),
+                        )
+                        # Deduplicate: keep only the first occurrence of each label
+                        _seen_labels: set[str] = set()
+                        group_cols = [
+                            (ci, label) for ci, label in group_cols
+                            if label not in _seen_labels and not _seen_labels.add(label)  # type: ignore[func-returns-value]
                         ]
 
                         if num_ci is not None and group_cols:
@@ -436,7 +520,15 @@ def build_index(folder_name: str, force: bool = False) -> dict:
 
     for f in files:
         rel_path  = str(f.relative_to(KB_ROOT))
-        file_hash = hashlib.md5(f.read_bytes()).hexdigest()
+        # Use streaming MD5 for large files to avoid loading them all into RAM
+        if f.stat().st_size > 10 * 1024 * 1024:  # >10 MB
+            h = hashlib.md5()
+            with f.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(65536), b""):
+                    h.update(chunk)
+            file_hash = h.hexdigest()
+        else:
+            file_hash = hashlib.md5(f.read_bytes()).hexdigest()
 
         if rel_path in existing and existing[rel_path].get("hash") == file_hash:
             entries.append(existing[rel_path])
@@ -455,7 +547,7 @@ def build_index(folder_name: str, force: bool = False) -> dict:
             "path":      rel_path,
             "name":      f.name,
             "folder":    folder_name,
-            "summary":   summary[:500],
+            "summary":   summary[:2000],
             "embedding": embedding,
             "hash":      file_hash,
         })
@@ -496,10 +588,42 @@ def search(query: str, folder_name: str, top_n: int = 4) -> list[dict]:
         return []
 
     query_vec = np.array(get_embedding(query)).reshape(1, -1)
-    doc_vecs  = np.array([e["embedding"] for e in entries])
+    query_dim = query_vec.shape[1]
+
+    # Filter to entries whose embedding dimension matches the query.
+    # Mixed dimensions arise when some files were embedded with a different
+    # backend (e.g. sentence-transformers=384 vs. Ollama nomic-embed=768).
+    # Skipping mismatched entries is safe — they'll be re-indexed on the next
+    # generate.py run once a consistent backend is in use.
+    compat = [
+        e for e in entries
+        if isinstance(e.get("embedding"), list)
+        and len(e["embedding"]) == query_dim
+    ]
+
+    if not compat:
+        # No compatible entries — fall back to summary keyword match
+        q = query.lower()
+        ranked_fb = sorted(
+            entries,
+            key=lambda e: sum(1 for w in q.split() if w in e.get("summary", "").lower()),
+            reverse=True,
+        )
+        return [
+            {
+                "path":    e["path"],
+                "name":    e["name"],
+                "folder":  e["folder"],
+                "summary": e.get("summary", ""),
+                "score":   0.0,
+            }
+            for e in ranked_fb[:top_n]
+        ]
+
+    doc_vecs  = np.array([e["embedding"] for e in compat])
     scores    = cosine_similarity(query_vec, doc_vecs)[0]
 
-    ranked = sorted(zip(scores, entries), key=lambda x: x[0], reverse=True)
+    ranked = sorted(zip(scores, compat), key=lambda x: x[0], reverse=True)
     return [
         {
             "path":    entry["path"],
@@ -543,7 +667,14 @@ def update_index_for_file(folder_name: str, file_path: pathlib.Path) -> bool:
             existing_entries = {}
 
     rel_path  = str(file_path.relative_to(KB_ROOT))
-    fhash     = hashlib.md5(file_path.read_bytes()).hexdigest()
+    if file_path.stat().st_size > 10 * 1024 * 1024:
+        h = hashlib.md5()
+        with file_path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(65536), b""):
+                h.update(chunk)
+        fhash = h.hexdigest()
+    else:
+        fhash = hashlib.md5(file_path.read_bytes()).hexdigest()
 
     # Skip if already indexed at the same hash
     if rel_path in existing_entries and existing_entries[rel_path].get("hash") == fhash:
@@ -561,7 +692,7 @@ def update_index_for_file(folder_name: str, file_path: pathlib.Path) -> bool:
         "path":      rel_path,
         "name":      file_path.name,
         "folder":    folder_name,
-        "summary":   snippet[:500],
+        "summary":   snippet[:2000],
         "embedding": embedding,
         "hash":      fhash,
     }
