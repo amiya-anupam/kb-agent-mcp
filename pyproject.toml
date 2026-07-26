@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kb-agent-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "A zero-config MCP server that turns any folder of documents into a queryable multi-agent knowledge base"
 readme = "README-MCP.md"
 license = "MIT"
