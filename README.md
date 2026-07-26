@@ -171,12 +171,14 @@ python3 scripts/generate.py
 
 | Problem | Solution |
 |---|---|
-| `pip install` fails | Run `python3 -m pip install --upgrade pip` first, then retry |
+| `pip install` fails (macOS/Linux) | Build tools missing — run `xcode-select --install` (macOS) or `sudo apt install build-essential python3-dev` (Linux), then retry. `scripts/setup.py` checks for this and prints the fix if detected. |
 | Skill file not found at `~/.bob/skills/` | Run `python3 scripts/generate.py` again |
-| Agent returns empty answers | Check that your folders contain supported file types |
+| Agent returns empty answers | Check that your folders contain supported file types; also confirm `KB_ROOT` in `.env` points to the right directory |
 | `python3` not found (Windows) | Use `python` instead of `python3` throughout |
 | Ollama not running | Either start it with `ollama serve` or choose passthrough mode |
 | Permission denied on `.env` | Run `chmod 644 .env` |
+| ChromaDB error after upgrading | Index format may be incompatible. Run `kb-agent-generate` — it detects this automatically and offers to rebuild. Or manually: `rm -rf .kb_index && kb-agent-generate` |
+| Embedding model download fails (proxy/air-gap) | Set `TRANSFORMERS_OFFLINE=1` and pre-cache the model. See [README-MCP.md Troubleshooting](README-MCP.md#troubleshooting) |
 
 ---
 

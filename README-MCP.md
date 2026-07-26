@@ -45,8 +45,9 @@ kb-agent-serve --transport http --port 8765
 ## Installation
 
 > **Build tools required on macOS and Linux.**
-> `chromadb` compiles native C++ bindings at install time. Without the right tools
-> the `pip install` will fail with a cryptic compiler error.
+> `chromadb` compiles native C++ bindings at install time.
+> `kb-agent-setup` checks for build tools before running and prints the exact
+> fix command if they are missing — but installing them first is faster.
 >
 > - **macOS:** `xcode-select --install`
 > - **Linux (Debian/Ubuntu):** `sudo apt install build-essential python3-dev`
@@ -77,7 +78,7 @@ Once the server is running, the following tools are available:
 |---|---|
 | `ask(question, format?, session_id?)` | Query all relevant domains and return a markdown answer |
 | `list_domains()` | List indexed knowledge domains with descriptions |
-| `reindex()` | Re-scan KB_ROOT and rebuild ChromaDB indexes. **Note:** New domain folders with no `domain_config.yaml` will not become queryable — run `kb-agent-generate` from the CLI first. |
+| `reindex()` | Re-scan KB_ROOT and rebuild ChromaDB indexes. After reindexing, any new domain folders that are still missing `domain_config.yaml` are surfaced as a warning in the tool response — run `kb-agent-generate` from the CLI to generate them. |
 | `clear_memory(session_id?)` | Clear conversation history for a session |
 | `show_memory(session_id?)` | Show current session state and recent history |
 
@@ -90,10 +91,11 @@ ask("Explain the architecture of CP4I", format="bullets")
 ask("How many deals closed last quarter?", session_id="my-session")
 ```
 
-> **Session isolation:** Omitting `session_id` uses the shared `"default"` session.
-> All callers on the same server share this session — earlier questions affect later
-> answers. For isolated conversations (multiple users, multiple windows), always pass
-> a unique `session_id` per user or conversation thread.
+> **Session isolation:** On **HTTP transport**, omitting `session_id` auto-generates a
+> unique UUID per call — the generated ID is returned as `<!-- session_id: <id> -->` in
+> the response so you can reuse it across turns. On **stdio transport** (Claude Desktop /
+> Bob), a single user per process is assumed so the shared `"default"` session is safe.
+> For explicit multi-turn control, always pass a unique `session_id` per conversation thread.
 
 ---
 
@@ -258,12 +260,11 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-> **⚠ Two common gotchas:**
-> 1. **`KB_ROOT` is required** in the `"env"` block. Omitting it causes the server to
->    index the wrong directory and return empty results for every query.
-> 2. **venv PATH:** If `kb-agent-serve` is not found, replace `"command": "kb-agent-serve"`
->    with the absolute path — run `which kb-agent-serve` or check the setup wizard output.
->    See [Troubleshooting](#troubleshooting) for details.
+> **Tips:**
+> - `kb-agent-setup` prints a ready-to-paste config block with the **absolute path** to
+>   `kb-agent-serve` and the correct `KB_ROOT` value — copy it directly from the wizard output.
+> - If `KB_ROOT` is omitted, the server prints a clear error on startup and exits — it will
+>   not silently index the wrong directory.
 
 ---
 
@@ -279,17 +280,15 @@ Bob will automatically load it. Configure the server in your Bob MCP settings wi
 
 ```json
 {
-  "command": "kb-agent-serve",
+  "command": "/absolute/path/to/kb-agent-serve",
   "env": { "KB_ROOT": "/path/to/your/KnowledgeBase" }
 }
 ```
 
-> **⚠ Two common gotchas:**
-> 1. **`KB_ROOT` is required** in the `"env"` block. Omitting it causes the server to
->    index the wrong directory and return empty results for every query.
-> 2. **venv PATH:** If `kb-agent-serve` is not found, replace `"command": "kb-agent-serve"`
->    with the absolute path — run `which kb-agent-serve` or check the setup wizard output.
->    See [Troubleshooting](#troubleshooting) for details.
+> **Tips:**
+> - Use the **absolute path** for `"command"` — `kb-agent-setup` prints it at the end
+>   of setup. If you need it again, run `which kb-agent-serve` in your terminal.
+> - If `KB_ROOT` is omitted or wrong, the server prints a clear error on startup and exits.
 
 ---
 
@@ -336,41 +335,55 @@ This command checks everything and prints a `✓` / `✗` report:
 | Check | What it verifies |
 |---|---|
 | Python version | 3.10 or later |
-| `KB_ROOT` set | env var present and directory exists |
+| `KB_ROOT` set | env var present, explicit, and directory exists |
 | Domain folders | at least one non-ignored subfolder under `KB_ROOT` |
 | `domain_config.yaml` | present per domain |
-| ChromaDB index | non-empty collection per domain |
+| ChromaDB index | non-empty collection per domain; warns if index is older than 7 days |
 | Embedding model | `all-MiniLM-L6-v2` cached on disk |
 | LLM reachable | Ollama/OpenAI/Anthropic endpoint responds |
-| `kb-agent-serve` on PATH | absolute path shown if in venv |
+| `kb-agent-serve` on PATH | absolute path shown |
 | Bob skill installed | `~/.bob/skills/knowledgebase-agent/SKILL.md` |
 
 Each failing item shows a one-line fix hint. Exit code 0 = healthy, 1 = fix needed.
 
 ### Common issues
 
-**`KB_ROOT` not set** — Add it to your MCP host config `env` block:
+**`KB_ROOT` not set or missing from host config** — The server now prints a clear
+error on startup and exits rather than silently using the wrong directory. Copy the
+config block that `kb-agent-setup` printed and paste it into your MCP host config:
 ```json
 "env": { "KB_ROOT": "/absolute/path/to/your/KnowledgeBase" }
 ```
 
-**`kb-agent-serve` not found** — If installed in a venv, use the absolute path:
+**`kb-agent-serve` not found in MCP host config** — `kb-agent-setup` prints the
+absolute path at the end of setup. You can also retrieve it at any time:
 ```bash
-which kb-agent-serve   # or: python -m kb_agent_mcp.server
+which kb-agent-serve
 ```
 
 **Empty answers / no domains** — Re-run `kb-agent-generate` after adding documents.
 
-**Stale index warning in answers** — You've added files since the last index. Run:
+**Stale index warning in answers** — The server automatically detects new files and
+prepends a `⚠ Index may be stale` banner to answers. Run `kb-agent-generate` (or call
+`reindex()` from within the AI chat) to clear it.
+
+**After upgrading (`pip install -U kb-agent-mcp`)** — If the index format is
+incompatible with the new version, `kb-agent-serve` and `kb-agent-generate` both
+detect this automatically and print a clear error with the exact fix. When prompted
+interactively, `kb-agent-generate` offers to wipe and rebuild the index for you:
 ```bash
-kb-agent-generate
+kb-agent-generate   # detects incompatibility, offers auto-rebuild
+# or manually:
+rm -rf /path/to/your/KnowledgeBase/.kb_index && kb-agent-generate
 ```
 
-**After upgrading (`pip install -U kb-agent-mcp`)** — If queries fail or ChromaDB throws an error after an upgrade, the index format may be incompatible. Delete the index and rebuild:
-```bash
-rm -rf /path/to/your/KnowledgeBase/.kb_index
-kb-agent-generate
+**Embedding model download blocked (corporate proxy / air-gapped machine)** — Set
+`TRANSFORMERS_OFFLINE=1` in your environment to prevent download attempts (raises a
+clear error if the model is not already cached). To use a Hugging Face mirror:
+```env
+HF_ENDPOINT=https://hf-mirror.com
 ```
+Pre-download on a networked machine, then copy `~/.cache/huggingface/hub/` here.
 
 ---
 

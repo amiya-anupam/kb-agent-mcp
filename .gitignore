@@ -78,4 +78,3 @@ agents/agent_*_egg_info.py
 # ── Internal planning / dev docs (not for end users) ────────────────────────
 risk-mitigation-plan.md
 pypi-publish-plan.md
-ARCHITECTURE.md
