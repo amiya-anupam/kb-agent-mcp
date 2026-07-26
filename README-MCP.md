@@ -118,7 +118,25 @@ KB_IGNORE_FOLDERS=archive,tmp
 
 ### Passthrough mode
 
-When `KB_LLM_PROVIDER=passthrough` (or when Ollama is unreachable), the server returns a structured `<<<KB_PASSTHROUGH>>>` block instead of calling the LLM. Your AI tool (Claude, Bob, etc.) reads the retrieved context and answers the question directly.
+When `KB_LLM_PROVIDER=passthrough` (or when Ollama is unreachable and `KB_PASSTHROUGH_FALLBACK` is not `false`), the server automatically detects that no local LLM is available and returns the retrieved document context as clean markdown:
+
+```markdown
+> **No local LLM detected.** Retrieved context is provided below —
+> use it to answer the question.
+
+### BizOps Agent
+*Source: BizOps/Revenue.xlsx*
+
+Q1 revenue: $1.2M
+Q2 revenue: $1.5M
+```
+
+The calling AI tool (Claude, Bob, Cursor) receives this directly from the `ask` tool and can answer the question from the context — **no special parsing or configuration needed on the client side**.
+
+To disable the automatic fallback (hard-fail instead):
+```env
+KB_PASSTHROUGH_FALLBACK=false
+```
 
 This is the recommended mode for most users — no local model required.
 
