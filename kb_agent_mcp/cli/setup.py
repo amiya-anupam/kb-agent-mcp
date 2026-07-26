@@ -737,6 +737,16 @@ def main() -> None:
     # shown in the completion block, not buried at the bottom.
     serve_cmd = _serve_path()
 
+    # Run doctor automatically after setup so the user gets immediate
+    # confirmation that everything is wired up correctly.
+    try:
+        from kb_agent_mcp.cli.doctor import run_doctor
+        hdr("Running health check…")
+        print()
+        run_doctor(fix=False)
+    except Exception as exc:
+        logger.warning("Post-setup doctor check failed (%s); run kb-agent-doctor manually", exc)
+
     hdr("✅  Setup complete!")
     print()
 

@@ -26,6 +26,7 @@ import re
 import time
 import asyncio
 from pathlib import Path
+from typing import NamedTuple
 
 from kb_agent_mcp.config import cfg
 
@@ -35,6 +36,14 @@ logger = logging.getLogger(__name__)
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
 _SAFE_SESSION_RE = re.compile(r"[^a-zA-Z0-9_\-]")
+
+# ── In-memory session cache ────────────────────────────────────────────────────
+# Keeps the most-recently-used session dict in memory so repeated queries in
+# the same conversation don't hit disk on every call.
+# Entry: { session_id: (data_dict, loaded_at_timestamp) }
+# Evicted when the session is saved (refreshed) or when it expires.
+_SESSION_CACHE: dict[str, tuple[dict, float]] = {}
+_SESSION_CACHE_TTL = 300.0  # seconds — evict idle entries after 5 min
 
 
 def _session_file(session_id: str) -> Path:
@@ -52,15 +61,29 @@ def _empty_session() -> dict:
 # ── Sync I/O (used by async wrappers via asyncio.to_thread) ────────────────────
 
 def _load_sync(session_id: str) -> dict:
-    """Load a session from disk. Returns a fresh session if missing or expired."""
+    """Load a session — from in-memory cache if warm, else from disk."""
+    now = time.time()
+
+    # Check in-memory cache first
+    if session_id in _SESSION_CACHE:
+        cached_data, cached_at = _SESSION_CACHE[session_id]
+        # Evict if TTL exceeded or session itself has expired
+        elapsed_session = now - cached_data.get("last_active", 0)
+        if (now - cached_at) < _SESSION_CACHE_TTL and elapsed_session <= cfg.KB_SESSION_TIMEOUT_HOURS * 3600:
+            return cached_data
+        else:
+            del _SESSION_CACHE[session_id]
+
+    # Cache miss — load from disk
     path = _session_file(session_id)
     if not path.exists():
         return _empty_session()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        elapsed = time.time() - data.get("last_active", 0)
+        elapsed = now - data.get("last_active", 0)
         if elapsed > cfg.KB_SESSION_TIMEOUT_HOURS * 3600:
             return _empty_session()
+        _SESSION_CACHE[session_id] = (data, now)
         return data
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         logger.warning("Failed to load session %r (%s); starting fresh", session_id, exc)
@@ -68,10 +91,12 @@ def _load_sync(session_id: str) -> dict:
 
 
 def _save_sync(session_id: str, data: dict) -> None:
-    """Write a session to disk."""
+    """Write a session to disk and refresh the in-memory cache."""
     data["last_active"] = time.time()
     path = _session_file(session_id)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Keep cache in sync with what was just written
+    _SESSION_CACHE[session_id] = (data, time.time())
 
 
 # ── Public sync API (used internally by orchestrator) ──────────────────────────

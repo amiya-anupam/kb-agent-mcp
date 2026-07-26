@@ -36,6 +36,7 @@ import asyncio
 import hashlib
 import logging
 import pathlib
+from collections import OrderedDict
 from typing import TypedDict
 
 import numpy as np
@@ -46,6 +47,26 @@ from kb_agent_mcp.embeddings import embed as _async_embed, _embed_sync
 from kb_agent_mcp.file_parser import INCLUDE_EXTS, should_skip, snippet as _snippet
 
 logger = logging.getLogger(__name__)
+
+# ── Query-embedding LRU cache ─────────────────────────────────────────────────
+# Embedding the same query text is deterministic — cache the result to avoid
+# re-running the model (or making a network call) when the same question is
+# asked across domains in one orchestrator dispatch, or again in a follow-up.
+_EMBED_CACHE_MAX = 128  # entries
+_embed_cache: OrderedDict[str, list[float]] = OrderedDict()
+
+
+def _embed_cached(text: str) -> list[float]:
+    """Return the embedding for text, computing it only on the first call."""
+    key = hashlib.sha1(text.encode()).hexdigest()
+    if key in _embed_cache:
+        _embed_cache.move_to_end(key)       # mark as recently used
+        return _embed_cache[key]
+    vec = _embed_sync(text)
+    _embed_cache[key] = vec
+    if len(_embed_cache) > _EMBED_CACHE_MAX:
+        _embed_cache.popitem(last=False)    # evict oldest
+    return vec
 
 
 # ── Types ─────────────────────────────────────────────────────────────────────
@@ -293,58 +314,106 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
     Semantic search within a domain's collection.
     Returns up to *top_n* results sorted by cosine similarity (descending).
     Falls back to keyword matching if no compatible embeddings exist.
+
+    Strategy:
+    1. Embed the query once.
+    2. Use ChromaDB's native .query() (ANN index) to fetch only the top-N
+       candidates — avoids pulling the full collection into memory.
+    3. If the collection is empty or embeddings are absent, fall back to
+       keyword matching (which requires the full doc set — fetched lazily).
     """
     col = get_or_create_collection(domain)
 
-    # Get all documents (ChromaDB handles similarity natively but we use
-    # sklearn for compatibility with mixed embedding dimensions)
+    # Fast path: check collection is non-empty without fetching embeddings
     try:
-        all_docs = col.get(include=["embeddings", "documents", "metadatas"])
+        count = col.count()
     except Exception as exc:
         logger.warning(
-            "ChromaDB get() failed for domain %r query %r (%s); returning empty results",
+            "ChromaDB count() failed for domain %r (%s); returning empty results",
+            domain, exc,
+        )
+        return []
+
+    if count == 0:
+        return []
+
+    try:
+        query_vec = _embed_cached(query)
+    except Exception as exc:
+        logger.warning(
+            "Query embedding failed for domain %r query %r (%s); returning empty results",
             domain, query, exc,
         )
         return []
 
-    if not all_docs["ids"]:
-        return []
-
-    embeddings = all_docs.get("embeddings")
-    if not embeddings:
-        return _keyword_fallback(domain, query, top_n, all_docs)
-
+    # Use ChromaDB's native ANN query — only top_n rows transferred
     try:
-        query_vec = _embed_sync(query)
-        query_arr = np.array([query_vec])
-        doc_arr = np.array(embeddings)
-
-        # Handle mixed embedding dimensions gracefully
-        q_dim = query_arr.shape[1]
-        mask = [i for i, e in enumerate(embeddings) if len(e) == q_dim]
-        if not mask:
-            return _keyword_fallback(domain, query, top_n, all_docs)
-
-        filtered_arr = doc_arr[mask]
-        scores = cosine_similarity(query_arr, filtered_arr)[0]
-        top_indices = np.argsort(scores)[::-1][:top_n]
+        res = col.query(
+            query_embeddings=[query_vec],
+            n_results=min(top_n, count),
+            include=["documents", "metadatas", "distances"],
+        )
+        ids       = res["ids"][0]
+        metas     = res["metadatas"][0]
+        docs      = res["documents"][0]
+        distances = res["distances"][0]
 
         results: list[SearchResult] = []
-        for rank_idx in top_indices:
-            orig_idx = mask[rank_idx]
-            meta = all_docs["metadatas"][orig_idx] or {}
+        for doc_id, meta, doc, dist in zip(ids, metas, docs, distances):
+            meta = meta or {}
+            # ChromaDB returns L2 distance; convert to a 0–1 similarity score
+            score = max(0.0, 1.0 - float(dist))
             results.append(SearchResult(
-                path=meta.get("path", all_docs["ids"][orig_idx]),
-                name=meta.get("name", pathlib.Path(all_docs["ids"][orig_idx]).name),
+                path=meta.get("path", doc_id),
+                name=meta.get("name", pathlib.Path(doc_id).name),
                 folder=meta.get("folder", domain),
-                summary=all_docs["documents"][orig_idx] or "",
-                score=float(scores[rank_idx]),
+                summary=doc or "",
+                score=score,
             ))
         return results
 
     except Exception as exc:
-        logger.warning("Vector search for domain %r failed (%s); using keyword fallback", domain, exc)
-        return _keyword_fallback(domain, query, top_n, all_docs)
+        logger.warning(
+            "ChromaDB query() failed for domain %r query %r (%s); falling back to full scan",
+            domain, query, exc,
+        )
+        # Last-resort: full scan fallback (original behaviour)
+        try:
+            all_docs = col.get(include=["embeddings", "documents", "metadatas"])
+        except Exception as exc2:
+            logger.warning(
+                "ChromaDB get() also failed for domain %r (%s); returning empty results",
+                domain, exc2,
+            )
+            return []
+        embeddings = all_docs.get("embeddings")
+        if not embeddings:
+            return _keyword_fallback(domain, query, top_n, all_docs)
+        try:
+            query_arr   = np.array([query_vec])
+            doc_arr     = np.array(embeddings)
+            q_dim       = query_arr.shape[1]
+            mask        = [i for i, e in enumerate(embeddings) if len(e) == q_dim]
+            if not mask:
+                return _keyword_fallback(domain, query, top_n, all_docs)
+            filtered_arr = doc_arr[mask]
+            scores       = cosine_similarity(query_arr, filtered_arr)[0]
+            top_indices  = np.argsort(scores)[::-1][:top_n]
+            fallback: list[SearchResult] = []
+            for rank_idx in top_indices:
+                orig_idx = mask[rank_idx]
+                meta = all_docs["metadatas"][orig_idx] or {}
+                fallback.append(SearchResult(
+                    path=meta.get("path", all_docs["ids"][orig_idx]),
+                    name=meta.get("name", pathlib.Path(all_docs["ids"][orig_idx]).name),
+                    folder=meta.get("folder", domain),
+                    summary=all_docs["documents"][orig_idx] or "",
+                    score=float(scores[rank_idx]),
+                ))
+            return fallback
+        except Exception as exc3:
+            logger.warning("Full-scan fallback also failed (%s); using keyword fallback", exc3)
+            return _keyword_fallback(domain, query, top_n, all_docs)
 
 
 def _keyword_fallback(

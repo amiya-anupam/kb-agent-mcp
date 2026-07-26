@@ -63,6 +63,7 @@ Repository    = "https://github.com/amiya-anupam/kb-agent-mcp"
 
 # ── CLI entry points ───────────────────────────────────────────────────────────
 [project.scripts]
+kb-agent          = "kb_agent_mcp.cli.main:main"
 kb-agent-setup    = "kb_agent_mcp.cli.setup:main"
 kb-agent-generate = "kb_agent_mcp.cli.generate:main"
 kb-agent-serve    = "kb_agent_mcp.server:main"

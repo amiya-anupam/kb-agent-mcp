@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time as _time
 from pathlib import Path
 
 import httpx
@@ -37,6 +38,24 @@ from kb_agent_mcp.context_budget import (
 from kb_agent_mcp.file_parser import extract as _extract_file
 
 logger = logging.getLogger(__name__)
+
+
+# ── Shared HTTP client (connection pool reused across all LLM calls) ──────────
+# httpx.Client keeps TCP connections alive — avoids a fresh TCP+TLS handshake
+# per LLM request (saves 100–500 ms per call on HTTPS endpoints).
+_http_client: httpx.Client | None = None
+_http_client_lock = asyncio.Lock()
+
+
+def _get_http_client() -> httpx.Client:
+    """Return (or lazily create) the shared sync httpx.Client."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.Client(
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+    return _http_client
 
 
 # ── Passthrough detection ──────────────────────────────────────────────────────
@@ -164,6 +183,38 @@ def _find_readme(folder: Path) -> Path | None:
     return md_files[0]
 
 
+# ── Per-domain README cache ───────────────────────────────────────────────────
+# README files change only when kb-agent-generate is re-run. Cache the
+# (path, text) pair per folder_name so repeated queries in the same process
+# don't re-discover and re-read the same file from disk.
+# TTL: 5 minutes — stale on server restart anyway.
+_README_CACHE: dict[str, tuple["Path | None", str, float]] = {}
+_README_CACHE_TTL = 300.0  # seconds
+
+
+def _get_readme_cached(folder_name: str) -> tuple["Path | None", str]:
+    """Return (readme_path, text) for folder_name, using a short-lived cache."""
+    now = _time.time()
+    if folder_name in _README_CACHE:
+        cached_path, cached_text, cached_at = _README_CACHE[folder_name]
+        if now - cached_at < _README_CACHE_TTL:
+            return cached_path, cached_text
+
+    folder = cfg.kb_root_path / folder_name
+    readme = _find_readme(folder)
+    if readme is None:
+        _README_CACHE[folder_name] = (None, "", now)
+        return None, ""
+    try:
+        text = readme.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        logger.debug("Failed to read README %s (%s); skipping README-first strategy", readme, exc)
+        _README_CACHE[folder_name] = (None, "", now)
+        return None, ""
+    _README_CACHE[folder_name] = (readme, text, now)
+    return readme, text
+
+
 def _extract_auto_index(text: str) -> str | None:
     if _MARKER_START not in text or _MARKER_END not in text:
         return None
@@ -191,15 +242,8 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
     if is_data_question(question):
         return None, ""
 
-    folder = cfg.kb_root_path / folder_name
-    readme = _find_readme(folder)
-    if readme is None:
-        return None, ""
-
-    try:
-        text = readme.read_text(encoding="utf-8", errors="ignore")
-    except Exception as exc:
-        logger.debug("Failed to read README %s (%s); skipping README-first strategy", readme, exc)
+    readme, text = _get_readme_cached(folder_name)
+    if readme is None or not text:
         return None, ""
 
     if _non_index_chars(text) < _cb_get("min_readme"):
@@ -235,7 +279,7 @@ async def call_llm(messages: list[dict], temperature: float = 0.2) -> str:
 
 def _call_ollama_sync(messages: list[dict], temperature: float) -> str:
     try:
-        r = httpx.post(
+        r = _get_http_client().post(
             f"{cfg.KB_LLM_BASE_URL}/api/chat",
             json={
                 "model":    cfg.KB_MODEL,
@@ -244,7 +288,6 @@ def _call_ollama_sync(messages: list[dict], temperature: float) -> str:
                 "options":  {"temperature": temperature, "num_ctx": cfg.KB_NUM_CTX},
                 "think":    False,
             },
-            timeout=120.0,
         )
         r.raise_for_status()
         return r.json()["message"]["content"].strip()
@@ -266,11 +309,10 @@ def _call_openai_compat_sync(messages: list[dict], temperature: float) -> str:
     if cfg.KB_API_KEY:
         headers["Authorization"] = f"Bearer {cfg.KB_API_KEY}"
     try:
-        r = httpx.post(
+        r = _get_http_client().post(
             f"{base}/chat/completions",
             headers=headers,
             json={"model": cfg.KB_MODEL, "messages": messages, "temperature": temperature},
-            timeout=120.0,
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
@@ -307,11 +349,10 @@ def _call_anthropic_sync(messages: list[dict], temperature: float) -> str:
     if system:
         payload["system"] = system
     try:
-        r = httpx.post(
+        r = _get_http_client().post(
             f"{cfg.KB_LLM_BASE_URL}/v1/messages",
             headers=headers,
             json=payload,
-            timeout=120.0,
         )
         r.raise_for_status()
         return r.json()["content"][0]["text"].strip()
