@@ -21,11 +21,12 @@ kb_agent_mcp/
 ├── context_budget.py    Character budget registry + context compaction engine
 ├── config.py            Configuration singleton (env vars + .env file)
 └── cli/
-    ├── setup.py         Interactive setup wizard (kb-agent-setup)
-    ├── generate.py      Index builder + domain YAML generator (kb-agent-generate)
-    ├── watch.py         Filesystem watcher (kb-agent-watch)
-    ├── doctor.py        Health checklist with auto-fix (kb-agent-doctor)
-    └── status.py        Per-domain status table (kb-agent-status)
+    ├── main.py          Unified `kb-agent` root command (dispatches all subcommands)
+    ├── setup.py         Interactive setup wizard (kb-agent-setup / kb-agent setup)
+    ├── generate.py      Index builder + domain YAML generator (kb-agent-generate / kb-agent generate)
+    ├── watch.py         Filesystem watcher (kb-agent-watch / kb-agent watch)
+    ├── doctor.py        Health checklist with auto-fix (kb-agent-doctor / kb-agent doctor)
+    └── status.py        Per-domain status table (kb-agent-status / kb-agent status)
 
 scripts/
 └── setup.py             Compatibility shim → delegates to kb_agent_mcp.cli.setup
@@ -99,6 +100,8 @@ The README-first RAG pipeline. For each domain:
 
 **Strategy 1 — README-first:**
 - Looks for a README (`.md` file in the domain folder, priority cascade).
+  Result is cached in `_README_CACHE` (5-min TTL via `_get_readme_cached()`) — the
+  filesystem is not re-read on every query.
 - Simple question → extracts the `<!-- KB:AUTO-INDEX:START -->` block and
   the pre-index intro; compacts them via `context_budget.build_context()`.
 - Complex question (matches `_COMPLEX_QUESTION_RE`) → uses the full README
@@ -119,15 +122,25 @@ Also owns all LLM call implementations (Ollama, OpenAI-compatible, Anthropic),
 and the `is_passthrough()` cache (checked once per process against Ollama;
 reset by `reindex()`).
 
+All outbound HTTP calls (LLM providers) reuse a shared `httpx.Client` singleton
+returned by `_get_http_client()`. The client is created once per process with
+connection pooling, saving 100–500 ms per call compared to a per-request client.
+
 ### `vector_store.py`
 ChromaDB persistence layer. One collection per domain, stored under
 `{KB_ROOT}/.kb_index/chroma/`. Each file is stored with its MD5 hash;
 `_upsert_file_sync()` skips files whose hash hasn't changed (incremental
 indexing). Embeddings are computed via `embeddings._embed_sync()`.
 
-Search uses sklearn `cosine_similarity` over all stored embeddings (not
-ChromaDB's built-in ANN) for consistent results across mixed embedding
-dimensions. Falls back to keyword matching if embeddings are missing.
+Embedding calls are deduplicated by a 128-entry SHA-1-keyed LRU cache
+(`_embed_cache` / `_embed_cached()`): the same query text is never re-embedded
+within a process lifetime.
+
+Search uses `col.query(n_results=top_n)` — ChromaDB's native ANN retrieval.
+This is faster and avoids loading the entire collection into memory. A full-scan
+fallback (sklearn `cosine_similarity` over all embeddings) is retained and
+triggered only when `col.query()` raises an exception.
+Falls back to keyword matching if embeddings are missing entirely.
 
 `set_domain_metadata()` / `get_domain_metadata()` store domain config and two
 timestamps as ChromaDB collection metadata (flat key-value, JSON-serialised for
@@ -185,13 +198,20 @@ inclusion) and `boost_keywords` (filename-based sort boost) to vector search
 results via `apply_pin_rules()`.
 
 ### `memory.py`
-Disk-persisted session memory. Each session is a JSON file at
-`{KB_ROOT}/.kb_index/session_memory/<session_id>.json` containing a message
-list and a `last_active` timestamp. Sessions expire automatically after
-`KB_SESSION_TIMEOUT_HOURS` hours of inactivity. Only the last
-`KB_SESSION_MAX_TURNS` turns are retained; assistant answers are truncated to
-`KB_SESSION_MAX_ANSWER_CHARS` before storage (the full answer was already
-returned to the caller).
+Session memory with an in-memory cache layer. Each session is persisted as a
+JSON file at `{KB_ROOT}/.kb_index/session_memory/<session_id>.json` containing
+a message list and a `last_active` timestamp.
+
+An in-process `_SESSION_CACHE` dict (5-min TTL) acts as a first-read layer:
+`_load_sync()` returns the cached value on warm reads and only hits disk on cold
+start or after the TTL expires. `_save_sync()` writes to both cache and disk.
+This avoids repeated disk I/O for sessions that receive multiple turns in quick
+succession.
+
+Sessions expire automatically after `KB_SESSION_TIMEOUT_HOURS` hours of
+inactivity. Only the last `KB_SESSION_MAX_TURNS` turns are retained; assistant
+answers are truncated to `KB_SESSION_MAX_ANSWER_CHARS` before storage (the full
+answer was already returned to the caller).
 
 ### `context_budget.py`
 Central registry of all character budgets (read from `cfg`). Provides:
@@ -206,6 +226,16 @@ Central registry of all character budgets (read from `cfg`). Provides:
 ---
 
 ## Module responsibilities (CLI)
+
+### `cli/main.py`
+Unified entry point (`kb-agent`). Parses the first positional argument as a
+subcommand and delegates to the appropriate CLI module in-process (no subprocess
+fork). Registered subcommands: `init`, `setup`, `generate`, `serve`, `watch`,
+`doctor`, `status`.
+
+`kb-agent init` is the recommended first-time path: it calls `run_setup()`,
+`run_generate()`, and `run_doctor()` in sequence within a single process, giving
+the user a guided setup → index-build → health-check flow in one command.
 
 ### `cli/setup.py`
 The canonical interactive setup wizard (`kb-agent-setup`). Guides a new user through:
@@ -319,7 +349,7 @@ MCP client → server.ask()
     │
     ├── _get_agents()                   lazy-load DomainAgent registry (once per process)
     ├── detect_format_intent()          regex → format instruction string
-    ├── get_history_sync()              load session turns from disk
+    ├── get_history_sync()              load session turns (cache-first; disk only on cold start)
     ├── _keyword_confidence()           fast pre-filter against domain keywords
     │
     ├── [if not confident] _classify_intent()
@@ -334,7 +364,7 @@ MCP client → server.ask()
     │       └── base_agent.ask()
     │           │
     │           ├── [README-first]
-    │           │   ├── _find_readme()
+    │           │   ├── _find_readme()  [_README_CACHE hit → no disk I/O on warm calls]
     │           │   ├── [simple]  _extract_auto_index() → context_budget.build_context()
     │           │   └── [complex] full README → context_budget.trim()
     │           │

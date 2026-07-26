@@ -26,12 +26,13 @@ Connect it to Claude Desktop, Bob, Cursor, or any MCP-compatible AI tool — the
 # Install
 pip install kb-agent-mcp
 
-# Run the setup wizard
+# First-time setup (recommended) — runs setup → generate → doctor in one step
 cd /path/to/your/documents
-kb-agent-setup
+kb-agent init
 
-# Or manually: generate indexes and domain configs
-kb-agent-generate
+# Or run each step separately
+kb-agent-setup      # interactive wizard
+kb-agent-generate   # build indexes + domain configs
 
 # Start the MCP server (stdio — for Claude Desktop / Bob)
 kb-agent-serve
@@ -215,6 +216,20 @@ retrieval_rules:
 
 ## CLI Commands
 
+### Unified entry point
+
+| Command | Description |
+|---|---|
+| `kb-agent init` | First-time setup: runs setup → generate → doctor in sequence |
+| `kb-agent setup` | Interactive setup wizard |
+| `kb-agent generate` | Build ChromaDB indexes + generate domain_config.yaml |
+| `kb-agent serve` | Start the MCP server |
+| `kb-agent watch` | Watch for file changes and auto-update indexes |
+| `kb-agent doctor` | Run a health checklist to diagnose problems |
+| `kb-agent status` | Show a live system-health dashboard (indexes, LLM, memory) |
+
+### Legacy standalone commands (still available)
+
 | Command | Description |
 |---|---|
 | `kb-agent-setup` | Interactive setup wizard |
@@ -325,9 +340,11 @@ For a **minor** or **major** version bump (e.g. `0.2.0` or `1.0.0`), manually ed
 
 ## Troubleshooting
 
-If something isn't working, run:
+`kb-agent-setup` (and `kb-agent init`) automatically runs `kb-agent-doctor` at the end of setup and prints a full health report. If you need to re-run it later:
 
 ```bash
+kb-agent doctor
+# or
 kb-agent-doctor
 ```
 
