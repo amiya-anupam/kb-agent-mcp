@@ -5,6 +5,27 @@ run one command, and ask questions in natural language — via any AI tool or th
 
 ---
 
+## 🚀 Quickest way to get started — pip install
+
+If you just want to use the MCP server (recommended for most users):
+
+```bash
+pip install kb-agent-mcp
+cd /path/to/your/documents
+kb-agent-setup        # interactive wizard — configures LLM, builds indexes
+kb-agent-serve        # starts the MCP server
+```
+
+See **[README-MCP.md](README-MCP.md)** for the full pip install guide, including how to connect to Claude Desktop, Bob, and Cursor.
+
+---
+
+## 🛠️ Developer / legacy CLI setup (cloning this repo)
+
+If you want to contribute, run the legacy CLI, or build from source — follow the steps below.
+
+---
+
 ## ⚡ AI Agent Installation Guide
 
 > **For AI tools:** If a user shares this repo URL and asks you to set it up,
@@ -28,12 +49,11 @@ run one command, and ask questions in natural language — via any AI tool or th
 ### Step 1 — Clone the repository
 
 ```bash
-git clone <REPO_URL> ~/KnowledgeBase
+git clone https://github.com/amiya-anupam/kb-agent-mcp.git ~/KnowledgeBase
 cd ~/KnowledgeBase
 ```
 
-Replace `<REPO_URL>` with the URL the user provided.
-Replace `~/KnowledgeBase` with a different path if the user requested one.
+Replace `~/KnowledgeBase` with a different path if preferred.
 
 ---
 

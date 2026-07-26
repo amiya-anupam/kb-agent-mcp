@@ -773,13 +773,13 @@ Skill layer (no Python imports — runs as subprocess):
 ## 19. MCP Package — kb-agent-mcp
 
 A pip-installable Python package that exposes the same knowledge base as an MCP server.
-Install with `pip install -e .` (editable) or `pip install kb-agent-mcp`.
+Install with `pip install kb-agent-mcp` (PyPI) or `pip install -e .` (editable, from source).
 
 ### Package layout
 
 ```
 kb_agent_mcp/
-  __init__.py          ← version string (0.1.0)
+  __init__.py          ← version string (reads from package metadata via importlib.metadata)
   config.py            ← frozen Config dataclass; reads .env + env vars at import time
   context_budget.py    ← token/char budget engine (mirrors agents/context_budget.py)
   file_parser.py       ← async multi-format extractor (PDF, DOCX, PPTX, XLSX, MD, TXT, …)
