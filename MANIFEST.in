@@ -1,0 +1,43 @@
+# MANIFEST.in — controls what is included in the PyPI source distribution (sdist)
+#
+# The wheel (binary distribution) is controlled by [tool.setuptools.packages.find]
+# in pyproject.toml and already includes only kb_agent_mcp/.
+#
+# This file ensures the sdist also excludes development/contributor-only content
+# so that `pip install kb-agent-mcp` fetches a clean, minimal package.
+
+# ── Always include ────────────────────────────────────────────────────────────
+include README-MCP.md
+include README.md
+include LICENSE
+include pyproject.toml
+include requirements.txt
+include .env.example
+
+# ── Exclude tests (for contributors only — not needed to run the server) ─────
+prune tests
+
+# ── Exclude legacy CLI scripts (clone-path only — not needed for pip users) ──
+prune scripts
+
+# ── Exclude legacy agents/ directory (clone-path only) ───────────────────────
+prune agents
+
+# ── Exclude build artifacts ───────────────────────────────────────────────────
+prune dist
+prune build
+exclude *.egg-info
+recursive-exclude * __pycache__
+recursive-exclude * *.pyc
+recursive-exclude * *.pyo
+
+# ── Exclude internal planning and dev docs ────────────────────────────────────
+exclude risk-mitigation-plan.md
+exclude pypi-publish-plan.md
+exclude ARCHITECTURE.md
+
+# ── Exclude local data / personal knowledge folders ──────────────────────────
+prune .kb_index
+exclude .env
+exclude .watch.log
+exclude skills/skills.md

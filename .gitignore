@@ -74,3 +74,8 @@ agents/agent_*_egg_info.py
 
 # ── ChromaDB vector index (local, rebuilt by kb-agent-generate) ──
 .kb_index/
+
+# ── Internal planning / dev docs (not for end users) ────────────────────────
+risk-mitigation-plan.md
+pypi-publish-plan.md
+ARCHITECTURE.md

@@ -63,10 +63,17 @@ kb-agent-serve    = "kb_agent_mcp.server:main"
 kb-agent-watch    = "kb_agent_mcp.cli.watch:main"
 kb-agent-doctor   = "kb_agent_mcp.cli.doctor:main"
 
-# ── Package discovery ──────────────────────────────────────────────────────────
+# ── Package discovery ─────────────────────────────────────────────────────────
+# Only the kb_agent_mcp/ Python package is included in the wheel.
+# tests/, scripts/, agents/, and all other top-level directories are
+# development/contributor resources — not shipped to end users.
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kb_agent_mcp*"]
+
+# ── Wheel: exclude non-package data from the installed distribution ───────────
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "__pycache__"]
 
 # ── pytest ─────────────────────────────────────────────────────────────────────
 [tool.pytest.ini_options]
