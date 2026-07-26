@@ -1,20 +1,25 @@
 name: Mirror to IBM GHE
 
 on:
-  push:
+  # Fire only after the publish workflow completes — this guarantees the
+  # version-bump commit has already been pushed back to main before we mirror.
+  workflow_run:
+    workflows: ["Test, bump version, and publish to PyPI"]
+    types: [completed]
     branches: [main]
 
 jobs:
   mirror-to-ibm:
     name: Push to IBM GHE
     runs-on: ubuntu-latest
-    # Only run after the publish job has completed (version bump is committed by then)
-    needs: []
+    # Skip the mirror if the publish workflow itself failed.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
         with:
           fetch-depth: 0  # full history
+          ref: main       # fetch latest main — includes the version-bump commit
 
       - name: Configure SSH deploy key for IBM GHE
         run: |
