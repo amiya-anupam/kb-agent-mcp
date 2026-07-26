@@ -1,0 +1,34 @@
+name: Mirror to IBM GHE
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  mirror-to-ibm:
+    name: Push to IBM GHE
+    runs-on: ubuntu-latest
+    # Only run after the publish job has completed (version bump is committed by then)
+    needs: []
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history
+
+      - name: Configure SSH deploy key for IBM GHE
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.IBM_GHE_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.ibm.com >> ~/.ssh/known_hosts
+          cat >> ~/.ssh/config <<EOF
+          Host github.ibm.com
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking yes
+          EOF
+
+      - name: Push mirror to IBM GHE
+        run: |
+          git remote add ibm git@github.ibm.com:Amiya-Anupam1/kb-agent-mcp.git
+          git push ibm main --force
