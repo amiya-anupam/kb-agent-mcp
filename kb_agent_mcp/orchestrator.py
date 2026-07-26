@@ -13,6 +13,13 @@ Pipeline per `ask()` call:
   7. Persist turn in session memory
 
 Thread-safe: all async; DomainAgent.run() calls are gathered concurrently.
+
+Passthrough mode (no local LLM):
+  When KB_LLM_PROVIDER=passthrough or Ollama is unreachable, base_agent returns
+  a raw <<<KB_PASSTHROUGH>>> block instead of an LLM answer.  _merge_answers()
+  detects this and converts the block into clean markdown so the MCP client
+  (Claude, Bob, Cursor, etc.) receives readable retrieved context it can answer
+  from — rather than an unformatted marker string.
 """
 
 from __future__ import annotations
@@ -235,6 +242,55 @@ async def _classify_intent(
         }
 
 
+# ── Passthrough block parser ───────────────────────────────────────────────────
+
+_PT_START = "<<<KB_PASSTHROUGH>>>"
+_PT_END   = "<<<KB_PASSTHROUGH_END>>>"
+
+def _unwrap_passthrough_blocks(raw: str) -> str:
+    """
+    Convert one or more <<<KB_PASSTHROUGH>>> blocks into clean markdown.
+
+    Each block is parsed for AGENT, SOURCE, and the ---CONTEXT--- section.
+    The result is formatted as readable markdown so any MCP client (Claude,
+    Bob, Cursor, etc.) can answer the question directly from the context —
+    without needing to parse marker strings.
+
+    Falls back to returning `raw` unchanged if no blocks are found.
+    """
+    blocks = re.findall(
+        re.escape(_PT_START) + r"(.*?)" + re.escape(_PT_END),
+        raw, re.DOTALL,
+    )
+    if not blocks:
+        return raw
+
+    sections: list[str] = [
+        "> **No local LLM detected.** Retrieved context is provided below — "
+        "use it to answer the question.\n"
+    ]
+
+    for block in blocks:
+        # Extract AGENT
+        m = re.search(r"^AGENT:\s*(.+)$", block, re.MULTILINE)
+        agent = m.group(1).strip() if m else "KnowledgeBase"
+
+        # Extract SOURCE
+        m = re.search(r"^SOURCE:\s*(.+)$", block, re.MULTILINE)
+        source = m.group(1).strip() if m else ""
+
+        # Extract CONTEXT (everything after ---CONTEXT--- marker)
+        m = re.search(r"^---CONTEXT---\n(.*)$", block, re.DOTALL | re.MULTILINE)
+        context = m.group(1).strip() if m else block.strip()
+
+        heading = f"### {agent}"
+        if source:
+            heading += f"\n*Source: {source}*"
+        sections.append(f"{heading}\n\n{context}")
+
+    return "\n\n---\n\n".join(sections)
+
+
 # ── Answer merger ──────────────────────────────────────────────────────────────
 
 def _merge_answers(
@@ -254,13 +310,14 @@ def _merge_answers(
             + domain_hints
         )
 
-    # Passthrough: return combined passthrough blocks
+    # Passthrough: unwrap raw marker blocks → clean markdown context
     if any(r.get("passthrough") for r in found):
-        return "\n".join(
+        combined_raw = "\n".join(
             r.get("passthrough_block", r["answer"])
             for r in found
             if r.get("passthrough")
         )
+        return _unwrap_passthrough_blocks(combined_raw)
 
     if len(found) == 1:
         r = found[0]

@@ -89,3 +89,78 @@ def test_keyword_confidence_ambiguous():
     # Both domains match with 1 hit each — not confident
     matched, confident = _keyword_confidence("What is the ACE revenue?", agents)
     assert not confident
+
+
+# ── Passthrough unwrap tests ──────────────────────────────────────────────────
+
+def test_unwrap_passthrough_single_block():
+    from kb_agent_mcp.orchestrator import _unwrap_passthrough_blocks
+
+    raw = (
+        "<<<KB_PASSTHROUGH>>>\n"
+        "AGENT: BizOps Agent\n"
+        "QUESTION: What is the revenue?\n"
+        "SOURCE: BizOps/Revenue.xlsx\n"
+        "SYSTEM_PROMPT:\nYou are the BizOps Agent.\n"
+        "---CONTEXT---\n"
+        "Q1 revenue: $1.2M\nQ2 revenue: $1.5M\n"
+        "<<<KB_PASSTHROUGH_END>>>"
+    )
+    result = _unwrap_passthrough_blocks(raw)
+
+    assert "<<<KB_PASSTHROUGH>>>" not in result
+    assert "<<<KB_PASSTHROUGH_END>>>" not in result
+    assert "No local LLM detected" in result
+    assert "BizOps Agent" in result
+    assert "BizOps/Revenue.xlsx" in result
+    assert "Q1 revenue: $1.2M" in result
+
+
+def test_unwrap_passthrough_multiple_blocks():
+    from kb_agent_mcp.orchestrator import _unwrap_passthrough_blocks
+
+    def _block(agent: str, source: str, context: str) -> str:
+        return (
+            f"<<<KB_PASSTHROUGH>>>\n"
+            f"AGENT: {agent}\n"
+            f"SOURCE: {source}\n"
+            f"SYSTEM_PROMPT:\nYou are {agent}.\n"
+            f"---CONTEXT---\n{context}\n"
+            f"<<<KB_PASSTHROUGH_END>>>"
+        )
+
+    raw = _block("ACE Agent", "ACE Docs/FAQ.pdf", "ACE runs on JVM") + "\n" + \
+          _block("BizOps Agent", "BizOps/Rev.xlsx", "Revenue: $2M")
+
+    result = _unwrap_passthrough_blocks(raw)
+
+    assert "<<<KB_PASSTHROUGH>>>" not in result
+    assert "ACE Agent" in result
+    assert "BizOps Agent" in result
+    assert "ACE runs on JVM" in result
+    assert "Revenue: $2M" in result
+
+
+def test_unwrap_passthrough_no_blocks_returns_raw():
+    from kb_agent_mcp.orchestrator import _unwrap_passthrough_blocks
+
+    raw = "Just a normal answer with no passthrough markers."
+    assert _unwrap_passthrough_blocks(raw) == raw
+
+
+def test_unwrap_passthrough_no_source_field():
+    from kb_agent_mcp.orchestrator import _unwrap_passthrough_blocks
+
+    raw = (
+        "<<<KB_PASSTHROUGH>>>\n"
+        "AGENT: My Agent\n"
+        "SYSTEM_PROMPT:\nYou are My Agent.\n"
+        "---CONTEXT---\n"
+        "Some context here.\n"
+        "<<<KB_PASSTHROUGH_END>>>"
+    )
+    result = _unwrap_passthrough_blocks(raw)
+    assert "My Agent" in result
+    assert "Some context here." in result
+    # No source line — no *Source:* line should appear
+    assert "*Source:" not in result
