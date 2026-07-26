@@ -15,6 +15,7 @@ dist/
 build/
 *.egg
 .eggs/
+.pytest_cache/
 
 # ── Virtual environments ──────────────────────────────────────
 .venv/

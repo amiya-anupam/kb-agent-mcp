@@ -1,0 +1,522 @@
+"""
+kb_agent_mcp/base_agent.py
+──────────────────────────
+Async README-first RAG pipeline.
+
+Strategy (per domain):
+  1. Try README-first:
+     - Simple questions  → AUTO-INDEX block + brief intro (~2 000 chars)
+     - Complex questions → full README body (up to KB_BUDGET_FULL_README chars)
+  2. Fallback to raw-file RAG when README is absent / too thin, or the question
+     is a data/numeric question that needs actual file content.
+
+Passthrough mode (KB_LLM_PROVIDER=passthrough, or auto-detected):
+  Returns a structured dict with a `passthrough_block` key instead of calling
+  the LLM.  The MCP server embeds this block in the tool response so the
+  client's Claude can answer using the retrieved context.
+
+LLM providers: ollama | openai | anthropic | custom | passthrough
+All config from kb_agent_mcp.config.cfg.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from pathlib import Path
+
+import httpx
+
+from kb_agent_mcp.config import cfg
+from kb_agent_mcp.context_budget import (
+    trim as _cb_trim,
+    build_context as _cb_build_context,
+    get as _cb_get,
+)
+from kb_agent_mcp.file_parser import extract as _extract_file
+
+
+# ── Passthrough detection ──────────────────────────────────────────────────────
+
+async def _check_passthrough() -> bool:
+    """
+    Return True when the agent should emit a passthrough block instead of
+    calling a local LLM.
+
+    Conditions (any of):
+      1. KB_LLM_PROVIDER is explicitly "passthrough"
+      2. KB_LLM_PROVIDER is "ollama", KB_API_KEY is empty, and Ollama is
+         not reachable (auto-detect; disabled by KB_PASSTHROUGH_FALLBACK=false)
+    """
+    if cfg.KB_LLM_PROVIDER == "passthrough":
+        return True
+
+    if cfg.KB_LLM_PROVIDER != "ollama" or cfg.KB_API_KEY:
+        return False
+
+    if not cfg.KB_PASSTHROUGH_FALLBACK:
+        return False
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{cfg.KB_LLM_BASE_URL}/api/tags")
+            return r.status_code >= 400
+    except Exception:
+        return True  # unreachable → passthrough
+
+
+# Evaluated once at import; re-run only if the server is restarted.
+# We use a module-level cache so we don't check on every `ask` call.
+_passthrough_cache: bool | None = None
+_passthrough_lock = asyncio.Lock()
+
+
+async def is_passthrough() -> bool:
+    """Cached passthrough check (checks Ollama at most once per process)."""
+    global _passthrough_cache
+    if _passthrough_cache is None:
+        async with _passthrough_lock:
+            if _passthrough_cache is None:
+                _passthrough_cache = await _check_passthrough()
+    return _passthrough_cache
+
+
+def reset_passthrough_cache() -> None:
+    """Force re-detection on next call (used by tests or reindex)."""
+    global _passthrough_cache
+    _passthrough_cache = None
+
+
+# ── Question classifiers ────────────────────────────────────────────────────────
+
+_COMPLEX_QUESTION_RE = re.compile(
+    r"\b(compare|contrast|difference between|differences between|"
+    r"walk me through|step[- ]by[- ]step|deep dive|in[- ]depth|"
+    r"comprehensive|explain in detail|elaborate on|how does .{3,40} work|"
+    r"pros and cons|trade[- ]off|architecture of|internals of|"
+    r"full breakdown|everything about)\b",
+    re.IGNORECASE,
+)
+
+_DATA_QUESTION_RE = re.compile(
+    r"\b(revenue|total revenue|arr|mrr|acv|tcv|quota|attainment|"
+    r"how much|how many|what is the (number|count|total|sum|amount|value|"
+    r"figure|balance|price|cost|rate|percentage|percent|ratio|score|metric)|"
+    r"what (are|were) the (number|count|total|sum|figures|numbers|metrics|results|"
+    r"revenue|sales|deals|renewals|bookings|customers|accounts)|"
+    r"list (all|every|the|each)|show me (all|the|every)|give me (all|the)|"
+    r"breakdown|by (quarter|region|country|geography|market|segment|"
+    r"product|customer|account|industry|channel)|"
+    r"q[1-4]\s*20\d\d|20\d\d\s*q[1-4]|fy\s*20\d\d|"
+    r"ytd|yoy|qoq|mom|r4q|trailing|rolling)\b",
+    re.IGNORECASE,
+)
+
+
+def is_complex_question(question: str) -> bool:
+    return bool(_COMPLEX_QUESTION_RE.search(question))
+
+
+def is_data_question(question: str) -> bool:
+    return bool(_DATA_QUESTION_RE.search(question))
+
+
+# ── README discovery + context extraction ──────────────────────────────────────
+
+_MARKER_START = "<!-- KB:AUTO-INDEX:START -->"
+_MARKER_END   = "<!-- KB:AUTO-INDEX:END -->"
+
+
+def _find_readme(folder: Path) -> Path | None:
+    """
+    Locate the README for a knowledge folder (priority cascade):
+      1. Any .md whose name contains 'readme'
+      2. <FolderName>.md
+      3. First .md with a Markdown heading
+      4. First .md file found
+    """
+    try:
+        md_files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".md"]
+    except Exception:
+        return None
+    if not md_files:
+        return None
+    for f in md_files:
+        if "readme" in f.name.lower():
+            return f
+    folder_md = folder.name + ".md"
+    for f in md_files:
+        if f.name == folder_md:
+            return f
+    for f in md_files:
+        try:
+            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
+            if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
+                return f
+        except Exception:
+            continue
+    return md_files[0]
+
+
+def _extract_auto_index(text: str) -> str | None:
+    if _MARKER_START not in text or _MARKER_END not in text:
+        return None
+    start = text.index(_MARKER_START) + len(_MARKER_START)
+    end   = text.index(_MARKER_END)
+    return text[start:end].strip()
+
+
+def _non_index_chars(text: str) -> int:
+    """Count chars in the README body outside the AUTO-INDEX block."""
+    if _MARKER_START in text and _MARKER_END in text:
+        s = text.index(_MARKER_START)
+        e = text.index(_MARKER_END) + len(_MARKER_END)
+        outside = text[:s] + text[e:]
+    else:
+        outside = text
+    return len(outside.strip())
+
+
+def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, str]:
+    """
+    Return (context_text, source_label).
+    Returns (None, "") when README is absent/thin or the question is a data query.
+    """
+    if is_data_question(question):
+        return None, ""
+
+    folder = cfg.kb_root_path / folder_name
+    readme = _find_readme(folder)
+    if readme is None:
+        return None, ""
+
+    try:
+        text = readme.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None, ""
+
+    if _non_index_chars(text) < _cb_get("min_readme"):
+        return None, ""
+
+    if is_complex_question(question):
+        context = _cb_trim(text, "full_readme")
+        label   = f"Full README ({readme.name})"
+    else:
+        auto_index = _extract_auto_index(text)
+        if auto_index:
+            pre_index = text[: text.index(_MARKER_START)].strip()
+            context   = _cb_build_context(pre_index, auto_index)
+            label     = f"README index ({readme.name})"
+        else:
+            context = _cb_trim(text, "full_readme")
+            label   = f"Full README ({readme.name})"
+
+    return context, label
+
+
+# ── LLM call (provider-agnostic, async) ────────────────────────────────────────
+
+async def call_llm(messages: list[dict], temperature: float = 0.2) -> str:
+    """Send messages to the configured LLM and return the response text."""
+    provider = cfg.KB_LLM_PROVIDER.lower()
+    if provider == "anthropic":
+        return await asyncio.to_thread(_call_anthropic_sync, messages, temperature)
+    if provider in ("openai", "custom"):
+        return await asyncio.to_thread(_call_openai_compat_sync, messages, temperature)
+    return await asyncio.to_thread(_call_ollama_sync, messages, temperature)
+
+
+def _call_ollama_sync(messages: list[dict], temperature: float) -> str:
+    try:
+        r = httpx.post(
+            f"{cfg.KB_LLM_BASE_URL}/api/chat",
+            json={
+                "model":    cfg.KB_MODEL,
+                "messages": messages,
+                "stream":   False,
+                "options":  {"temperature": temperature, "num_ctx": cfg.KB_NUM_CTX},
+                "think":    False,
+            },
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        return r.json()["message"]["content"].strip()
+    except Exception as e:
+        raise RuntimeError(
+            f"Ollama call failed: {e}\n"
+            f"  URL: {cfg.KB_LLM_BASE_URL}/api/chat\n"
+            f"  Model: {cfg.KB_MODEL}\n"
+            f"  Check: is Ollama running? (`ollama serve`)\n"
+            f"         is the model pulled? (`ollama pull {cfg.KB_MODEL}`)"
+        ) from e
+
+
+def _call_openai_compat_sync(messages: list[dict], temperature: float) -> str:
+    base = cfg.KB_LLM_BASE_URL.rstrip("/")
+    if "11434" in base and not base.endswith("/v1"):
+        base = f"{base}/v1"
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if cfg.KB_API_KEY:
+        headers["Authorization"] = f"Bearer {cfg.KB_API_KEY}"
+    try:
+        r = httpx.post(
+            f"{base}/chat/completions",
+            headers=headers,
+            json={"model": cfg.KB_MODEL, "messages": messages, "temperature": temperature},
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        hint = (
+            f"OpenAI-compatible call failed: {e}\n"
+            f"  URL: {base}/chat/completions\n"
+            f"  Model: {cfg.KB_MODEL}\n"
+        )
+        if not cfg.KB_API_KEY and cfg.KB_LLM_PROVIDER in ("openai", "custom"):
+            hint += "  Check: KB_API_KEY is not set in your .env\n"
+        raise RuntimeError(hint) from e
+
+
+def _call_anthropic_sync(messages: list[dict], temperature: float) -> str:
+    system = ""
+    chat_messages = []
+    for m in messages:
+        if m["role"] == "system":
+            system = m["content"]
+        else:
+            chat_messages.append(m)
+    headers = {
+        "x-api-key":         cfg.KB_API_KEY,
+        "anthropic-version": "2023-06-01",
+        "Content-Type":      "application/json",
+    }
+    payload: dict = {
+        "model":       cfg.KB_MODEL,
+        "max_tokens":  4096,
+        "temperature": temperature,
+        "messages":    chat_messages,
+    }
+    if system:
+        payload["system"] = system
+    try:
+        r = httpx.post(
+            f"{cfg.KB_LLM_BASE_URL}/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=120.0,
+        )
+        r.raise_for_status()
+        return r.json()["content"][0]["text"].strip()
+    except Exception as e:
+        raise RuntimeError(
+            f"Anthropic call failed: {e}\n"
+            f"  URL: {cfg.KB_LLM_BASE_URL}/v1/messages\n"
+            f"  Model: {cfg.KB_MODEL}\n"
+            f"  Check: KB_API_KEY correct? Does it have access to {cfg.KB_MODEL}?"
+        ) from e
+
+
+# ── Confidence footer ──────────────────────────────────────────────────────────
+
+def format_confidence_footer(sources: list[dict]) -> str:
+    """Build a markdown confidence footer from a sources list."""
+    if not sources:
+        return ""
+    top   = sources[0]
+    score = top.get("score", 0.0)
+    name  = top.get("name", "unknown")
+    if score >= 1.0:
+        return f"\n\n---\n📄 **Source:** `{name}`"
+    label = "High" if score >= 0.80 else ("Medium" if score >= 0.60 else "Low")
+    extra = sources[1:3]
+    extra_str = (" · " + " · ".join(f"`{s['name']}`" for s in extra)) if extra else ""
+    return (
+        f"\n\n---\n🎯 **Confidence:** {label} ({score:.2f})"
+        f" — **Source:** `{name}`{extra_str}"
+    )
+
+
+# ── Core ask function ──────────────────────────────────────────────────────────
+
+async def ask(
+    question: str,
+    folder_name: str,
+    agent_name: str,
+    system_prompt: str,
+    conversation_history: list[dict] | None = None,
+    top_n: int = 4,
+    max_chars: int | None = None,
+    pre_ranked_results: list[dict] | None = None,
+) -> dict:
+    """
+    README-first async RAG pipeline for a single domain folder.
+
+    Returns:
+        {
+            "agent":              str,
+            "answer":             str,
+            "sources":            list[dict],
+            "found":              bool,
+            "passthrough":        bool (only when in passthrough mode),
+            "passthrough_block":  str (only when in passthrough mode),
+            "confidence_footer":  str (when available),
+        }
+    """
+    if max_chars is None:
+        max_chars = _cb_get("rag_file")
+
+    # ── Strategy 1: README-first ──────────────────────────────────────────────
+    readme_context, source_label = await asyncio.to_thread(
+        _get_readme_context, folder_name, question
+    )
+
+    if readme_context:
+        if await is_passthrough():
+            block = _build_passthrough_block(
+                question=question,
+                context=readme_context,
+                system_prompt=system_prompt,
+                agent_name=agent_name,
+                source_label=source_label,
+            )
+            return {
+                "agent":             agent_name,
+                "answer":            block,
+                "sources":           [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}],
+                "found":             True,
+                "passthrough":       True,
+                "passthrough_block": block,
+            }
+
+        messages = [{"role": "system", "content": system_prompt}]
+        if conversation_history:
+            messages.extend(conversation_history[-_cb_get("history"):])
+        messages.append({
+            "role": "user",
+            "content": (
+                f"Use the following knowledge base content to answer the question.\n\n"
+                f"--- {source_label} ---\n{readme_context}\n---\n\n"
+                f"Question: {question}"
+            ),
+        })
+
+        answer = await call_llm(messages)
+        readme_sources = [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}]
+        return {
+            "agent":             agent_name,
+            "answer":            answer,
+            "sources":           readme_sources,
+            "confidence_footer": format_confidence_footer(readme_sources),
+            "found":             True,
+            "passthrough":       False,
+        }
+
+    # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
+    if pre_ranked_results is not None:
+        results = pre_ranked_results
+    else:
+        from kb_agent_mcp.vector_store import search as _vs_search
+        results = await _vs_search(question, folder_name, top_n=top_n)
+
+    if not results:
+        return {
+            "agent":       agent_name,
+            "answer":      f"I could not find any relevant documents in '{folder_name}' to answer this question.",
+            "sources":     [],
+            "found":       False,
+            "passthrough": False,
+        }
+
+    # Extract text from each result file concurrently
+    context_blocks: list[str] = []
+    sources: list[dict] = []
+    extract_tasks = []
+    valid_results = []
+    for r in results:
+        file_path = cfg.kb_root_path / r["path"]
+        if not file_path.exists():
+            continue
+        extract_tasks.append(_extract_file(file_path, max_chars=max_chars))
+        valid_results.append(r)
+
+    if not extract_tasks:
+        return {
+            "agent":       agent_name,
+            "answer":      f"Found index entries for '{folder_name}' but source files are missing.",
+            "sources":     [],
+            "found":       False,
+            "passthrough": False,
+        }
+
+    texts = await asyncio.gather(*extract_tasks)
+    for r, text in zip(valid_results, texts):
+        context_blocks.append(
+            f"--- Source: {r['name']} (relevance: {r.get('score', 0):.2f}) ---\n{text}"
+        )
+        sources.append({"name": r["name"], "path": r["path"], "score": r.get("score", 0.0)})
+
+    context = "\n\n".join(context_blocks)
+
+    if await is_passthrough():
+        block = _build_passthrough_block(
+            question=question,
+            context=context,
+            system_prompt=system_prompt,
+            agent_name=agent_name,
+            source_label=", ".join(s["name"] for s in sources[:3]),
+        )
+        return {
+            "agent":             agent_name,
+            "answer":            block,
+            "sources":           sources,
+            "found":             True,
+            "passthrough":       True,
+            "passthrough_block": block,
+        }
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if conversation_history:
+        messages.extend(conversation_history[-_cb_get("history"):])
+    messages.append({
+        "role": "user",
+        "content": (
+            f"Use the following documents to answer the question.\n\n"
+            f"{context}\n\n"
+            f"Question: {question}"
+        ),
+    })
+
+    answer = await call_llm(messages)
+    return {
+        "agent":             agent_name,
+        "answer":            answer,
+        "sources":           sources,
+        "confidence_footer": format_confidence_footer(sources),
+        "found":             True,
+        "passthrough":       False,
+    }
+
+
+# ── Passthrough block builder ──────────────────────────────────────────────────
+
+_PASSTHROUGH_MARKER = "<<<KB_PASSTHROUGH>>>"
+_PASSTHROUGH_END    = "<<<KB_PASSTHROUGH_END>>>"
+
+
+def _build_passthrough_block(
+    question: str,
+    context: str,
+    system_prompt: str,
+    agent_name: str,
+    source_label: str,
+) -> str:
+    return (
+        f"\n{_PASSTHROUGH_MARKER}\n"
+        f"AGENT: {agent_name}\n"
+        f"QUESTION: {question}\n"
+        f"SOURCE: {source_label}\n"
+        f"SYSTEM_PROMPT:\n{system_prompt}\n"
+        f"---CONTEXT---\n{context}\n"
+        f"{_PASSTHROUGH_END}\n"
+    )
