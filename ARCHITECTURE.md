@@ -24,7 +24,11 @@ kb_agent_mcp/
     ├── setup.py         Interactive setup wizard (kb-agent-setup)
     ├── generate.py      Index builder + domain YAML generator (kb-agent-generate)
     ├── watch.py         Filesystem watcher (kb-agent-watch)
-    └── doctor.py        Health checklist (kb-agent-doctor)
+    ├── doctor.py        Health checklist with auto-fix (kb-agent-doctor)
+    └── status.py        Per-domain status table (kb-agent-status)
+
+scripts/
+└── setup.py             Compatibility shim → delegates to kb_agent_mcp.cli.setup
 ```
 
 ---
@@ -125,10 +129,17 @@ Search uses sklearn `cosine_similarity` over all stored embeddings (not
 ChromaDB's built-in ANN) for consistent results across mixed embedding
 dimensions. Falls back to keyword matching if embeddings are missing.
 
-`set_domain_metadata()` / `get_domain_metadata()` store domain config and the
-`indexed_at` timestamp as ChromaDB collection metadata (flat key-value, JSON-
-serialised for lists/dicts). The server's stale-index TTL cache compares file
-`mtime` values against this timestamp.
+`set_domain_metadata()` / `get_domain_metadata()` store domain config and two
+timestamps as ChromaDB collection metadata (flat key-value, JSON-serialised for
+lists/dicts):
+
+- `indexed_at` — Unix float; used by the server's stale-index TTL cache to
+  compare against file `mtime` values.
+- `indexed_at_iso` — ISO 8601 string (timezone-aware); used by `kb-agent-status`
+  and `kb-agent-doctor` for human-readable age display.
+
+Both keys are written together by `build_collection()`. Old indexes that predate
+this change only have `indexed_at`; the CLI tools fall back to converting it.
 
 ### `embeddings.py`
 Embedding backend with a three-tier fallback chain:
@@ -194,32 +205,106 @@ Central registry of all character budgets (read from `cfg`). Provides:
 
 ---
 
+## Module responsibilities (CLI)
+
+### `cli/setup.py`
+The canonical interactive setup wizard (`kb-agent-setup`). Guides a new user through:
+Python check → build-tools pre-flight → venv recommendation → KB_ROOT selection →
+LLM configuration (two-question design: Q&A mode + optional API key for generate) →
+`.env` write → `kb-agent-generate` invocation → interactive keyword editor for domains
+that received minimal YAML (no LLM available during generate).
+
+`scripts/setup.py` at the repo root is a **thin shim** (~12 lines) that delegates
+entirely to this module via `python -m kb_agent_mcp.cli.setup`. It exists only for
+backward compatibility with cloned-repo users and the `knowledgebase-install` skill.
+
+### `cli/generate.py`
+Index builder and domain YAML generator (`kb-agent-generate`). Discovers top-level
+knowledge folders, upserts changed files into ChromaDB (hash-delta incremental), calls
+the configured LLM to generate `domain_config.yaml`, validates the output, and installs
+the Bob skill. Flags: `--force`, `--no-llm`, `--domain <name>`, `--yes`.
+
+### `cli/watch.py`
+Filesystem watcher (`kb-agent-watch`). Backed by `watchdog`, debounced at 5 s. Handles:
+file add/modify/delete → upsert/delete from ChromaDB; new top-level folder → trigger
+generate flow; folder deleted → purge collection. `--no-prompt` auto-accepts new domains
+for CI/headless use.
+
+### `cli/doctor.py`
+Health checklist (`kb-agent-doctor`). Runs 9 checks and prints a `✓`/`✗`/`⚠` report.
+Exit code 0 = healthy, 1 = failures remain.
+
+Each check returns a `CheckResult(label, passed, fix_fn)` NamedTuple. When `--fix` is
+passed, the doctor calls `fix_fn()` for every failing check that has one, then re-runs
+all checks to show the final state. Auto-fixable failures:
+
+| Failure | Auto-fix |
+|---|---|
+| KB_ROOT directory missing | `mkdir -p` the path |
+| `domain_config.yaml` missing | `kb-agent-generate --domain <name> --no-llm --yes` |
+| ChromaDB index empty | `kb-agent-generate --domain <name> --no-llm --yes` |
+| ChromaDB version mismatch | prompt → `rm -rf .kb_index/chroma/` + full generate |
+| Embedding model not cached | `_ensure_embedding_model()` (downloads ~80 MB) |
+| Bob skill not installed | `kb-agent-generate --no-llm --yes` |
+
+Non-auto-fixable (printed with manual hint): unset `KB_ROOT` env var, LLM server
+unreachable, `kb-agent-serve` not on PATH.
+
+### `cli/status.py`
+Read-only status dashboard (`kb-agent-status`). Collects per-domain data from
+ChromaDB and the filesystem and renders a Rich table. Zero side effects — safe to run
+at any time.
+
+| Column | Source |
+|---|---|
+| Domain | `kb_root.iterdir()` filtered by `cfg.is_ignored()` |
+| Files | `rglob` count of indexable extensions |
+| Indexed | `indexed_at_iso` from ChromaDB metadata (falls back to `indexed_at` float for old indexes) |
+| Docs | `col.count()` — ChromaDB document count |
+| YAML | presence of `domain_config.yaml` |
+| Status | fresh / stale (>7 d) / empty index / DB mismatch |
+
+Footer shows: LLM provider, embedding model (cached/not), absolute `kb-agent-serve`
+path, Bob skill presence.
+
+Flags:
+- `--json` — machine-readable JSON (scriptable)
+- `--plain` — no ANSI colours (CI/log capture)
+- `--tui` — live-refresh with `rich.live.Live` (Ctrl+C to quit)
+- `--interval N` — refresh interval in seconds for `--tui` (default: 5)
+
+---
+
 ## Setup pipeline (`kb-agent-setup` / `kb-agent-generate`)
 
 ```
-kb-agent-setup
+kb-agent-setup  (or: python3 scripts/setup.py — shim)
 │
 ├── check_python()              Python ≥ 3.10
-├── check_build_tools()         xcode-select / gcc present
-├── check_venv()                warns if system Python
+├── check_build_tools()         xcode-select / gcc present (soft-block with fix hint)
+├── check_venv()                warns if system Python, shows venv commands
 ├── choose_kb_root()            CWD / existing path / new path
-├── choose_llm()                passthrough / Ollama / OpenAI / Anthropic / custom
+├── choose_llm()                two questions:
+│   ├── Q1: Q&A mode            passthrough / Ollama / OpenAI / Anthropic / custom
+│   ├── Q2: API key available?  (passthrough path only — for generate + fallback)
 │   └── _test_api_key()         live HTTP verification (optional)
 ├── write_env()                 writes KB_ROOT + LLM vars to .env
-└── run_generate()
-    └── kb-agent-generate
-        │
-        ├── _ensure_embedding_model()   downloads all-MiniLM-L6-v2 if not cached
-        ├── _get_client()               probes ChromaDB; offers auto-rebuild on mismatch
-        ├── _discover_folders()         top-level folders under KB_ROOT (ignores built-ins)
-        ├── for each folder:
-        │   ├── build_collection()      upsert changed files into ChromaDB (hash-delta)
-        │   │   └── _upsert_file_sync() snippet() → embed() → col.upsert()
-        │   ├── _generate_yaml_for_folder()   LLM → domain_config.yaml  (or _minimal_yaml())
-        │   ├── _validate_yaml()        required-key check; falls back to minimal on failure
-        │   └── write domain_config.yaml
-        └── _install_bob_skill()        writes ~/.bob/skills/knowledgebase-agent/SKILL.md
-```
+├── run_generate()
+│   └── kb-agent-generate
+│       │
+│       ├── _ensure_embedding_model()   downloads all-MiniLM-L6-v2 if not cached
+│       ├── _get_client()               probes ChromaDB; offers auto-rebuild on mismatch
+│       ├── _discover_folders()         top-level folders under KB_ROOT (ignores built-ins)
+│       ├── for each folder:
+│       │   ├── build_collection()      upsert changed files into ChromaDB (hash-delta)
+│       │   │   └── _upsert_file_sync() snippet() → embed() → col.upsert()
+│       │   ├── _generate_yaml_for_folder()   LLM → domain_config.yaml  (or _minimal_yaml())
+│       │   ├── _validate_yaml()        required-key check; falls back to minimal on failure
+│       │   └── write domain_config.yaml
+│       └── _install_bob_skill()        writes ~/.bob/skills/knowledgebase-agent/SKILL.md
+└── interactive_keyword_editor()
+        offered when domains received minimal YAML (no LLM during generate);
+        edits only the `keywords:` section of domain_config.yaml
 
 ---
 

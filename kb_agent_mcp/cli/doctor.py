@@ -15,14 +15,21 @@ Checks:
   9. Bob skill installed
 
 Exit code 0 when all checks pass, 1 when any check fails.
+
+With --fix: attempts to auto-repair fixable failures, then re-runs all checks.
 """
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
+from typing import Callable, NamedTuple
 
 from kb_agent_mcp.config import Config  # imported at module level so tests can patch it
+
+# Stale-index threshold in days — shared with status.py
+STALE_DAYS = 7
 
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────
@@ -45,40 +52,70 @@ def _warn(label: str, hint: str = "") -> None:
 def _hdr(label: str) -> None:
     print(_c("1", f"\n{label}"))
 
+def _fixing(label: str) -> None:
+    print(_c("36", f"  → fixing: {label}"))
+
+def _fixed(label: str) -> None:
+    print(_c("32", f"  ✓ fixed: {label}"))
+
+def _unfixable(label: str, manual: str = "") -> None:
+    suffix = f"\n      {_c('33', '→ Manual: ' + manual)}" if manual else ""
+    print(_c("33", f"  ⚠ cannot auto-fix: {label}") + suffix)
+
+
+# ── Fix result type ────────────────────────────────────────────────────────────
+
+class CheckResult(NamedTuple):
+    label:   str
+    passed:  bool
+    fix_fn:  Callable[[], bool] | None  # None = no auto-fix available
+
 
 # ── Individual checks ──────────────────────────────────────────────────────────
 
-def _check_python() -> bool:
+def _check_python() -> CheckResult:
     v = sys.version_info
     if v >= (3, 10):
         _pass(f"Python {v.major}.{v.minor}.{v.micro}")
-        return True
+        return CheckResult("python", True, None)
     _fail(
         f"Python {v.major}.{v.minor}.{v.micro}",
         "Python 3.10+ required. Download from https://python.org/downloads",
     )
-    return False
+    return CheckResult("python", False, None)
 
 
-def _check_kb_root(cfg) -> tuple[bool, Path | None]:
+def _check_kb_root(cfg) -> tuple[CheckResult, Path | None]:
     root = cfg.kb_root_path
     if not cfg.kb_root_is_explicit:
         _fail(
             f"KB_ROOT not set (defaulting to {root})",
             'Add KB_ROOT to your MCP host config env block: "env": {"KB_ROOT": "/path/to/KB"}',
         )
-        return False, None
+        return CheckResult("KB_ROOT", False, None), None
+
     if not root.exists():
+        def _fix_kb_root() -> bool:
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                _fixed(f"created directory {root}")
+                return True
+            except Exception as exc:
+                print(_c("31", f"  ✗ could not create {root}: {exc}"))
+                return False
+
         _fail(f"KB_ROOT does not exist: {root}", "Create the directory or update KB_ROOT.")
-        return False, None
+        return CheckResult("KB_ROOT", False, _fix_kb_root), None
+
     if not root.is_dir():
         _fail(f"KB_ROOT is not a directory: {root}", "KB_ROOT must point to a folder.")
-        return False, None
+        return CheckResult("KB_ROOT", False, None), None
+
     _pass(f"KB_ROOT: {root}")
-    return True, root
+    return CheckResult("KB_ROOT", True, None), root
 
 
-def _check_domain_folders(root: Path, cfg) -> list[str]:
+def _check_domain_folders(root: Path, cfg) -> tuple[CheckResult, list[str]]:
     try:
         entries = [
             e.name for e in sorted(root.iterdir())
@@ -86,78 +123,133 @@ def _check_domain_folders(root: Path, cfg) -> list[str]:
         ]
     except Exception as exc:
         _fail(f"Cannot list KB_ROOT: {exc}")
-        return []
+        return CheckResult("domain folders", False, None), []
 
     if not entries:
         _fail(
             "No domain folders found under KB_ROOT",
             "Create at least one subfolder with documents and run kb-agent-generate.",
         )
-        return []
+        return CheckResult("domain folders", False, None), []
 
     _pass(f"{len(entries)} domain folder(s): {', '.join(entries[:5])}"
           + (" …" if len(entries) > 5 else ""))
-    return entries
+    return CheckResult("domain folders", True, None), entries
 
 
-def _check_domain_configs(root: Path, domains: list[str]) -> None:
+def _check_domain_configs(root: Path, domains: list[str]) -> list[CheckResult]:
+    results = []
     for name in domains:
         yaml_path = root / name / "domain_config.yaml"
         if yaml_path.exists():
             _pass(f"domain_config.yaml: {name}/")
+            results.append(CheckResult(f"domain_config:{name}", True, None))
         else:
+            def _fix_yaml(n: str = name) -> bool:
+                _fixing(f"running kb-agent-generate --domain {n}")
+                rc = subprocess.run(
+                    [sys.executable, "-m", "kb_agent_mcp.cli.generate",
+                     "--domain", n, "--no-llm", "--yes"],
+                ).returncode
+                if rc == 0:
+                    _fixed(f"domain_config.yaml generated for {n}/")
+                    return True
+                print(_c("31", f"  ✗ kb-agent-generate --domain {n} failed"))
+                return False
+
             _warn(
                 f"domain_config.yaml missing: {name}/",
                 "Run kb-agent-generate to create it.",
             )
+            results.append(CheckResult(f"domain_config:{name}", False, _fix_yaml))
+    return results
 
 
-def _check_chroma_collections(domains: list[str]) -> None:
-    """Check ChromaDB collection health for each domain.
-
-    Also detects potential version-mismatch errors (Risk 12): if ChromaDB
-    raises a RuntimeError while opening the client, it likely means the DB
-    was created by an older version and needs to be rebuilt.
-    """
+def _check_chroma_collections(domains: list[str]) -> list[CheckResult]:
+    """Check ChromaDB collection health for each domain."""
     try:
         from kb_agent_mcp.vector_store import get_or_create_collection, _get_client
     except ImportError:
         _warn("ChromaDB not importable", "pip install kb-agent-mcp")
-        return
+        return [CheckResult("chromadb_import", False, None)]
 
-    # Risk 12 — probe the client first; a RuntimeError almost always means
-    # version mismatch (e.g. chromadb upgraded while index was built on older).
+    # Probe client first — RuntimeError means version mismatch
     try:
         _get_client()
     except RuntimeError as exc:
+        from kb_agent_mcp.config import cfg as _cfg
+        index_path = _cfg.kb_index_path / "chroma"
+
+        def _fix_chroma_mismatch() -> bool:
+            _fixing(f"deleting incompatible ChromaDB index at {index_path}")
+            try:
+                ans = input(
+                    f"  About to delete {index_path} — continue? [Y/n]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                ans = "n"
+            if ans not in ("", "y", "yes"):
+                print(_c("33", "  ⚠ skipped — delete manually and re-run kb-agent-generate"))
+                return False
+            import shutil as _shutil
+            try:
+                _shutil.rmtree(str(index_path))
+                _fixed("deleted incompatible ChromaDB index")
+            except Exception as del_exc:
+                print(_c("31", f"  ✗ could not delete {index_path}: {del_exc}"))
+                return False
+            # Rebuild
+            _fixing("running kb-agent-generate to rebuild indexes")
+            rc = subprocess.run(
+                [sys.executable, "-m", "kb_agent_mcp.cli.generate", "--no-llm", "--yes"],
+            ).returncode
+            if rc == 0:
+                _fixed("indexes rebuilt successfully")
+                return True
+            print(_c("31", "  ✗ kb-agent-generate failed — run manually to diagnose"))
+            return False
+
         _fail(
             f"ChromaDB client error: {exc}",
-            "Version mismatch detected. Delete the .kb_index/ folder and run "
-            "kb-agent-generate to rebuild the index from scratch.",
+            "Version mismatch detected. Use --fix to auto-rebuild, or delete "
+            f".kb_index/chroma/ and run kb-agent-generate.",
         )
-        return
+        return [CheckResult("chromadb_mismatch", False, _fix_chroma_mismatch)]
+
     except Exception:
         pass  # non-RuntimeError errors handled per-collection below
 
+    results = []
     for name in domains:
         try:
             col = get_or_create_collection(name)
             count = col.count()
 
-            # Risk 11 — stale-index check: read indexed_at metadata if stored
+            # Stale-index check
             try:
+                import datetime
                 meta = col.get(limit=1, include=["metadatas"])
                 metas = meta.get("metadatas") or []
                 indexed_at_str = None
                 for m in metas:
-                    if m and "indexed_at" in m:
-                        indexed_at_str = m["indexed_at"]
-                        break
+                    if m:
+                        # prefer indexed_at_iso; fall back to float→ISO for old indexes
+                        if "indexed_at_iso" in m:
+                            indexed_at_str = m["indexed_at_iso"]
+                            break
+                        elif "indexed_at" in m:
+                            try:
+                                indexed_at_str = datetime.datetime.fromtimestamp(
+                                    float(m["indexed_at"]), tz=datetime.timezone.utc
+                                ).isoformat()
+                            except (TypeError, ValueError):
+                                indexed_at_str = str(m["indexed_at"])
+                            break
                 if indexed_at_str:
-                    import datetime
                     indexed_dt = datetime.datetime.fromisoformat(indexed_at_str)
                     age_days = (datetime.datetime.now(datetime.timezone.utc) - indexed_dt).days
-                    if age_days > 7:
+                    if age_days > STALE_DAYS:
                         _warn(
                             f"ChromaDB index: {name}/  ({count} docs, indexed {age_days}d ago)",
                             "Index is older than 7 days. Run kb-agent-generate to refresh.",
@@ -167,44 +259,73 @@ def _check_chroma_collections(domains: list[str]) -> None:
                 elif count > 0:
                     _pass(f"ChromaDB index: {name}/  ({count} documents)")
                 else:
+                    def _fix_empty(n: str = name) -> bool:
+                        _fixing(f"running kb-agent-generate --domain {n}")
+                        rc = subprocess.run(
+                            [sys.executable, "-m", "kb_agent_mcp.cli.generate",
+                             "--domain", n, "--no-llm", "--yes"],
+                        ).returncode
+                        if rc == 0:
+                            _fixed(f"index built for {n}/")
+                            return True
+                        print(_c("31", f"  ✗ kb-agent-generate --domain {n} failed"))
+                        return False
+
                     _warn(
                         f"ChromaDB index empty: {name}/",
                         "Run kb-agent-generate to build the index.",
                     )
+                    results.append(CheckResult(f"chroma_empty:{name}", False, _fix_empty))
+                    continue
             except Exception:
-                # Metadata not available — fall back to count check
                 if count > 0:
                     _pass(f"ChromaDB index: {name}/  ({count} documents)")
                 else:
-                    _warn(
-                        f"ChromaDB index empty: {name}/",
-                        "Run kb-agent-generate to build the index.",
-                    )
+                    _warn(f"ChromaDB index empty: {name}/", "Run kb-agent-generate.")
+                    results.append(CheckResult(f"chroma_empty:{name}", False, None))
+                    continue
+
+            results.append(CheckResult(f"chroma:{name}", True, None))
         except Exception as exc:
             _fail(f"ChromaDB error for {name}/: {exc}")
+            results.append(CheckResult(f"chroma:{name}", False, None))
+
+    return results
 
 
-def _check_embedding_model() -> bool:
+def _check_embedding_model() -> CheckResult:
     try:
         from kb_agent_mcp.embeddings import _st_model_is_cached, _ST_MODEL_NAME
         if _st_model_is_cached():
             _pass(f"Embedding model cached: {_ST_MODEL_NAME}")
-            return True
+            return CheckResult("embedding_model", True, None)
+
+        def _fix_embed() -> bool:
+            _fixing("downloading embedding model (one-time, ~80 MB)")
+            try:
+                from kb_agent_mcp.embeddings import _ensure_embedding_model
+                _ensure_embedding_model()
+                _fixed("embedding model downloaded and cached")
+                return True
+            except Exception as exc:
+                print(_c("31", f"  ✗ download failed: {exc}"))
+                return False
+
         _warn(
             f"Embedding model not cached: {_ST_MODEL_NAME}",
             "Run kb-agent-generate to download it (~80 MB, one-time).",
         )
-        return True  # not a hard failure — will auto-download on first use
+        return CheckResult("embedding_model", False, _fix_embed)
     except Exception as exc:
         _warn(f"Embedding model check failed: {exc}")
-        return True
+        return CheckResult("embedding_model", True, None)  # not a hard failure
 
 
-def _check_llm(cfg) -> bool:
+def _check_llm(cfg) -> CheckResult:
     provider = cfg.KB_LLM_PROVIDER.lower()
     if provider == "passthrough":
         _pass("LLM: passthrough mode (no local LLM required)")
-        return True
+        return CheckResult("llm", True, None)
 
     try:
         import httpx
@@ -214,37 +335,31 @@ def _check_llm(cfg) -> bool:
             r = httpx.get(cfg.KB_LLM_BASE_URL.rstrip("/"), timeout=5.0)
         if r.status_code < 500:
             _pass(f"LLM reachable: {provider} ({cfg.KB_LLM_BASE_URL})")
-            return True
+            return CheckResult("llm", True, None)
         _fail(
             f"LLM returned HTTP {r.status_code}: {cfg.KB_LLM_BASE_URL}",
             "Check that your LLM server is running.",
         )
-        return False
     except Exception as exc:
         _fail(
             f"LLM unreachable ({provider}): {exc}",
             "Start Ollama with `ollama serve` or check your API key / base URL.",
         )
-        return False
+    return CheckResult("llm", False, None)  # cannot auto-fix a missing server
 
 
 def _in_venv() -> bool:
-    """Return True when running inside a virtual environment."""
     return sys.prefix != sys.base_prefix
 
 
 def _serve_absolute_path() -> str | None:
-    """Return the absolute path to kb-agent-serve, preferring the active venv."""
-    # Check active venv bin first (most reliable)
     venv_bin = Path(sys.prefix) / "bin" / "kb-agent-serve"
     if venv_bin.exists():
         return str(venv_bin)
-    # Fall back to PATH lookup
-    found = shutil.which("kb-agent-serve")
-    return found
+    return shutil.which("kb-agent-serve")
 
 
-def _check_serve_path() -> bool:
+def _check_serve_path() -> CheckResult:
     in_venv  = _in_venv()
     abs_path = _serve_absolute_path()
 
@@ -256,84 +371,161 @@ def _check_serve_path() -> bool:
                 "Using a venv avoids dependency conflicts.  "
                 "Create one: python3 -m venv .venv && source .venv/bin/activate && pip install kb-agent-mcp",
             )
-        return True
+        return CheckResult("serve_path", True, None)
 
     _fail(
         "kb-agent-serve not found",
         "Install with: pip install kb-agent-mcp  (preferably inside a venv)",
     )
-    return False
+    return CheckResult("serve_path", False, None)  # cannot auto-fix a missing package
 
 
-def _check_bob_skill() -> bool:
+def _check_bob_skill() -> CheckResult:
     skill = Path.home() / ".bob" / "skills" / "knowledgebase-agent" / "SKILL.md"
     if skill.exists():
         _pass(f"Bob skill installed: {skill}")
-        return True
+        return CheckResult("bob_skill", True, None)
+
+    def _fix_bob_skill() -> bool:
+        _fixing("running kb-agent-generate to install Bob skill")
+        rc = subprocess.run(
+            [sys.executable, "-m", "kb_agent_mcp.cli.generate", "--no-llm", "--yes"],
+        ).returncode
+        if rc == 0:
+            _fixed("Bob skill installed")
+            return True
+        print(_c("31", "  ✗ kb-agent-generate failed"))
+        return False
+
     _warn(
         "Bob skill not installed",
-        "Run kb-agent-generate to install it, or copy agents/SKILL.md manually.",
+        "Run kb-agent-generate to install it.",
     )
-    return True  # Bob is optional — not a hard failure
+    return CheckResult("bob_skill", False, _fix_bob_skill)
+
+
+# ── Fix runner ─────────────────────────────────────────────────────────────────
+
+def _run_fixes(failures: list[CheckResult]) -> list[str]:
+    """Attempt auto-fixes for all failed checks that have a fix_fn.
+
+    Returns the list of labels that could not be fixed (either no fix_fn or
+    the fix_fn returned False).
+    """
+    unfixed: list[str] = []
+    for result in failures:
+        if result.fix_fn is None:
+            _unfixable(result.label, "see hint above")
+            unfixed.append(result.label)
+        else:
+            ok = result.fix_fn()
+            if not ok:
+                unfixed.append(result.label)
+    return unfixed
+
+
+# ── Doctor runner ──────────────────────────────────────────────────────────────
+
+def run_doctor(fix: bool = False) -> int:
+    """Run all checks. If fix=True, attempt auto-repairs on failures then re-run.
+
+    Returns exit code: 0 = all pass, 1 = failures remain.
+    """
+    cfg = Config()
+
+    def _collect() -> list[CheckResult]:
+        """Run all checks and collect results."""
+        results: list[CheckResult] = []
+
+        _hdr("① Python")
+        results.append(_check_python())
+
+        _hdr("② KB_ROOT")
+        kb_root_result, root = _check_kb_root(cfg)
+        results.append(kb_root_result)
+
+        domains: list[str] = []
+        if root is not None:
+            _hdr("③ Domain folders")
+            df_result, domains = _check_domain_folders(root, cfg)
+            results.append(df_result)
+
+            if domains:
+                _hdr("④ domain_config.yaml")
+                results.extend(_check_domain_configs(root, domains))
+
+                _hdr("⑤ ChromaDB indexes")
+                results.extend(_check_chroma_collections(domains))
+
+        _hdr("⑥ Embedding model")
+        results.append(_check_embedding_model())
+
+        _hdr("⑦ LLM")
+        results.append(_check_llm(cfg))
+
+        _hdr("⑧ kb-agent-serve")
+        results.append(_check_serve_path())
+
+        _hdr("⑨ Bob skill")
+        results.append(_check_bob_skill())
+
+        return results
+
+    # ── First pass ────────────────────────────────────────────────────────────
+    results = _collect()
+    failures = [r for r in results if not r.passed]
+
+    if not failures:
+        print()
+        print(_c("32;1", "✓ All checks passed — kb-agent-mcp is healthy."))
+        return 0
+
+    print()
+    print(_c("31;1", f"✗ {len(failures)} check(s) failed: {', '.join(r.label for r in failures)}"))
+
+    if not fix:
+        print(_c("33", "  Fix the items marked ✗ above, then re-run kb-agent-doctor."))
+        print(_c("33", "  Tip: kb-agent-doctor --fix  attempts automatic repairs."))
+        return 1
+
+    # ── Fix pass ──────────────────────────────────────────────────────────────
+    print()
+    print(_c("1;36", "── Attempting auto-fixes ────────────────────────────────"))
+    _run_fixes(failures)
+
+    # ── Re-check ──────────────────────────────────────────────────────────────
+    print()
+    print(_c("1;36", "── Re-running checks after fixes ────────────────────────"))
+    results2  = _collect()
+    failures2 = [r for r in results2 if not r.passed]
+
+    print()
+    if not failures2:
+        print(_c("32;1", "✓ All checks now pass — kb-agent-mcp is healthy."))
+        return 0
+
+    print(_c("31;1", f"✗ {len(failures2)} check(s) still failing: "
+             f"{', '.join(r.label for r in failures2)}"))
+    print(_c("33", "  Manual action required for the remaining items."))
+    return 1
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    _hdr("kb-agent-doctor — environment health check")
+    parser = argparse.ArgumentParser(
+        prog="kb-agent-doctor",
+        description="Run a health checklist for kb-agent-mcp.",
+    )
+    parser.add_argument(
+        "--fix", action="store_true",
+        help="Attempt to auto-repair fixable failures, then re-run all checks",
+    )
+    args = parser.parse_args()
+    sys.exit(run_doctor(fix=args.fix))
 
-    cfg = Config()
 
-    failures: list[str] = []
-
-    def _run(label: str, fn) -> None:
-        result = fn()
-        if result is False:
-            failures.append(label)
-
-    _hdr("① Python")
-    _run("python", _check_python)
-
-    _hdr("② KB_ROOT")
-    ok, root = _check_kb_root(cfg)
-    if not ok:
-        failures.append("KB_ROOT")
-        root = None
-
-    domains: list[str] = []
-    if root is not None:
-        _hdr("③ Domain folders")
-        domains = _check_domain_folders(root, cfg)
-        if not domains:
-            failures.append("domain folders")
-
-        _hdr("④ domain_config.yaml")
-        _check_domain_configs(root, domains)
-
-        _hdr("⑤ ChromaDB indexes")
-        _check_chroma_collections(domains)
-
-    _hdr("⑥ Embedding model")
-    _run("embedding model", _check_embedding_model)
-
-    _hdr("⑦ LLM")
-    _run("llm", lambda: _check_llm(cfg))
-
-    _hdr("⑧ kb-agent-serve")
-    _run("serve path", _check_serve_path)
-
-    _hdr("⑨ Bob skill")
-    _run("bob skill", _check_bob_skill)
-
-    print()
-    if failures:
-        print(_c("31;1", f"✗ {len(failures)} check(s) failed: {', '.join(failures)}"))
-        print(_c("33", "  Fix the items marked ✗ above, then re-run kb-agent-doctor."))
-        sys.exit(1)
-    else:
-        print(_c("32;1", "✓ All checks passed — kb-agent-mcp is healthy."))
-        sys.exit(0)
-
+import argparse  # noqa: E402 — imported here to keep it out of module-level scope used in tests
 
 if __name__ == "__main__":
     main()

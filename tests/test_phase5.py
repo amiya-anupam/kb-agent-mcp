@@ -64,7 +64,7 @@ class TestServeAbsolutePath:
 
         from kb_agent_mcp.cli.doctor import _check_serve_path
         result = _check_serve_path()
-        assert result is True
+        assert result.passed is True
         out = capsys.readouterr().out
         assert "kb-agent-serve" in out
         assert "✓" in out
@@ -79,7 +79,7 @@ class TestServeAbsolutePath:
 
         from kb_agent_mcp.cli.doctor import _check_serve_path
         result = _check_serve_path()
-        assert result is True
+        assert result.passed is True
         out = capsys.readouterr().out
         assert "venv" in out.lower()
 
@@ -90,7 +90,7 @@ class TestServeAbsolutePath:
 
         from kb_agent_mcp.cli.doctor import _check_serve_path
         result = _check_serve_path()
-        assert result is False
+        assert result.passed is False
         assert "✗" in capsys.readouterr().out
 
 

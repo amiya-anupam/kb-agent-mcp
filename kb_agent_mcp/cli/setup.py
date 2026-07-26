@@ -438,18 +438,58 @@ def write_env(kb_root: Path, llm: dict[str, str], cwd: Path) -> None:
 
 def _patch_env_key(env_path: Path, key: str, value: str) -> None:
     lines = env_path.read_text(encoding="utf-8").splitlines()
-    found = False
-    new_lines = []
-    for ln in lines:
-        stripped = ln.lstrip("# ")
-        if stripped.startswith(f"{key}=") or ln.startswith(f"{key}="):
-            new_lines.append(f"{key}={value}")
-            found = True
-        else:
-            new_lines.append(ln)
-    if not found:
-        new_lines.append(f"{key}={value}")
+    prefix = f"{key}="
+
+    # Prefer an uncommented live line; fall back to the first commented form.
+    live_idx     = next((i for i, ln in enumerate(lines) if ln.startswith(prefix)), None)
+    comment_idx  = next(
+        (i for i, ln in enumerate(lines) if ln.lstrip("# ").startswith(prefix)), None
+    )
+    replace_idx  = live_idx if live_idx is not None else comment_idx
+
+    if replace_idx is not None:
+        new_lines = [
+            (f"{prefix}{value}" if i == replace_idx else ln)
+            for i, ln in enumerate(lines)
+        ]
+        # Drop all OTHER occurrences of the same key (commented or not)
+        new_lines = [
+            ln for i, ln in enumerate(new_lines)
+            if i == replace_idx
+            or not (ln.startswith(prefix) or ln.lstrip("# ").startswith(prefix))
+        ]
+    else:
+        new_lines = lines + [f"{prefix}{value}"]
+
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+# ── Clipboard helper ──────────────────────────────────────────────────────────
+
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to the system clipboard.
+
+    Tries pbcopy (macOS) → xclip → xsel → clip.exe (Windows) in order.
+    Returns True on success, False when no clipboard command is available.
+    Silent on failure — clipboard is a convenience, not a hard requirement.
+    """
+    import subprocess as _sp
+    candidates = [
+        ["pbcopy"],                       # macOS
+        ["xclip", "-selection", "clipboard"],  # Linux (X11)
+        ["xsel", "--clipboard", "--input"],    # Linux (X11 alt)
+        ["clip"],                         # Windows
+    ]
+    for cmd in candidates:
+        if shutil.which(cmd[0]) is None:
+            continue
+        try:
+            _sp.run(cmd, input=text.encode(), check=True,
+                    stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 # ── Step 5: run kb-agent-generate ─────────────────────────────────────────────
@@ -506,6 +546,74 @@ def run_generate(yes: bool) -> list[str]:
 
 # ── Step 6: Interactive keyword editor (Risk 4) ────────────────────────────────
 
+def _kw_editor_prompt(domain_name: str, current: list[str]) -> list[str] | None:
+    """Rich-based keyword prompt for one domain.
+
+    Displays a formatted header with the current keyword list.
+    Returns a new keyword list, or None if the user skipped.
+
+    Uses Rich if available (it is a hard dependency), falls back to plain
+    input() when stdout is not a tty (CI / --yes mode is already gated upstream).
+    """
+    _DIVIDER = "─" * 54
+
+    # ── Rich path (interactive tty) ──────────────────────────────────────────
+    try:
+        from rich.console import Console as _Console
+        from rich.panel  import Panel   as _Panel
+        from rich.text   import Text    as _Text
+        from rich.prompt import Prompt  as _Prompt
+
+        console = _Console(highlight=False)
+        console.print()
+        console.print(_DIVIDER)
+
+        # Build a styled header: folder name + current keywords as a tag list
+        header = _Text()
+        header.append(f"  📁 {domain_name}/", style="bold cyan")
+        if current:
+            header.append("  current keywords: ", style="dim")
+            for i, kw in enumerate(current):
+                header.append(kw, style="yellow")
+                if i < len(current) - 1:
+                    header.append(", ", style="dim")
+        else:
+            header.append("  no keywords yet", style="dim")
+        console.print(header)
+        console.print()
+        console.print(
+            "  [dim]Enter comma-separated keywords, or press Enter to skip.[/dim]"
+        )
+        console.print(
+            "  [dim]Example: revenue, quota, deals, pipeline, forecast[/dim]"
+        )
+        console.print()
+
+        try:
+            raw = _Prompt.ask("  Keywords", default="", console=console)
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return None
+
+        if not raw.strip():
+            return None
+        return [k.strip() for k in raw.split(",") if k.strip()]
+
+    except Exception:
+        # Plain fallback (Rich unavailable or tty issue)
+        print(f"\n{_DIVIDER}")
+        print(f"  📁 {domain_name}/  (current: {', '.join(current) or '(none)'})")
+        print()
+        try:
+            raw = input("  Keywords (comma-separated, Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not raw:
+            return None
+        return [k.strip() for k in raw.split(",") if k.strip()]
+
+
 def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: bool) -> None:
     """For domains with minimal YAML, offer to add keywords interactively.
 
@@ -531,8 +639,6 @@ def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: b
         print(f"    • {d}/")
     print()
     print("  Good keywords help the agent route questions to the right domain.")
-    print("  Example: for a 'Sales Revenue' folder, good keywords might be:")
-    print("    revenue, quota, attainment, deals, pipeline, forecast")
     print()
 
     if not _confirm("Edit keywords now?", default=True):
@@ -552,29 +658,27 @@ def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: b
             continue
 
         try:
-            content  = yaml_path.read_text(encoding="utf-8")
-            data     = _yaml.safe_load(content) or {}
-            current  = data.get("keywords", [])
+            content = yaml_path.read_text(encoding="utf-8")
+            data    = _yaml.safe_load(content) or {}
+            current = data.get("keywords", [])
         except Exception as exc:
             warn(f"Could not read {yaml_path}: {exc} — skipping")
             continue
 
-        print(f"\n{'─' * 54}")
-        print(f"  📁 {domain_name}/  (current keywords: {', '.join(current) or '(none)'})")
-        print()
-        raw = _prompt("  Enter keywords separated by commas", "")
-        if not raw.strip():
+        new_kws = _kw_editor_prompt(domain_name, current)
+
+        if new_kws is None:
             info(f"Skipped {domain_name} — no changes made")
             continue
 
-        new_kws = [k.strip() for k in raw.split(",") if k.strip()]
-
-        # Patch only the keywords line — rewrite the YAML preserving all other fields
+        # Patch only the keywords field — preserve all other YAML fields
         try:
             data["keywords"] = new_kws
             updated = _yaml.dump(data, default_flow_style=False, allow_unicode=True)
             yaml_path.write_text(updated, encoding="utf-8")
-            ok(f"{domain_name} keywords updated ({len(new_kws)} keywords)")
+            ok(f"{domain_name}: {len(new_kws)} keyword(s) saved  "
+               f"({', '.join(new_kws[:5])}"
+               + (" …" if len(new_kws) > 5 else "") + ")")
         except Exception as exc:
             warn(f"Could not write {yaml_path}: {exc}")
 
@@ -627,13 +731,33 @@ def main() -> None:
 
     hdr("✅  Setup complete!")
     print()
+
+    mcp_config_block = (
+        '"kb-agent-mcp": {\n'
+        f'  "command": "{serve_cmd}",\n'
+        f'  "env": {{ "KB_ROOT": "{kb_root}" }}\n'
+        '}'
+    )
+
     print(_c("1", "  MCP host config — paste this exactly:"))
     print(_c("36", "  " + "─" * 52))
-    print('  "kb-agent-mcp": {')
-    print(f'    "command": "{serve_cmd}",')
-    print(f'    "env": {{ "KB_ROOT": "{kb_root}" }}')
-    print('  }')
+    for line in mcp_config_block.splitlines():
+        print(f"  {line}")
     print(_c("36", "  " + "─" * 52))
+    print()
+
+    if not args.yes and sys.stdout.isatty():
+        try:
+            ans = input("  Copy config to clipboard? [Y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+            print()
+        if ans in ("", "y", "yes"):
+            if _copy_to_clipboard(mcp_config_block):
+                ok("Copied to clipboard.")
+            else:
+                warn("Clipboard not available — copy the block above manually.")
+
     print()
     if not _in_venv():
         warn(

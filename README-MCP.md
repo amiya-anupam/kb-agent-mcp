@@ -222,6 +222,7 @@ retrieval_rules:
 | `kb-agent-serve` | Start the MCP server |
 | `kb-agent-watch` | Watch for file changes and auto-update indexes |
 | `kb-agent-doctor` | Run a health checklist to diagnose problems |
+| `kb-agent-status` | Show a live system-health dashboard (indexes, LLM, memory) |
 
 ### kb-agent-generate flags
 
@@ -345,6 +346,12 @@ This command checks everything and prints a `✓` / `✗` report:
 | Bob skill installed | `~/.bob/skills/knowledgebase-agent/SKILL.md` |
 
 Each failing item shows a one-line fix hint. Exit code 0 = healthy, 1 = fix needed.
+
+Pass `--fix` to automatically apply safe repairs (creates missing `domain_config.yaml` files, regenerates the Bob skill, re-downloads the embedding model if absent):
+
+```bash
+kb-agent-doctor --fix
+```
 
 ### Common issues
 

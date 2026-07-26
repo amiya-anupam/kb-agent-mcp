@@ -87,26 +87,28 @@ cp /path/to/your/docs/*.pdf "My Project/"
 ### Step 3 — Run the installer
 
 ```bash
-python3 scripts/setup.py
+kb-agent-setup
 ```
 
-`scripts/setup.py` handles everything in order:
+`kb-agent-setup` (the canonical entry point after `pip install kb-agent-mcp`) handles everything in order:
 
 1. Checks Python version (3.10+ required)
-2. Runs `pip install -r requirements.txt`
+2. Checks for native build tools (prints the exact fix command if missing)
 3. Creates `.env` with `KB_ROOT` pre-filled to the current directory
 4. Asks which LLM provider to use (Ollama / OpenAI / Anthropic / passthrough)
-5. Runs `scripts/generate.py` — discovers folders, builds vector indexes, writes the agent skill
+5. Runs `kb-agent-generate` — discovers folders, builds ChromaDB indexes, writes the agent skill
 
 **Non-interactive mode** (no prompts, uses passthrough by default):
 ```bash
-python3 scripts/setup.py --yes
+kb-agent-setup --yes
 ```
 
 **Custom install location:**
 ```bash
-python3 scripts/setup.py --kb-root /absolute/path/to/folder
+kb-agent-setup --kb-root /absolute/path/to/folder
 ```
+
+> **Legacy path (repo clone, no pip install):** `python3 scripts/setup.py` is a thin shim that delegates to `kb-agent-setup`. Both accept the same flags.
 
 ---
 
@@ -397,14 +399,16 @@ The watcher automatically checks all indexed files against a configurable age th
 
 ---
 
-## How `scripts/generate.py` is triggered
+## How `kb-agent-generate` is triggered
 
 | Trigger | When |
 |---|---|
-| `python3 scripts/generate.py` | Manually — run after first clone, or to force rebuild |
-| `python3 scripts/generate.py --force` | Force regenerate everything from scratch |
-| `python3 scripts/generate.py --no-llm` | Skip LLM steps (index + skill file only) |
-| `scripts/watch_kb.py` (automatic) | Only when a **new top-level folder** is created |
+| `kb-agent-generate` | Manually — run after first setup, or to pick up new documents |
+| `kb-agent-generate --force` | Force regenerate all `domain_config.yaml` files from scratch |
+| `kb-agent-generate --no-llm` | Skip LLM steps (index only, use minimal YAML defaults) |
+| `kb-agent-generate --domain Foo` | Only process the "Foo" folder |
+| `kb-agent-watch` (automatic) | Triggers incrementally on every file change |
+| `python3 scripts/generate.py` | Legacy alias — delegates to `kb-agent-generate` |
 
 ---
 
@@ -479,40 +483,47 @@ The watcher automatically checks all indexed files against a configurable age th
 ### Setup flow — run once
 
 ```
-python3 scripts/setup.py
+kb-agent-setup   (or: python3 scripts/setup.py  ← shim, same flags)
   │
-  ├─ 1-6.  check Python, pip install, choose KB_ROOT + LLM, write .env, verify folders
+  ├─ 1.  check Python version (3.10+)
+  ├─ 2.  check native build tools; print fix command if missing
+  ├─ 3.  create/update .env  (KB_ROOT + LLM provider)
+  ├─ 4.  ask LLM provider  (Ollama / OpenAI / Anthropic / passthrough)
+  │        └─ for Ollama: also ask which model to pull
   │
-  ├─ 7.  run scripts/generate.py
+  ├─ 5.  run kb-agent-generate
   │         │
   │         │  Your document folders
   │         │    "My Domain"/       ──►  1. discover folders with indexable files
-  │         │    "Other Domain"/         2. build *_index.json  (embed every file)
+  │         │    "Other Domain"/         2. build ChromaDB collection (embed every file)
   │         │    <any folder>/           3. call LLM → description + keywords
-  │         │                            4. write domain_meta.json
-  │         │                            5. write agents/SKILL.md
+  │         │                               interactive_keyword_editor() — review + edit
+  │         │                            4. write domain_config.yaml  (per domain)
+  │         │                            5. write ~/.bob/skills/knowledgebase-agent/SKILL.md
   │         │                            v
-  │         │                      agents/
-  │         │                        agent_base.py          core RAG pipeline
-  │         │                        embeddings.py          vector index
+  │         │                      kb_agent_mcp/
+  │         │                        server.py              MCP server
+  │         │                        retrieval.py           RAG pipeline
+  │         │                        embeddings.py          ChromaDB wrapper
   │         │                        memory.py              session memory
-  │         │                        agent_knowledgebase.py data-driven orchestrator
-  │         │                        context_budget.py      token budget engine
-  │         │                        SKILL.md               AI skill definition
-  │         │                        vector_store/
-  │         │                          <folder>_index.json
-  │         │                          domain_meta.json
-  │         │                          session_memory.json
+  │         │                        cli/
+  │         │                          setup.py             wizard
+  │         │                          generate.py          index builder
+  │         │                          watch.py             file watcher
+  │         │                          doctor.py            health checker (--fix)
+  │         │                          status.py            live dashboard
+  │         │                        .kb_index/
+  │         │                          chroma/              ChromaDB collections
+  │         │                          session_memory/
   │         │                            │
   │         │                            v
   │         │               ~/.bob/skills/knowledgebase-agent/SKILL.md
-  │         │               (auto-copied so Bob knows the CLI command to run)
+  │         │               (auto-installed so Bob loads the skill on next start)
   │
-  └─ 8.  install_install_skill()
+  └─ 6.  install_skill()
             copies skills/knowledgebase-install/ → ~/.bob/
 
-watch_kb.py then generates the AUTO-INDEX block in each folder README
-(one-sentence LLM summary per file -- this is the primary retrieval context)
+kb-agent-watch then keeps ChromaDB + domain_config.yaml current as files change
 ```
 
 ### Query flow — every question

@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 import time
 import logging
@@ -281,17 +282,9 @@ class _KBWatcher:
     async def _purge_domain(self, folder_name: str) -> None:
         """Delete the ChromaDB collection for a removed domain."""
         try:
-            import chromadb
-            from kb_agent_mcp.config import cfg
-            client = chromadb.PersistentClient(
-                path=str(cfg.kb_index_path / "chroma")
-            )
-            safe = re.sub(r"[^a-z0-9_]", "_", folder_name.lower())
-            try:
-                client.delete_collection(safe)
-                logger.info("  ✓ ChromaDB collection deleted: %s", safe)
-            except Exception:
-                pass
+            from kb_agent_mcp.vector_store import delete_collection
+            await asyncio.to_thread(delete_collection, folder_name)
+            logger.info("  ✓ ChromaDB collection deleted for: %s", folder_name)
         except Exception as e:
             logger.warning("  ✗ Could not purge collection for %s: %s", folder_name, e)
 
@@ -300,8 +293,6 @@ class _KBWatcher:
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
-
-import re  # imported here so _purge_domain can use it without a top-level import conflict
 
 
 def main() -> None:

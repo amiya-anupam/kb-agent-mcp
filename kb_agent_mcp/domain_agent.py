@@ -152,7 +152,7 @@ class DomainAgent:
         from kb_agent_mcp.vector_store import search as _vs_search
 
         effective_top_n = top_n if top_n is not None else self.config.top_n
-        results = await _vs_search(question, self.folder_name, top_n=effective_top_n)
+        results = await _vs_search(self.folder_name, question, top_n=effective_top_n)
         if self.config.pin_files or self.config.boost_keywords:
             results = await asyncio.to_thread(
                 apply_pin_rules, results, self.folder_name, self.config

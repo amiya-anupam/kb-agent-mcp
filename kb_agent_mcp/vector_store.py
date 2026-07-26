@@ -413,10 +413,19 @@ async def build_collection(
 
         # Risk 11 — stamp the collection with the current time so the stale
         # TTL cache in server.py can compare file mtimes against this value.
+        # indexed_at  — Unix float, used by server.py for mtime comparison
+        # indexed_at_iso — ISO string, used by status/doctor for display
+        import datetime as _dt
+        _now = _time.time()
         await asyncio.to_thread(
             set_domain_metadata,
             domain,
-            {"indexed_at": _time.time()},
+            {
+                "indexed_at": _now,
+                "indexed_at_iso": _dt.datetime.fromtimestamp(
+                    _now, tz=_dt.timezone.utc
+                ).isoformat(),
+            },
         )
         return count
 
