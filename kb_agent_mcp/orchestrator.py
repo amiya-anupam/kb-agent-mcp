@@ -406,6 +406,38 @@ def _merge_answers(
     return "\n\n---\n\n".join(merged)
 
 
+# ── Minimal-keyword routing notice ────────────────────────────────────────────
+
+def _minimal_keyword_notice(domain_names: list[str], agents: dict) -> str:
+    """
+    Return a one-line notice when ANY routed domain has ≤1 keyword configured.
+
+    ≤1 keyword means the domain was generated without an LLM (minimal defaults)
+    and routing is essentially a guess.  The notice nudges the user to enrich
+    their domain config without being alarming about the answer itself.
+
+    Returns "" when all routed domains have ≥2 keywords — no noise in normal use.
+    """
+    thin_domains = [
+        name
+        for name in domain_names
+        if name in agents and len(agents[name].config.keywords) <= 1
+    ]
+    if not thin_domains:
+        return ""
+    plural = "s" if len(thin_domains) > 1 else ""
+    names  = ", ".join(f"**{n}**" for n in thin_domains)
+    return (
+        f"\n\n---\n\n"
+        f"> 💡 **Routing quality note:** Domain{plural} {names} "
+        f"{'have' if len(thin_domains) > 1 else 'has'} minimal keyword config "
+        f"(generated without an LLM). "
+        f"Routing accuracy may be lower than expected.\n"
+        f"> To improve: run `kb-agent-generate --force` with an LLM configured, "
+        f"or edit `<domain>/domain_config.yaml` → `keywords:` section manually."
+    )
+
+
 # ── Stale-index warning ────────────────────────────────────────────────────────
 
 def _stale_warnings(domain_names: list[str], agents: dict) -> str:
@@ -531,6 +563,9 @@ async def ask(
     # Stale-index check: appends a warning if >5% new files are unindexed.
     # The check is a lightweight dir-walk + ChromaDB count — no embedding needed.
     final_answer += _stale_warnings(domain_names, agents)
+
+    # Cat 3b — routing quality notice when domain has minimal keyword config.
+    final_answer += _minimal_keyword_notice(domain_names, agents)
 
     add_turn_sync(question, final_answer, session_id)
     return final_answer

@@ -402,9 +402,63 @@ async def _run_generate(
     info("Checking embedding model cache (first run downloads ~80 MB — please wait)…")
     _ensure_embedding_model()
 
+    # Cat 3a — Probe ChromaDB client BEFORE the index-build loop.
+    # A RuntimeError here almost always means the index was built by an older
+    # chromadb version and is now incompatible.  Offer an automatic clean rebuild
+    # so the user doesn't hit a cryptic per-domain failure mid-generate.
+    from kb_agent_mcp.vector_store import (
+        _get_client as _vs_client,
+        list_domains as _vs_list,
+        delete_collection as _vs_delete,
+    )
+    try:
+        _vs_client()
+    except RuntimeError as _chroma_err:
+        index_path = cfg.kb_index_path / "chroma"
+        warn("ChromaDB index is incompatible with the installed chromadb version.")
+        warn(f"  Error: {_chroma_err}")
+        warn(f"  Index path: {index_path}")
+        print()
+        if yes or not sys.stdin.isatty():
+            # Non-interactive: auto-wipe and continue
+            info("Non-interactive mode — deleting incompatible index and rebuilding.")
+            import shutil as _shutil
+            try:
+                _shutil.rmtree(str(index_path))
+                ok("Deleted incompatible ChromaDB index.")
+                # Reset the client singleton so it re-creates on next access
+                import kb_agent_mcp.vector_store as _vs_mod
+                _vs_mod._client = None
+            except Exception as _del_err:
+                err(f"Could not delete index: {_del_err}")
+                err(f"Delete it manually:  rm -rf \"{index_path}\"")
+                return 1
+        else:
+            try:
+                answer = input(
+                    "  Delete the incompatible index and rebuild from scratch? [Y/n]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                answer = "n"
+            if answer in ("", "y", "yes"):
+                import shutil as _shutil
+                try:
+                    _shutil.rmtree(str(index_path))
+                    ok("Deleted incompatible ChromaDB index.")
+                    import kb_agent_mcp.vector_store as _vs_mod
+                    _vs_mod._client = None
+                except Exception as _del_err:
+                    err(f"Could not delete index: {_del_err}")
+                    err(f"Delete it manually:  rm -rf \"{index_path}\"")
+                    return 1
+            else:
+                info("Skipped. Delete the index manually and re-run kb-agent-generate:")
+                info(f'  rm -rf "{index_path}"')
+                return 1
+
     # 3.2 — Remove ChromaDB collections whose name would now be excluded by is_ignored().
     # This cleans up *.egg-info entries left over from before fix 1.1.
-    from kb_agent_mcp.vector_store import list_domains as _vs_list, delete_collection as _vs_delete
     for stale_coll in _vs_list():
         name_lower = stale_coll.lower()
         if cfg.is_ignored(stale_coll) or name_lower.endswith(".egg-info") or name_lower.endswith(".dist-info"):

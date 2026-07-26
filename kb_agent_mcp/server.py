@@ -155,7 +155,14 @@ async def ask(
         effective_session = f"sess-{uuid.uuid4().hex[:12]}"
         generated_session = effective_session
 
-    from kb_agent_mcp.orchestrator import ask as _ask
+    from kb_agent_mcp.orchestrator import ask as _ask, _agents as _loaded_agents
+
+    # Cat 4 — Cold-start sentinel: agents haven't been loaded yet for this process.
+    # The first ask() call triggers ChromaDB + sentence-transformers loading (1–3s).
+    # We can't stream a "loading…" message before the call returns in stdio/MCP, but
+    # we can prepend a brief note to the ANSWER so the user sees it was a cold start
+    # and understands why the first response takes longer.
+    _cold_start = _loaded_agents is None
 
     # Risk 11 — prepend stale-index warning when TTL cache detects new files.
     stale, stale_detail = _check_stale_cached()
@@ -164,6 +171,12 @@ async def ask(
         session_id=effective_session,
         format_flag=format or None,
     )
+
+    if _cold_start:
+        answer = (
+            "*⏱ Cold start — indexes loaded for the first time this session.*\n\n"
+            + answer
+        )
 
     if stale:
         answer = stale_detail + answer
