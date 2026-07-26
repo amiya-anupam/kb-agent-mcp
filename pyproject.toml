@@ -61,6 +61,7 @@ kb-agent-setup    = "kb_agent_mcp.cli.setup:main"
 kb-agent-generate = "kb_agent_mcp.cli.generate:main"
 kb-agent-serve    = "kb_agent_mcp.server:main"
 kb-agent-watch    = "kb_agent_mcp.cli.watch:main"
+kb-agent-doctor   = "kb_agent_mcp.cli.doctor:main"
 
 # ── Package discovery ──────────────────────────────────────────────────────────
 [tool.setuptools.packages.find]

@@ -63,3 +63,14 @@ CP4I Docs/
 # Prevent generate.py from treating skills/ as a knowledge domain
 # and committing auto-generated README stubs.
 skills/*.md
+
+# ── Auto-generated domain agents (patterns) ───────────────────
+agents/agent_ace_docs.py
+agents/agent_bizops.py
+agents/agent_cp4i_docs.py
+agents/agent_skills.py
+agents/agent_d.py
+agents/agent_*_egg_info.py
+
+# ── ChromaDB vector index (local, rebuilt by kb-agent-generate) ──
+.kb_index/

@@ -3,10 +3,14 @@ kb_agent_mcp/cli/setup.py — Interactive setup wizard
 -----------------------------------------------------
 Guides a new user through:
   1. Python version check
-  2. KB_ROOT folder selection
-  3. LLM / passthrough configuration
-  4. .env creation
-  5. Running kb-agent-generate to build indexes
+  2. Build-tools pre-flight (Risk 1 — detect missing gcc/xcode, soft block)
+  3. Virtual-environment guidance (Risk 5 — detect non-venv, recommend venv)
+  4. KB_ROOT folder selection
+  5. LLM / passthrough configuration (Risk 4 — split Q&A mode from key availability)
+  6. .env creation
+  7. Running kb-agent-generate to build indexes
+  8. Interactive keyword editor for domains that got minimal YAML (Risk 4)
+  9. Completion output showing absolute kb-agent-serve path (Risk 3)
 
 Usage:
   kb-agent-setup            # interactive (recommended)
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -46,6 +51,19 @@ def _prompt(prompt: str, default: str = "") -> str:
     return val if val else default
 
 
+def _confirm(prompt: str, default: bool = False) -> bool:
+    """Yes/No prompt. Returns bool. Handles non-interactive stdin gracefully."""
+    hint = "[Y/n]" if default else "[y/N]"
+    try:
+        val = input(f"  {prompt} {hint}: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+    if not val:
+        return default
+    return val in ("y", "yes")
+
+
 # ── Step 1: Python check ───────────────────────────────────────────────────────
 
 def check_python() -> None:
@@ -57,7 +75,132 @@ def check_python() -> None:
     ok(f"Python {v.major}.{v.minor}.{v.micro}")
 
 
-# ── Step 2: KB_ROOT folder ────────────────────────────────────────────────────
+# ── Step 1b: Build-tools pre-flight (Risk 1) ──────────────────────────────────
+
+def _build_tools_present() -> bool:
+    """Return True when the C++ build toolchain is available on this platform."""
+    if sys.platform == "win32":
+        return True  # Windows: no C++ compilation needed for chromadb wheels
+    if sys.platform == "darwin":
+        # xcode-select -p exits 0 when tools are installed, 2 when missing
+        result = subprocess.run(
+            ["xcode-select", "-p"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    # Linux: check for gcc
+    return shutil.which("gcc") is not None
+
+
+def _build_tools_fix_hint() -> str:
+    if sys.platform == "darwin":
+        return "xcode-select --install"
+    if sys.platform.startswith("linux"):
+        return "sudo apt install build-essential python3-dev"
+    return ""
+
+
+def check_build_tools(yes: bool) -> None:
+    """Risk 1 — detect missing build tools, soft-block with fix hint."""
+    if sys.platform == "win32":
+        return  # not needed on Windows
+
+    if _build_tools_present():
+        return  # tools present — say nothing (no warning fatigue)
+
+    hint = _build_tools_fix_hint()
+    hdr("① Build tools check")
+    warn("chromadb requires C++ build tools that are NOT installed on this machine.")
+    warn(f"  Install them first:  {hint}")
+    print()
+    if yes:
+        warn("--yes mode: continuing without build tools (pip install may fail).")
+        return
+    if not _confirm("Continue anyway? (pip install may fail)", default=False):
+        print()
+        info(f"Run this first:  {hint}")
+        info("Then re-run kb-agent-setup.")
+        sys.exit(0)
+
+
+# ── Step 1c: Virtual-environment guidance (Risk 5) ────────────────────────────
+
+def _in_venv() -> bool:
+    """Return True when running inside a virtual environment."""
+    return sys.prefix != sys.base_prefix
+
+
+def check_venv(yes: bool) -> None:
+    """Risk 5 — detect non-venv state, recommend venv, show commands."""
+    if _in_venv():
+        return  # already in a venv — say nothing
+
+    hdr("① Virtual environment check")
+    warn("You are installing into the system Python (no virtual environment detected).")
+    print()
+    print("  Recommended: install into a venv so CLI commands stay isolated")
+    print("  and kb-agent-serve is always findable by your MCP host.")
+    print()
+    print("  To set one up:")
+    print("    python3 -m venv .venv")
+    print("    source .venv/bin/activate          # macOS / Linux")
+    print("    .venv\\Scripts\\activate             # Windows")
+    print("    pip install kb-agent-mcp")
+    print("    kb-agent-setup")
+    print()
+    if yes:
+        warn("--yes mode: continuing with system Python.")
+        return
+    if not _confirm("Continue with system Python?", default=False):
+        print()
+        info("Re-run kb-agent-setup after activating your venv.")
+        sys.exit(0)
+
+
+# ── API-key preflight test ─────────────────────────────────────────────────────
+
+def _test_api_key(provider: str, base_url: str, api_key: str, model: str) -> bool:
+    """Make a lightweight authenticated request to verify the key.
+
+    Returns True on success, False on auth failure.
+    Prints a warning on failure and a notice when network is unreachable.
+    Does NOT hard-exit — caller decides whether to soft-block.
+    """
+    import urllib.request
+    import urllib.error
+
+    provider = provider.lower()
+    try:
+        if provider == "anthropic":
+            req = urllib.request.Request(
+                f"{base_url.rstrip('/')}/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+        else:
+            req = urllib.request.Request(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status < 300:
+                ok("API key verified ✓")
+                return True
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            warn(f"API key test failed (HTTP {exc.code}). Double-check the key.")
+            return False
+        else:
+            warn(f"API key test returned HTTP {exc.code} — proceeding anyway.")
+    except Exception:
+        warn("API key test skipped (network unreachable or timeout) — proceeding.")
+    return True  # non-auth failures are treated as passing (network may be down)
+
+
+# ── Step 2: KB_ROOT folder ─────────────────────────────────────────────────────
 
 def choose_kb_root(cli_path: Path | None, yes: bool) -> Path:
     if cli_path is not None:
@@ -104,73 +247,182 @@ def choose_kb_root(cli_path: Path | None, yes: bool) -> Path:
     return root
 
 
-# ── Step 3: LLM ───────────────────────────────────────────────────────────────
+# ── Step 3: LLM — redesigned (Risk 4) ────────────────────────────────────────
+#
+# Two independent decisions:
+#   Question 1: How should the agent ANSWER questions?  (runtime behaviour)
+#   Question 2: Do you have a cloud API key available?  (generate + fallback)
+#
+# This separates "I want passthrough for Q&A" from "I have no LLM at all".
+# The key is stored as KB_API_KEY and used for:
+#   • kb-agent-generate (one-time config generation → rich domain YAML)
+#   • Q&A fallback when Ollama is unreachable (existing KB_PASSTHROUGH_FALLBACK chain)
+
+def _collect_api_key(provider_name: str, base_url: str, default_model: str) -> dict[str, str]:
+    """Prompt for API key + model, validate, return env-var dict."""
+    key   = _prompt(f"{provider_name} API key")
+    if not key:
+        warn("No key entered — skipping API key setup.")
+        return {}
+    model = _prompt(f"{provider_name} model", default_model)
+    valid = _test_api_key(provider_name.lower(), base_url, key, model)
+    if not valid:
+        if not _confirm("Key appears invalid. Use it anyway?", default=False):
+            warn("API key not saved.")
+            return {}
+    return {
+        "KB_API_KEY":     key,
+        "KB_MODEL":       model,
+    }
+
 
 def choose_llm(yes: bool) -> dict[str, str]:
+    """Risk 4 — redesigned LLM setup: split Q&A mode from key availability."""
     if yes:
         info("LLM: passthrough mode (recommended — no local LLM required)")
         return {"KB_LLM_PROVIDER": "passthrough"}
 
-    hdr("③ LLM (language model) setup")
+    # ── Question 1: How should the agent answer questions? ────────────────────
+    hdr("③ How should the agent answer questions?")
     print()
-    print("  1) Passthrough  (recommended — your AI tool answers using retrieved context)")
-    print("  2) Ollama        (free, local — install from https://ollama.com)")
-    print("  3) OpenAI        (API key required)")
-    print("  4) Anthropic     (API key required)")
-    print("  5) Custom / LM Studio / Jan  (any OpenAI-compatible server)")
+    print("  1) Passthrough  (recommended — your AI tool (Bob, Claude, Cursor)")
+    print("                   reads retrieved context and answers for you.")
+    print("                   No local software needed.")
+    print()
+    print("  2) Ollama        (free, fully local — install from https://ollama.com)")
+    print("  3) OpenAI        (cloud API key required)")
+    print("  4) Anthropic     (cloud API key required)")
+    print("  5) Custom        (any OpenAI-compatible local server)")
     print()
     choice = _prompt("Choice", "1")
 
+    # ── Non-passthrough paths: key is already collected for Q&A ──────────────
+
     if choice == "2":
         model = _prompt("Ollama model", "qwen3:14b")
-        info(f"Make sure Ollama is running: `ollama serve`")
+        info("Make sure Ollama is running: `ollama serve`")
         info(f"Pull the model first: `ollama pull {model}`")
-        return {"KB_LLM_PROVIDER": "ollama", "KB_MODEL": model, "KB_EMBED_MODEL": "nomic-embed-text"}
+        return {
+            "KB_LLM_PROVIDER": "ollama",
+            "KB_MODEL":        model,
+            "KB_EMBED_MODEL":  "nomic-embed-text",
+        }
 
     if choice == "3":
-        key   = _prompt("OpenAI API key (sk-…)")
-        model = _prompt("OpenAI model", "gpt-4o-mini")
-        return {
+        key_cfg = _collect_api_key("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini")
+        base = {
             "KB_LLM_PROVIDER": "openai",
             "KB_LLM_BASE_URL": "https://api.openai.com/v1",
-            "KB_MODEL": model,
-            "KB_API_KEY": key,
-            "KB_EMBED_MODEL": "text-embedding-3-small",
+            "KB_EMBED_MODEL":  "text-embedding-3-small",
         }
+        return {**base, **key_cfg}
 
     if choice == "4":
-        key   = _prompt("Anthropic API key")
-        model = _prompt("Anthropic model", "claude-3-5-haiku-20241022")
-        return {
+        key_cfg = _collect_api_key("Anthropic", "https://api.anthropic.com", "claude-3-5-haiku-20241022")
+        base = {
             "KB_LLM_PROVIDER": "anthropic",
             "KB_LLM_BASE_URL": "https://api.anthropic.com",
-            "KB_MODEL": model,
-            "KB_API_KEY": key,
         }
+        return {**base, **key_cfg}
 
     if choice == "5":
         url   = _prompt("Base URL", "http://localhost:1234/v1")
         model = _prompt("Model name")
         return {"KB_LLM_PROVIDER": "custom", "KB_LLM_BASE_URL": url, "KB_MODEL": model}
 
-    # Default: passthrough
-    info("Passthrough mode selected.")
-    return {"KB_LLM_PROVIDER": "passthrough"}
+    # ── Passthrough path ──────────────────────────────────────────────────────
+    info("Passthrough selected — your AI tool answers using retrieved context.")
+
+    # ── Question 2: Do you have a cloud API key? (Risk 4, Sub-problem B) ─────
+    # The key is optional but improves generate quality and acts as Q&A fallback.
+    print()
+    print("  ③b Do you have an OpenAI or Anthropic API key available?")
+    print("     It will be used for:")
+    print("       • Generating richer domain config during this setup (one-time)")
+    print("       • Answering questions if Ollama becomes unavailable (fallback)")
+    print("     You can add this later by editing .env")
+    print()
+
+    has_key = _confirm("Enter an API key now?", default=False)
+
+    if not has_key:
+        warn(
+            "No API key. Domain config will use minimal keyword defaults.\n"
+            "  You'll get a chance to add keywords interactively after indexing."
+        )
+        return {"KB_LLM_PROVIDER": "passthrough"}
+
+    # Collect the key for generate + fallback
+    print()
+    print("  Provider:")
+    print("  1) OpenAI")
+    print("  2) Anthropic")
+    print()
+    prov = _prompt("Provider", "1")
+
+    if prov == "2":
+        key_cfg = _collect_api_key("Anthropic", "https://api.anthropic.com", "claude-3-5-haiku-20241022")
+        provider_extra = {
+            "KB_LLM_PROVIDER":          "passthrough",
+            "KB_LLM_PROVIDER_GENERATE": "anthropic",
+            "KB_LLM_BASE_URL":          "https://api.anthropic.com",
+        }
+    else:
+        key_cfg = _collect_api_key("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini")
+        provider_extra = {
+            "KB_LLM_PROVIDER":          "passthrough",
+            "KB_LLM_PROVIDER_GENERATE": "openai",
+            "KB_LLM_BASE_URL":          "https://api.openai.com/v1",
+            "KB_EMBED_MODEL":           "text-embedding-3-small",
+        }
+
+    if key_cfg:
+        info(
+            "Key stored as KB_API_KEY.\n"
+            "  Used for: domain config generation + Q&A fallback when Ollama "
+            "is unreachable."
+        )
+
+    return {**provider_extra, **key_cfg}
 
 
 # ── Step 4: write .env ────────────────────────────────────────────────────────
 
+def _read_env_key(env_path: Path, key: str) -> str | None:
+    """Return the current value of `key` from an existing .env file, or None."""
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1:].strip()
+    return None
+
+
 def write_env(kb_root: Path, llm: dict[str, str], cwd: Path) -> None:
     hdr("④ Writing .env")
-    env_path     = cwd / ".env"
+    env_path     = kb_root / ".env"
     example_path = cwd / ".env.example"
 
     if env_path.exists():
-        ok(".env already exists — keeping it (update manually if needed)")
+        ok(".env already exists — keeping existing values")
         _patch_env_key(env_path, "KB_ROOT", str(kb_root))
+        new_provider = llm.get("KB_LLM_PROVIDER", "")
+        old_provider = _read_env_key(env_path, "KB_LLM_PROVIDER") or ""
+        if new_provider and old_provider and new_provider != old_provider:
+            try:
+                ans = input(
+                    f"\n  Your .env has KB_LLM_PROVIDER={old_provider}.\n"
+                    f"  Update it to {new_provider}? [y/N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+                print()
+            if ans == "y":
+                for k, v in llm.items():
+                    _patch_env_key(env_path, k, v)
+                ok(f"LLM settings updated to provider={new_provider}")
+            else:
+                info(f"Keeping existing provider={old_provider}")
         return
 
-    # Build from example if present, otherwise minimal
     if example_path.exists():
         content = example_path.read_text(encoding="utf-8")
         content = content.replace("# KB_ROOT=/path/to/your/KnowledgeBase", f"KB_ROOT={kb_root}")
@@ -178,10 +430,10 @@ def write_env(kb_root: Path, llm: dict[str, str], cwd: Path) -> None:
         content = f"KB_ROOT={kb_root}\n"
 
     env_path.write_text(content, encoding="utf-8")
-    # Patch in LLM settings
     for k, v in llm.items():
         _patch_env_key(env_path, k, v)
     ok(f".env written  (KB_ROOT={kb_root}, provider={llm.get('KB_LLM_PROVIDER', '?')})")
+    ok(f".env location: {env_path}")
 
 
 def _patch_env_key(env_path: Path, key: str, value: str) -> None:
@@ -200,9 +452,25 @@ def _patch_env_key(env_path: Path, key: str, value: str) -> None:
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
-# ── Step 5: run kb-agent-generate ────────────────────────────────────────────
+# ── Step 5: run kb-agent-generate ─────────────────────────────────────────────
 
-def run_generate(yes: bool) -> None:
+def _serve_path() -> str:
+    """Return the absolute path to kb-agent-serve (Risk 3 — venv-aware)."""
+    found = shutil.which("kb-agent-serve")
+    if found:
+        return found
+    candidate = Path(sys.prefix) / "bin" / "kb-agent-serve"
+    if candidate.exists():
+        return str(candidate)
+    return "kb-agent-serve"
+
+
+def run_generate(yes: bool) -> list[str]:
+    """Run kb-agent-generate. Returns list of domain names that got minimal YAML.
+
+    Risk 4 — the list is passed to the interactive keyword editor so users
+    without an LLM can still enrich their domain configs interactively.
+    """
     hdr("⑤ Running kb-agent-generate  (builds indexes)")
     flags = ["--no-llm"] if yes else []
     result = subprocess.run(
@@ -213,6 +481,106 @@ def run_generate(yes: bool) -> None:
         err("Re-run manually to see the full error:  kb-agent-generate")
         sys.exit(1)
     ok("kb-agent-generate completed")
+
+    # Detect domains that ended up with minimal YAML (Risk 4 — keyword editor)
+    minimal_domains: list[str] = []
+    if yes:
+        # --no-llm mode always produces minimal YAML for all domains
+        try:
+            from kb_agent_mcp.config import cfg
+            for entry in sorted(cfg.kb_root_path.iterdir()):
+                if entry.is_dir() and not cfg.is_ignored(entry.name):
+                    yaml_path = entry / "domain_config.yaml"
+                    if yaml_path.exists():
+                        content = yaml_path.read_text(encoding="utf-8")
+                        # Minimal YAML has only 1 keyword (the folder name lowercased)
+                        import yaml as _yaml
+                        data = _yaml.safe_load(content) or {}
+                        kws = data.get("keywords", [])
+                        if len(kws) <= 1:
+                            minimal_domains.append(entry.name)
+        except Exception:
+            pass  # non-fatal — keyword editor is optional
+    return minimal_domains
+
+
+# ── Step 6: Interactive keyword editor (Risk 4) ────────────────────────────────
+
+def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: bool) -> None:
+    """For domains with minimal YAML, offer to add keywords interactively.
+
+    Only edits the `keywords:` section — leaves all other YAML fields intact.
+    Keywords-only scope is intentional: minimal surface area, can't break
+    system_prompt or retrieval_rules.
+    """
+    if not minimal_domains or yes:
+        if minimal_domains and yes:
+            warn(
+                "Domain config used minimal keyword defaults for: "
+                + ", ".join(minimal_domains)
+                + "\n  Edit keywords manually: <domain>/domain_config.yaml → keywords: section"
+                + "\n  Then run: kb-agent-generate --force"
+            )
+        return
+
+    hdr("⑥ Domain keyword editor")
+    print()
+    print("  The following domains used minimal keyword defaults")
+    print("  (no LLM was available during generate):")
+    for d in minimal_domains:
+        print(f"    • {d}/")
+    print()
+    print("  Good keywords help the agent route questions to the right domain.")
+    print("  Example: for a 'Sales Revenue' folder, good keywords might be:")
+    print("    revenue, quota, attainment, deals, pipeline, forecast")
+    print()
+
+    if not _confirm("Edit keywords now?", default=True):
+        warn(
+            "Skipped. Edit keywords manually at:\n"
+            "  <KB_ROOT>/<domain>/domain_config.yaml  (keywords: section)\n"
+            "  Then run: kb-agent-generate --force"
+        )
+        return
+
+    import yaml as _yaml
+
+    for domain_name in minimal_domains:
+        yaml_path = kb_root / domain_name / "domain_config.yaml"
+        if not yaml_path.exists():
+            warn(f"domain_config.yaml not found for {domain_name} — skipping")
+            continue
+
+        try:
+            content  = yaml_path.read_text(encoding="utf-8")
+            data     = _yaml.safe_load(content) or {}
+            current  = data.get("keywords", [])
+        except Exception as exc:
+            warn(f"Could not read {yaml_path}: {exc} — skipping")
+            continue
+
+        print(f"\n{'─' * 54}")
+        print(f"  📁 {domain_name}/  (current keywords: {', '.join(current) or '(none)'})")
+        print()
+        raw = _prompt("  Enter keywords separated by commas", "")
+        if not raw.strip():
+            info(f"Skipped {domain_name} — no changes made")
+            continue
+
+        new_kws = [k.strip() for k in raw.split(",") if k.strip()]
+
+        # Patch only the keywords line — rewrite the YAML preserving all other fields
+        try:
+            data["keywords"] = new_kws
+            updated = _yaml.dump(data, default_flow_style=False, allow_unicode=True)
+            yaml_path.write_text(updated, encoding="utf-8")
+            ok(f"{domain_name} keywords updated ({len(new_kws)} keywords)")
+        except Exception as exc:
+            warn(f"Could not write {yaml_path}: {exc}")
+
+    print(f"\n{'─' * 54}")
+    ok("domain_config.yaml files updated.")
+    info("Run kb-agent-generate --force later to regenerate with an LLM if needed.")
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -243,22 +611,50 @@ def main() -> None:
     print(_c("1;36",   "╚══════════════════════════════════════════════╝"))
 
     check_python()
-    kb_root = choose_kb_root(cli_root, args.yes)
-    llm_cfg = choose_llm(args.yes)
+    check_build_tools(args.yes)   # Risk 1 — detect + soft-block missing build tools
+    check_venv(args.yes)          # Risk 5 — detect non-venv, recommend venv
+
+    kb_root  = choose_kb_root(cli_root, args.yes)
+    llm_cfg  = choose_llm(args.yes)
     write_env(kb_root, llm_cfg, cwd)
-    run_generate(args.yes)
+
+    minimal_domains = run_generate(args.yes)
+    interactive_keyword_editor(minimal_domains, kb_root, args.yes)  # Risk 4
+
+    # Risk 3 / Risk 5 — absolute path to kb-agent-serve is the FIRST thing
+    # shown in the completion block, not buried at the bottom.
+    serve_cmd = _serve_path()
 
     hdr("✅  Setup complete!")
     print()
+    print(_c("1", "  MCP host config — paste this exactly:"))
+    print(_c("36", "  " + "─" * 52))
+    print('  "kb-agent-mcp": {')
+    print(f'    "command": "{serve_cmd}",')
+    print(f'    "env": {{ "KB_ROOT": "{kb_root}" }}')
+    print('  }')
+    print(_c("36", "  " + "─" * 52))
+    print()
+    if not _in_venv():
+        warn(
+            "Not in a venv — if the above command path doesn't work,\n"
+            "  run `which kb-agent-serve` in your terminal for the correct path."
+        )
+    print()
     print("  Start the MCP server:")
-    print("    kb-agent-serve                    # stdio (for Claude Desktop / Bob)")
-    print("    kb-agent-serve --transport http   # HTTP/SSE")
+    print(f"    {serve_cmd}                    # stdio (for Claude Desktop / Bob)")
+    print(f"    {serve_cmd} --transport http   # HTTP/SSE")
+    print()
+    print(f"  .env location:  {kb_root / '.env'}")
     print()
     print("  Re-index after adding documents:")
     print("    kb-agent-generate")
     print()
     print("  Watch for file changes automatically:")
     print("    kb-agent-watch")
+    print()
+    print("  Run a health check:")
+    print("    kb-agent-doctor")
     print()
 
 

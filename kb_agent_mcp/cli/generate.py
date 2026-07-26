@@ -233,10 +233,13 @@ def _generate_yaml_for_folder(folder: Path) -> str | None:
 
 def _minimal_yaml(folder_name: str) -> str:
     """Generate a minimal domain_config.yaml without LLM."""
+    # Quote values that could contain colons or other YAML-special characters.
+    import json as _json
+    _q = _json.dumps  # cheap safe quoting: wraps in double-quotes, escapes internals
     return textwrap.dedent(f"""\
-        folder_name: {folder_name}
-        agent_name: {folder_name} Agent
-        description: Knowledge domain: {folder_name}
+        folder_name: {_q(folder_name)}
+        agent_name: {_q(folder_name + " Agent")}
+        description: {_q("Knowledge domain: " + folder_name)}
         keywords:
           - {folder_name.lower()}
         top_n: 4
@@ -256,6 +259,35 @@ def _minimal_yaml(folder_name: str) -> str:
     """)
 
 
+# ── YAML schema validation ────────────────────────────────────────────────────
+
+_REQUIRED_YAML_KEYS = {
+    "folder_name", "agent_name", "description", "keywords",
+    "top_n", "max_chars", "system_prompt",
+}
+
+
+def _validate_yaml(yaml_text: str) -> list[str]:
+    """
+    Parse yaml_text and check for required top-level keys.
+
+    Returns a list of error strings.  Empty list = valid.
+    The minimal YAML produced by _minimal_yaml() always passes this check.
+    """
+    import yaml as _yaml
+    errors: list[str] = []
+    try:
+        data = _yaml.safe_load(yaml_text)
+    except _yaml.YAMLError as exc:
+        return [f"YAML parse error: {exc}"]
+    if not isinstance(data, dict):
+        return ["YAML did not parse to a mapping (expected key: value pairs)"]
+    missing = _REQUIRED_YAML_KEYS - data.keys()
+    if missing:
+        errors.append(f"Missing required keys: {', '.join(sorted(missing))}")
+    return errors
+
+
 # ── Rich / plain YAML preview ──────────────────────────────────────────────────
 
 def _print_yaml_preview(folder_name: str, yaml_text: str) -> None:
@@ -271,8 +303,14 @@ def _print_yaml_preview(folder_name: str, yaml_text: str) -> None:
         print("---")
 
 
-def _prompt_accept(folder_name: str) -> bool:
-    """Prompt Accept or Skip. Returns True for Accept."""
+def _prompt_accept(folder_name: str, yes: bool = False) -> bool:
+    """Prompt Accept or Skip. Returns True for Accept.
+
+    Auto-accepts when ``yes=True`` or when stdin is not a TTY (CI/piped).
+    """
+    if yes or not sys.stdin.isatty():
+        info(f"Auto-accepting '{folder_name}' (non-interactive)")
+        return True
     while True:
         try:
             answer = input(f"\n  [A]ccept / [S]kip for '{folder_name}': ").strip().upper()
@@ -342,7 +380,11 @@ async def _run_generate(
     force: bool = False,
     no_llm: bool = False,
     domain_filter: str | None = None,
+    yes: bool = False,
 ) -> int:
+    import time as _time
+    _t_start = _time.monotonic()
+
     from kb_agent_mcp.config import cfg
     from kb_agent_mcp.vector_store import build_collection as _build
 
@@ -355,6 +397,23 @@ async def _run_generate(
 
     hdr(f"kb-agent-generate — KB_ROOT: {kb_root}")
 
+    # Risk 6 — warn before the ~80 MB one-time model download so users aren't surprised.
+    from kb_agent_mcp.embeddings import _ensure_embedding_model
+    info("Checking embedding model cache (first run downloads ~80 MB — please wait)…")
+    _ensure_embedding_model()
+
+    # 3.2 — Remove ChromaDB collections whose name would now be excluded by is_ignored().
+    # This cleans up *.egg-info entries left over from before fix 1.1.
+    from kb_agent_mcp.vector_store import list_domains as _vs_list, delete_collection as _vs_delete
+    for stale_coll in _vs_list():
+        name_lower = stale_coll.lower()
+        if cfg.is_ignored(stale_coll) or name_lower.endswith(".egg-info") or name_lower.endswith(".dist-info"):
+            try:
+                _vs_delete(stale_coll)
+                warn(f"Removed stale ChromaDB collection: {stale_coll}")
+            except Exception as exc:
+                warn(f"Could not remove stale collection '{stale_coll}': {exc}")
+
     folders = _discover_folders(kb_root)
     if not folders:
         warn("No knowledge folders found. Add document subfolders and re-run.")
@@ -365,6 +424,11 @@ async def _run_generate(
         if not folders:
             err(f"Domain '{domain_filter}' not found under {kb_root}")
             return 1
+
+    # Risk 4 — if setup wizard stored a generate-specific provider, honour it.
+    _generate_provider = cfg.KB_LLM_PROVIDER_GENERATE  # may be "" or a provider name
+    if _generate_provider and not no_llm:
+        info(f"Using generate LLM provider: {_generate_provider}")
 
     llm_ok  = not no_llm and _llm_available()
     if not no_llm and not llm_ok:
@@ -382,7 +446,11 @@ async def _run_generate(
 
         # ── 1. Build/update ChromaDB vector index ─────────────────────────────
         try:
-            count = await _build(folder_name)
+            def _progress(i: int, total: int, name: str) -> None:
+                if total > 1:
+                    info(f"Embedding file {i}/{total}: {name}")
+
+            count = await _build(folder_name, progress_fn=_progress)
             ok(f"ChromaDB index: {count} files embedded")
         except Exception as e:
             err(f"Index build failed for {folder_name}: {e}")
@@ -395,16 +463,26 @@ async def _run_generate(
             continue
 
         if llm_ok:
-            info("Generating domain_config.yaml via LLM…")
+            n_folders = len(folders)
+            domain_idx = folders.index(folder_name) + 1
+            info(f"Generating domain_config.yaml via LLM… ({domain_idx}/{n_folders})")
             yaml_text = _generate_yaml_for_folder(folder)
             if not yaml_text:
                 yaml_text = _minimal_yaml(folder_name)
         else:
             yaml_text = _minimal_yaml(folder_name)
 
+        # Validate LLM output — fall back to minimal YAML if it is broken
+        if llm_ok and yaml_text != _minimal_yaml(folder_name):
+            validation_errors = _validate_yaml(yaml_text)
+            if validation_errors:
+                for ve in validation_errors:
+                    warn(f"Generated YAML invalid ({ve}) — using minimal defaults instead.")
+                yaml_text = _minimal_yaml(folder_name)
+
         _print_yaml_preview(folder_name, yaml_text)
 
-        if _prompt_accept(folder_name):
+        if _prompt_accept(folder_name, yes=yes):
             yaml_path.write_text(yaml_text, encoding="utf-8")
             ok(f"domain_config.yaml written")
             accepted_domains.append(folder_name)
@@ -415,7 +493,11 @@ async def _run_generate(
     if accepted_domains:
         _install_bob_skill(kb_root, accepted_domains)
 
-    hdr("✅ Done")
+    elapsed = _time.monotonic() - _t_start
+    mins, secs = divmod(int(elapsed), 60)
+    elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+
+    hdr(f"✅ Done in {elapsed_str}")
     print(f"  Domains indexed: {', '.join(accepted_domains) or '(none)'}")
     print()
     print("  Start the MCP server:  kb-agent-serve")
@@ -435,12 +517,15 @@ def main() -> None:
                         help="Skip LLM-based YAML generation (index only)")
     parser.add_argument("--domain", type=str, default=None,
                         help="Only process one domain folder (exact name)")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Auto-accept all Accept/Skip prompts (non-interactive / CI)")
     args = parser.parse_args()
 
     rc = asyncio.run(_run_generate(
         force=args.force,
         no_llm=args.no_llm,
         domain_filter=args.domain,
+        yes=args.yes,
     ))
     sys.exit(rc)
 

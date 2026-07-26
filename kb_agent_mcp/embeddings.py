@@ -21,6 +21,7 @@ INCLUDE_EXTS            — re-exported from file_parser for convenience
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from kb_agent_mcp.config import cfg
@@ -30,13 +31,68 @@ from kb_agent_mcp.context_budget import get as _budget
 
 _st_model: Any = None
 
+_ST_MODEL_NAME = "all-MiniLM-L6-v2"
+# Hugging Face / sentence-transformers cache paths (the download lands in one of these)
+_ST_CACHE_DIRS = [
+    Path.home() / ".cache" / "huggingface" / "hub",
+    Path.home() / ".cache" / "torch" / "sentence_transformers",
+]
+
+
+def _st_model_is_cached() -> bool:
+    """Return True if the sentence-transformers model is already on disk."""
+    model_slug = _ST_MODEL_NAME.replace("/", "_")
+    # HF hub stores models as "models--sentence-transformers--<name>" directories
+    hf_dir = _ST_CACHE_DIRS[0] / f"models--sentence-transformers--{model_slug}"
+    if hf_dir.exists():
+        return True
+    # Legacy torch cache path used by older sentence-transformers versions
+    torch_dir = _ST_CACHE_DIRS[1] / f"sentence-transformers_{model_slug}"
+    if torch_dir.exists():
+        return True
+    return False
+
+
+def _ensure_embedding_model() -> None:
+    """Download the embedding model now (at generate-time) if not already cached.
+
+    Call this before any build_collection() call so the download happens during
+    the generate step — not silently during the first ask() query.
+
+    Prints a one-time informational message only when the download is needed.
+    """
+    if _st_model_is_cached():
+        return  # Already on disk — no message needed
+    print(
+        "  ⬇  Downloading embedding model (~80 MB) on first use — "
+        "this is a one-time step."
+    )
+    # Trigger the actual download by loading the model
+    _load_st_model()
+
 
 def _load_st_model() -> Any:
     global _st_model
     if _st_model is None:
         try:
+            import os as _os
+            # Propagate offline / mirror env vars so the underlying library respects them.
+            # HF_ENDPOINT: custom Hugging Face mirror (e.g. for corporate proxies).
+            # TRANSFORMERS_OFFLINE=1: never attempt a download; raise if model not cached.
+            if "HF_ENDPOINT" in _os.environ:
+                _os.environ.setdefault("HF_ENDPOINT", _os.environ["HF_ENDPOINT"])
+            if _os.environ.get("TRANSFORMERS_OFFLINE") == "1":
+                if not _st_model_is_cached():
+                    raise RuntimeError(
+                        f"Embedding model '{_ST_MODEL_NAME}' is not cached and "
+                        "TRANSFORMERS_OFFLINE=1.\n"
+                        "Pre-download the model on a machine with internet access:\n"
+                        f"  python -c \"from sentence_transformers import SentenceTransformer; "
+                        f"SentenceTransformer('{_ST_MODEL_NAME}')\"\n"
+                        "Then copy the cache directory to this machine."
+                    )
             from sentence_transformers import SentenceTransformer
-            _st_model = SentenceTransformer("all-MiniLM-L6-v2")
+            _st_model = SentenceTransformer(_ST_MODEL_NAME)
         except ImportError as exc:
             raise ImportError(
                 "sentence-transformers is not installed and no other embedding backend "

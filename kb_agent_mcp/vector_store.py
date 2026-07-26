@@ -67,7 +67,17 @@ def _get_client():
         import chromadb
         index_path = cfg.kb_index_path / "chroma"
         index_path.mkdir(parents=True, exist_ok=True)
-        _client = chromadb.PersistentClient(path=str(index_path))
+        try:
+            _client = chromadb.PersistentClient(path=str(index_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"ChromaDB failed to open the index at {index_path}.\n"
+                "This can happen after a package upgrade if the index schema changed.\n"
+                "Fix: delete the index directory and re-run kb-agent-generate:\n"
+                f"  rm -rf \"{index_path}\"\n"
+                "  kb-agent-generate\n"
+                f"Original error: {exc}"
+            ) from exc
     return _client
 
 
@@ -361,13 +371,28 @@ async def search(
     return await asyncio.to_thread(_search_sync, domain, query, top_n)
 
 
-async def build_collection(domain: str, folder_path: str | pathlib.Path) -> int:
+async def build_collection(
+    domain: str,
+    folder_path: str | pathlib.Path | None = None,
+    progress_fn=None,
+) -> int:
     """
     Async: (Re)build the vector index for an entire domain folder.
-    Recursively walks *folder_path* and upserts all indexable files.
+    Recursively walks *folder_path* (defaults to KB_ROOT/domain) and upserts
+    all indexable files.  Records `indexed_at` timestamp in collection metadata
+    so the stale-index TTL cache in server.py can detect new files.
     Returns the count of files indexed.
+
+    Args:
+        domain:      Domain folder name.
+        folder_path: Absolute path to the domain folder (optional — defaults to
+                     KB_ROOT/domain when omitted).
+        progress_fn: Optional callable(current_idx, total, filename) invoked
+                     before each file is embedded.  Signature: (int, int, str) -> None.
     """
-    folder = pathlib.Path(folder_path)
+    import time as _time
+
+    folder = pathlib.Path(folder_path) if folder_path is not None else cfg.kb_root_path / domain
     count = 0
 
     async def _do_build() -> int:
@@ -378,10 +403,21 @@ async def build_collection(domain: str, folder_path: str | pathlib.Path) -> int:
             and f.suffix.lower() in INCLUDE_EXTS
             and not should_skip(f)
         ]
-        for file in files:
+        total = len(files)
+        for idx, file in enumerate(files, start=1):
+            if progress_fn is not None:
+                progress_fn(idx, total, file.name)
             updated = await upsert_file(domain, file)
             if updated:
                 count += 1
+
+        # Risk 11 — stamp the collection with the current time so the stale
+        # TTL cache in server.py can compare file mtimes against this value.
+        await asyncio.to_thread(
+            set_domain_metadata,
+            domain,
+            {"indexed_at": _time.time()},
+        )
         return count
 
     return await _do_build()

@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 from typing import Any
 
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.domain_agent import DomainAgent, build_all_domain_agents
+from kb_agent_mcp.base_agent import is_data_question as _is_data_q
 from kb_agent_mcp.memory import (
     get_history_sync,
     add_turn_sync,
@@ -242,12 +244,52 @@ async def _classify_intent(
         }
 
 
+# ── Passthrough context budget helpers (Risk 14) ──────────────────────────────
+
+def _estimate_context_size(n_domains: int, top_n: int, max_chars_per_domain: int) -> int:
+    """
+    Estimate total passthrough context chars before retrieval.
+
+    Formula: each domain can contribute up to (top_n * max_chars_per_domain) chars.
+    """
+    return n_domains * top_n * max_chars_per_domain
+
+
+def _adjusted_top_n(
+    n_domains: int,
+    top_n: int,
+    max_chars_per_domain: int,
+) -> tuple[int, str]:
+    """
+    Return (adjusted_top_n, budget_status).
+
+    budget_status:
+      ""          — within budget, no change
+      "narrowed"  — top_n was reduced to fit within threshold
+      "truncated" — even top_n=1 is over threshold (cannot help, warn user)
+    """
+    threshold = int(cfg.KB_BUDGET_PASSTHROUGH_THRESHOLD * cfg.KB_BUDGET_TOTAL)
+    estimated = _estimate_context_size(n_domains, top_n, max_chars_per_domain)
+
+    if estimated <= threshold:
+        return top_n, ""
+
+    # Try reducing top_n until we fit under threshold
+    for reduced in range(top_n - 1, 0, -1):
+        if _estimate_context_size(n_domains, reduced, max_chars_per_domain) <= threshold:
+            return reduced, "narrowed"
+
+    # Even top_n=1 is over threshold — can't reduce further
+    return 1, "truncated"
+
+
 # ── Passthrough block parser ───────────────────────────────────────────────────
 
 _PT_START = "<<<KB_PASSTHROUGH>>>"
 _PT_END   = "<<<KB_PASSTHROUGH_END>>>"
 
-def _unwrap_passthrough_blocks(raw: str) -> str:
+
+def _unwrap_passthrough_blocks(raw: str, budget_status: str = "") -> str:
     """
     Convert one or more <<<KB_PASSTHROUGH>>> blocks into clean markdown.
 
@@ -265,10 +307,30 @@ def _unwrap_passthrough_blocks(raw: str) -> str:
     if not blocks:
         return raw
 
-    sections: list[str] = [
-        "> **No local LLM detected.** Retrieved context is provided below — "
-        "use it to answer the question.\n"
+    # Header instruction block — explicit so any host AI model acts on it
+    header_parts = [
+        "**Instructions for the AI reading this:** "
+        "The user's KnowledgeBase MCP server is in passthrough mode (no local LLM). "
+        "The retrieved context below is the authoritative source of information. "
+        "Please read it carefully and answer the user's question directly, "
+        "citing the source where relevant. Do not say the context is unavailable.\n"
     ]
+
+    # Two-tier budget warning (Risk 14)
+    if budget_status == "narrowed":
+        header_parts.append(
+            "> ⚠ **Context narrowed:** Retrieved results were reduced to fit within "
+            "the passthrough context budget. For broader results, raise "
+            "`KB_BUDGET_TOTAL` or `KB_BUDGET_PASSTHROUGH_THRESHOLD` in your `.env`.\n"
+        )
+    elif budget_status == "truncated":
+        header_parts.append(
+            "> ⚠ **Context truncated:** Even with the minimum retrieval depth, the "
+            "estimated context exceeds the passthrough budget. Results may be incomplete. "
+            "Raise `KB_BUDGET_TOTAL` in your `.env` for better coverage.\n"
+        )
+
+    sections: list[str] = ["\n".join(header_parts)]
 
     for block in blocks:
         # Extract AGENT
@@ -296,6 +358,8 @@ def _unwrap_passthrough_blocks(raw: str) -> str:
 def _merge_answers(
     results: list[dict],
     agents: dict[str, DomainAgent],
+    question: str = "",
+    budget_status: str = "",
 ) -> str:
     found = [r for r in results if r.get("found")]
 
@@ -317,17 +381,58 @@ def _merge_answers(
             for r in found
             if r.get("passthrough")
         )
-        return _unwrap_passthrough_blocks(combined_raw)
+        return _unwrap_passthrough_blocks(combined_raw, budget_status=budget_status)
 
     if len(found) == 1:
         r = found[0]
-        return r["answer"] + (r.get("confidence_footer") or "")
+        answer = r["answer"] + (r.get("confidence_footer") or "")
+        if r.get("truncated") and _is_data_q(question):
+            answer += (
+                "\n\n> ⚠ **Note:** Source context was truncated to fit the budget. "
+                "For complete data, open the source file directly."
+            )
+        return answer
 
     merged = []
     for r in found:
         footer = r.get("confidence_footer") or ""
-        merged.append(f"### From {r['agent']}\n\n{r['answer']}{footer}")
+        answer = r["answer"] + footer
+        if r.get("truncated") and _is_data_q(question):
+            answer += (
+                "\n\n> ⚠ **Note:** Source context was truncated to fit the budget. "
+                "For complete data, open the source file directly."
+            )
+        merged.append(f"### From {r['agent']}\n\n{answer}")
     return "\n\n---\n\n".join(merged)
+
+
+# ── Stale-index warning ────────────────────────────────────────────────────────
+
+def _stale_warnings(domain_names: list[str], agents: dict) -> str:
+    """
+    Check queried domains for new unindexed files and return a warning string.
+
+    Threshold: warn only when new_files > max(1, floor(indexed * 0.05)).
+    This avoids noise on active folders while still alerting on meaningful growth.
+
+    Returns "" when everything is up-to-date — safe to append unconditionally.
+    """
+    warnings: list[str] = []
+    for name in domain_names:
+        agent = agents.get(name)
+        if agent is None:
+            continue
+        on_disk, indexed = agent.stale_file_count()
+        new_files = on_disk - indexed
+        threshold = max(1, math.floor(indexed * 0.05))
+        if new_files > threshold:
+            warnings.append(
+                f"⚠  **{name}**: {new_files} new file(s) detected since last index "
+                f"({indexed} → {on_disk}). Run `kb-agent-generate` to update."
+            )
+    if not warnings:
+        return ""
+    return "\n\n---\n\n" + "\n\n".join(warnings)
 
 
 # ── Main orchestrator function ─────────────────────────────────────────────────
@@ -352,10 +457,19 @@ async def ask(
     agents = await _get_agents()
 
     if not agents:
+        kb_root_hint = (
+            "\n\n⚠  **KB_ROOT may not be set correctly.**\n"
+            f"  Currently resolving to: `{cfg.kb_root_path}`\n"
+            "  If this is not your knowledge base, add `KB_ROOT` to your MCP "
+            "host config env block:\n"
+            '  `"env": { "KB_ROOT": "/absolute/path/to/your/KnowledgeBase" }`'
+            if not cfg.kb_root_is_explicit else
+            f"\n  KB_ROOT: `{cfg.kb_root_path}`"
+        )
         return (
             "No knowledge domains found. Run `kb-agent-generate` first to "
-            "discover folders and build the knowledge index.\n"
-            f"  KB_ROOT: {cfg.kb_root_path}"
+            "discover folders and build the knowledge index."
+            + kb_root_hint
         )
 
     # Detect format intent
@@ -380,9 +494,30 @@ async def ask(
             add_turn_sync(question, cq, session_id)
             return cq
 
+    # ── Passthrough budget reduction (Risk 14) ────────────────────────────────
+    from kb_agent_mcp.base_agent import is_passthrough as _is_passthrough
+    _passthrough = await _is_passthrough()
+    budget_status = ""
+    top_n_override: int | None = None
+
+    if _passthrough:
+        # Estimate context across all selected domains using representative config.
+        # Take the median top_n / max_chars across selected agents as the estimate.
+        selected_agents = [agents[n] for n in domain_names if n in agents]
+        if selected_agents:
+            avg_top_n    = max(1, round(sum(a.config.top_n    for a in selected_agents) / len(selected_agents)))
+            avg_max_chars = max(1, round(sum(a.config.max_chars for a in selected_agents) / len(selected_agents)))
+            adjusted, budget_status = _adjusted_top_n(
+                n_domains=len(selected_agents),
+                top_n=avg_top_n,
+                max_chars_per_domain=avg_max_chars,
+            )
+            if budget_status:
+                top_n_override = adjusted
+
     # Dispatch to selected domain agents in parallel
     tasks = [
-        agents[name].run(question, history, format_instruction)
+        agents[name].run(question, history, format_instruction, top_n_override=top_n_override)
         for name in domain_names
         if name in agents
     ]
@@ -391,7 +526,12 @@ async def ask(
 
     results = await asyncio.gather(*tasks, return_exceptions=False)
 
-    final_answer = _merge_answers(list(results), agents)
+    final_answer = _merge_answers(list(results), agents, question=question, budget_status=budget_status)
+
+    # Stale-index check: appends a warning if >5% new files are unindexed.
+    # The check is a lightweight dir-walk + ChromaDB count — no embedding needed.
+    final_answer += _stale_warnings(domain_names, agents)
+
     add_turn_sync(question, final_answer, session_id)
     return final_answer
 
@@ -399,8 +539,27 @@ async def ask(
 # ── list_domains helper ────────────────────────────────────────────────────────
 
 async def list_domains() -> list[dict]:
-    """Return a list of {folder_name, agent_name, description} for all domains."""
+    """Return a list of {folder_name, agent_name, description} for all domains.
+
+    When no domains exist, returns a single entry with a diagnostic message
+    so the caller (server.py list_domains tool) can surface the KB_ROOT hint.
+    """
     agents = await _get_agents()
+    if not agents:
+        return [{
+            "folder_name": "_no_domains",
+            "agent_name":  "—",
+            "description": (
+                "No domains indexed yet. Run `kb-agent-generate` to discover "
+                "knowledge folders under your KB_ROOT. "
+                + (
+                    f"KB_ROOT is currently defaulting to `{cfg.kb_root_path}` "
+                    "(not explicitly set — add KB_ROOT to your MCP host config env block)."
+                    if not cfg.kb_root_is_explicit else
+                    f"KB_ROOT: `{cfg.kb_root_path}`"
+                )
+            ),
+        }]
     return [
         {
             "folder_name": name,

@@ -44,6 +44,14 @@ kb-agent-serve --transport http --port 8765
 
 ## Installation
 
+> **Build tools required on macOS and Linux.**
+> `chromadb` compiles native C++ bindings at install time. Without the right tools
+> the `pip install` will fail with a cryptic compiler error.
+>
+> - **macOS:** `xcode-select --install`
+> - **Linux (Debian/Ubuntu):** `sudo apt install build-essential python3-dev`
+> - **Windows:** No extra steps needed.
+
 ```bash
 pip install kb-agent-mcp
 
@@ -69,7 +77,7 @@ Once the server is running, the following tools are available:
 |---|---|
 | `ask(question, format?, session_id?)` | Query all relevant domains and return a markdown answer |
 | `list_domains()` | List indexed knowledge domains with descriptions |
-| `reindex()` | Re-scan KB_ROOT and rebuild all ChromaDB indexes |
+| `reindex()` | Re-scan KB_ROOT and rebuild ChromaDB indexes. **Note:** New domain folders with no `domain_config.yaml` will not become queryable — run `kb-agent-generate` from the CLI first. |
 | `clear_memory(session_id?)` | Clear conversation history for a session |
 | `show_memory(session_id?)` | Show current session state and recent history |
 
@@ -81,6 +89,11 @@ ask("What is our Q3 revenue by product?", format="table")
 ask("Explain the architecture of CP4I", format="bullets")
 ask("How many deals closed last quarter?", session_id="my-session")
 ```
+
+> **Session isolation:** Omitting `session_id` uses the shared `"default"` session.
+> All callers on the same server share this session — earlier questions affect later
+> answers. For isolated conversations (multiple users, multiple windows), always pass
+> a unique `session_id` per user or conversation thread.
 
 ---
 
@@ -206,6 +219,7 @@ retrieval_rules:
 | `kb-agent-generate` | Build ChromaDB indexes + generate domain_config.yaml |
 | `kb-agent-serve` | Start the MCP server |
 | `kb-agent-watch` | Watch for file changes and auto-update indexes |
+| `kb-agent-doctor` | Run a health checklist to diagnose problems |
 
 ### kb-agent-generate flags
 
@@ -244,6 +258,13 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
+> **⚠ Two common gotchas:**
+> 1. **`KB_ROOT` is required** in the `"env"` block. Omitting it causes the server to
+>    index the wrong directory and return empty results for every query.
+> 2. **venv PATH:** If `kb-agent-serve` is not found, replace `"command": "kb-agent-serve"`
+>    with the absolute path — run `which kb-agent-serve` or check the setup wizard output.
+>    See [Troubleshooting](#troubleshooting) for details.
+
 ---
 
 ## Connecting to Bob
@@ -262,6 +283,13 @@ Bob will automatically load it. Configure the server in your Bob MCP settings wi
   "env": { "KB_ROOT": "/path/to/your/KnowledgeBase" }
 }
 ```
+
+> **⚠ Two common gotchas:**
+> 1. **`KB_ROOT` is required** in the `"env"` block. Omitting it causes the server to
+>    index the wrong directory and return empty results for every query.
+> 2. **venv PATH:** If `kb-agent-serve` is not found, replace `"command": "kb-agent-serve"`
+>    with the absolute path — run `which kb-agent-serve` or check the setup wizard output.
+>    See [Troubleshooting](#troubleshooting) for details.
 
 ---
 
@@ -292,6 +320,57 @@ Merging to `main` triggers the CI/CD pipeline, which automatically:
 4. Publishes to PyPI as `kb-agent-mcp`
 
 For a **minor** or **major** version bump (e.g. `0.2.0` or `1.0.0`), manually edit `version` in `pyproject.toml` in your PR before merging — CI will auto-bump the patch on top of it.
+
+---
+
+## Troubleshooting
+
+If something isn't working, run:
+
+```bash
+kb-agent-doctor
+```
+
+This command checks everything and prints a `✓` / `✗` report:
+
+| Check | What it verifies |
+|---|---|
+| Python version | 3.10 or later |
+| `KB_ROOT` set | env var present and directory exists |
+| Domain folders | at least one non-ignored subfolder under `KB_ROOT` |
+| `domain_config.yaml` | present per domain |
+| ChromaDB index | non-empty collection per domain |
+| Embedding model | `all-MiniLM-L6-v2` cached on disk |
+| LLM reachable | Ollama/OpenAI/Anthropic endpoint responds |
+| `kb-agent-serve` on PATH | absolute path shown if in venv |
+| Bob skill installed | `~/.bob/skills/knowledgebase-agent/SKILL.md` |
+
+Each failing item shows a one-line fix hint. Exit code 0 = healthy, 1 = fix needed.
+
+### Common issues
+
+**`KB_ROOT` not set** — Add it to your MCP host config `env` block:
+```json
+"env": { "KB_ROOT": "/absolute/path/to/your/KnowledgeBase" }
+```
+
+**`kb-agent-serve` not found** — If installed in a venv, use the absolute path:
+```bash
+which kb-agent-serve   # or: python -m kb_agent_mcp.server
+```
+
+**Empty answers / no domains** — Re-run `kb-agent-generate` after adding documents.
+
+**Stale index warning in answers** — You've added files since the last index. Run:
+```bash
+kb-agent-generate
+```
+
+**After upgrading (`pip install -U kb-agent-mcp`)** — If queries fail or ChromaDB throws an error after an upgrade, the index format may be incompatible. Delete the index and rebuild:
+```bash
+rm -rf /path/to/your/KnowledgeBase/.kb_index
+kb-agent-generate
+```
 
 ---
 

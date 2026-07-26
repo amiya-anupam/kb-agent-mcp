@@ -110,7 +110,7 @@ def test_unwrap_passthrough_single_block():
 
     assert "<<<KB_PASSTHROUGH>>>" not in result
     assert "<<<KB_PASSTHROUGH_END>>>" not in result
-    assert "No local LLM detected" in result
+    assert "passthrough mode" in result.lower() or "no local llm" in result.lower()
     assert "BizOps Agent" in result
     assert "BizOps/Revenue.xlsx" in result
     assert "Q1 revenue: $1.2M" in result

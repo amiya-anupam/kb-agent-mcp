@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pathlib
 import re
 import zipfile
@@ -35,6 +36,8 @@ from typing import Any
 
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.context_budget import get as _budget
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -436,8 +439,10 @@ def _extract_sync(path: pathlib.Path, max_chars: int) -> str:
         else:
             return f"[Unsupported format: {path.name}]"
     except FileNotFoundError:
+        logger.warning("File not found during extraction: %s", path)
         return f"[File not found: {path.name}]"
     except Exception as exc:
+        logger.warning("Failed to extract %s: %s", path.name, exc)
         return f"[Extract error ({ext}): {exc}] File: {path.name}"
 
 

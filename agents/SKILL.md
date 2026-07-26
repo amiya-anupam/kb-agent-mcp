@@ -5,15 +5,14 @@ description: >
   specialist sub-agent automatically based on your knowledge folders.
   Use when asking about any content in your KnowledgeBase.
 
-  Current domains (5):
+  Current domains (4):
   - **ACE Docs**: IBM App Connect Enterprise (ACE) and IBM Integration Bus (IIB) — product documentation, migration guides, purchasing options, architecture specs, and ACE revenue data
   - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) sales, renewal, and deployment resources.
   - **CP4I Docs**: Cloud Pak for Integration (CP4I) product documentation — architecture, deployment guides, capabilities, integration patterns, and IBM finance actuals for CP4I
-  - **kb_agent_mcp.egg-info**: A folder containing metadata and configuration files for a knowledge base agent system.
   - **skills**: Knowledge domain: skills
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  ace, app connect, app connect enterprise, ACE, renewal, sales, cp4i docs, cloud pak for integration docs, cp4i architecture, kb_agent_mcp, egg-info, metadata, skills, skills, what does my KnowledgeBase say, /kb, /agent
+  ace, app connect, app connect enterprise, ACE, renewal, sales, cp4i docs, cloud pak for integration docs, cp4i architecture, skills, skills, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -38,7 +37,6 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 - **ACE Docs**: IBM App Connect Enterprise (ACE) and IBM Integration Bus (IIB) — product documentation, migration guides, purchasing options, architecture specs, and ACE revenue data
 - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) sales, renewal, and deployment resources.
 - **CP4I Docs**: Cloud Pak for Integration (CP4I) product documentation — architecture, deployment guides, capabilities, integration patterns, and IBM finance actuals for CP4I
-- **kb_agent_mcp.egg-info**: A folder containing metadata and configuration files for a knowledge base agent system.
 - **skills**: Knowledge domain: skills
 
 ## Usage

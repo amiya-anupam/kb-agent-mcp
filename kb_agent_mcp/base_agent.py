@@ -450,11 +450,14 @@ async def ask(
         }
 
     texts = await asyncio.gather(*extract_tasks)
+    context_was_truncated = False
     for r, text in zip(valid_results, texts):
         context_blocks.append(
             f"--- Source: {r['name']} (relevance: {r.get('score', 0):.2f}) ---\n{text}"
         )
         sources.append({"name": r["name"], "path": r["path"], "score": r.get("score", 0.0)})
+        if text.endswith("…"):
+            context_was_truncated = True
 
     context = "\n\n".join(context_blocks)
 
@@ -495,6 +498,7 @@ async def ask(
         "confidence_footer": format_confidence_footer(sources),
         "found":             True,
         "passthrough":       False,
+        "truncated":         context_was_truncated,
     }
 
 
@@ -511,11 +515,22 @@ def _build_passthrough_block(
     agent_name: str,
     source_label: str,
 ) -> str:
+    """
+    Build a structured passthrough block containing all retrieved context.
+
+    The block is delimited by _PASSTHROUGH_MARKER / _PASSTHROUGH_END so the
+    orchestrator can detect and unwrap it.  The SYSTEM_PROMPT and QUESTION
+    fields are included so the unwrapper can emit explicit instructions to
+    whatever host AI (Claude, GPT, Bob) receives the MCP response.
+    """
     return (
         f"\n{_PASSTHROUGH_MARKER}\n"
         f"AGENT: {agent_name}\n"
         f"QUESTION: {question}\n"
         f"SOURCE: {source_label}\n"
+        f"INSTRUCTION: Answer the QUESTION above using ONLY the CONTEXT below. "
+        f"Cite the source file name. If the context does not contain the answer, "
+        f"say so clearly — do not guess.\n"
         f"SYSTEM_PROMPT:\n{system_prompt}\n"
         f"---CONTEXT---\n{context}\n"
         f"{_PASSTHROUGH_END}\n"

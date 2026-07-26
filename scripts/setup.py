@@ -27,6 +27,8 @@ import shutil
 import pathlib
 import subprocess
 import textwrap
+import urllib.request
+import urllib.error
 
 # scripts/ lives one level below the repo root — resolve upward so all
 # relative paths (.env, requirements.txt, agents/, etc.) stay correct.
@@ -77,6 +79,62 @@ def check_python():
     ok(f"Python {v.major}.{v.minor}.{v.micro}")
 
 
+# ── Build-tools pre-flight (for chromadb native bindings) ─────────────────────
+
+def _preflight_build_tools() -> str:
+    """Return a platform-specific fix hint for chromadb C++ build failures."""
+    if sys.platform == "darwin":
+        return "xcode-select --install"
+    if sys.platform.startswith("linux"):
+        return "sudo apt install build-essential python3-dev"
+    return ""
+
+
+def _print_build_hint(hint: str) -> None:
+    if hint:
+        warn("If chromadb install fails due to missing build tools, run:")
+        warn(f"  {hint}")
+
+
+# ── API-key preflight test ─────────────────────────────────────────────────────
+
+def _test_api_key(provider: str, base_url: str, api_key: str, model: str) -> None:
+    """Make a lightweight authenticated request to verify the key before .env is written.
+
+    Prints "API key verified ✓" on success.
+    Prints a warning on auth failure (HTTP 401/403).
+    Prints a notice (not a hard failure) when the network is unreachable.
+    Does not block setup if the test fails — a timeout is treated as a warning.
+    """
+    provider = provider.lower()
+    try:
+        if provider == "anthropic":
+            req = urllib.request.Request(
+                f"{base_url.rstrip('/')}/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+        else:
+            # OpenAI-compatible: list models endpoint
+            req = urllib.request.Request(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if resp.status < 300:
+                ok("API key verified ✓")
+                return
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            warn(f"API key test failed (HTTP {exc.code}). Double-check the key and try again.")
+        else:
+            warn(f"API key test returned HTTP {exc.code} — proceeding anyway.")
+    except Exception:
+        warn("API key test skipped (network unreachable or timeout) — proceeding.")
+
+
 # ── Step 2: pip install ───────────────────────────────────────────────────────
 
 def install_deps():
@@ -85,9 +143,13 @@ def install_deps():
     if not req.exists():
         warn("requirements.txt not found — skipping pip install")
         return
+    hint = _preflight_build_tools()
+    _print_build_hint(hint)
     rc = run([sys.executable, "-m", "pip", "install", "-r", str(req), "-q"])
     if rc != 0:
         err("pip install failed. Check the output above.")
+        if hint:
+            err(f"If the error mentions missing build tools, run:  {hint}")
         sys.exit(1)
     ok("Dependencies installed")
 
@@ -199,6 +261,7 @@ def choose_llm(yes: bool) -> dict:
     if sub == "b":
         key   = ask("OpenAI API key (sk-...)")
         model = ask("OpenAI model", "gpt-4o-mini")
+        _test_api_key("openai", "https://api.openai.com/v1", key, model)
         return {
             "KB_LLM_PROVIDER":  "openai",
             "KB_LLM_BASE_URL":  "https://api.openai.com/v1",
@@ -209,6 +272,7 @@ def choose_llm(yes: bool) -> dict:
     elif sub == "c":
         key   = ask("Anthropic API key")
         model = ask("Anthropic model", "claude-3-5-haiku-20241022")
+        _test_api_key("anthropic", "https://api.anthropic.com", key, model)
         return {
             "KB_LLM_PROVIDER":  "anthropic",
             "KB_LLM_BASE_URL":  "https://api.anthropic.com",
@@ -238,15 +302,57 @@ def choose_llm(yes: bool) -> dict:
 
 # ── Step 5: write .env ────────────────────────────────────────────────────────
 
+def _read_env_key(env_path: pathlib.Path, key: str) -> str | None:
+    """Return the current value of `key` from an existing .env file, or None."""
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith(f"{key}="):
+            return line[len(key) + 1:].strip()
+    return None
+
+
 def setup_env(kb_root: pathlib.Path, llm_settings: dict):
     hdr("⑤ Configuring environment (.env)")
     env_path     = SCRIPT_DIR / ".env"
     example_path = SCRIPT_DIR / ".env.example"
 
     if env_path.exists():
-        ok(".env already exists — keeping it")
+        ok(".env already exists — keeping existing values")
         # Always patch KB_ROOT in case the repo was moved
         _patch_kb_root(env_path, kb_root)
+        # 2.5 — Check if the user chose a different LLM provider than what's in .env
+        new_provider = llm_settings.get("KB_LLM_PROVIDER", "")
+        old_provider = _read_env_key(env_path, "KB_LLM_PROVIDER") or ""
+        if new_provider and old_provider and new_provider != old_provider:
+            try:
+                ans = ask(
+                    f"Your .env has KB_LLM_PROVIDER={old_provider}. "
+                    f"Update it to {new_provider}? [y/N]", "N"
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+                print()
+            if ans == "y":
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+
+                def _set(k: str, v: str):
+                    new_lines, found = [], False
+                    for ln in lines:
+                        stripped = ln.lstrip("# ")
+                        if stripped.startswith(f"{k}=") or ln.startswith(f"{k}="):
+                            new_lines.append(f"{k}={v}")
+                            found = True
+                        else:
+                            new_lines.append(ln)
+                    if not found:
+                        new_lines.append(f"{k}={v}")
+                    lines[:] = new_lines
+
+                for k, v in llm_settings.items():
+                    _set(k, v)
+                env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                ok(f"LLM settings updated to provider={new_provider}")
+            else:
+                info(f"Keeping existing provider={old_provider}")
         return
 
     if not example_path.exists():
@@ -399,6 +505,10 @@ def install_install_skill():
 def print_done(kb_root: pathlib.Path):
     skill         = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-agent" / "SKILL.md"
     install_skill = pathlib.Path.home() / ".bob" / "skills" / "knowledgebase-install" / "SKILL.md"
+    # 2.4 — Resolve absolute path to kb-agent-serve (venv-aware)
+    serve_cmd = shutil.which("kb-agent-serve") or str(
+        pathlib.Path(sys.prefix) / "bin" / "kb-agent-serve"
+    )
     hdr("✅  Setup complete!")
     print()
     if skill.exists():
@@ -416,6 +526,13 @@ def print_done(kb_root: pathlib.Path):
     else:
         print("  Bob not detected. You can still use the CLI:")
         print(f"    python3 agents/agent_knowledgebase.py \"your question\"")
+    print()
+    print("  MCP host config (ready to paste):")
+    print("    Claude Desktop → claude_desktop_config.json:")
+    print('      "kb-agent-mcp": {')
+    print(f'        "command": "{serve_cmd}",')
+    print(f'        "env": {{ "KB_ROOT": "{kb_root}" }}')
+    print('      }')
     print()
     print("  To add more documents:")
     print(f"    1. Drop files into a folder inside {kb_root}/")

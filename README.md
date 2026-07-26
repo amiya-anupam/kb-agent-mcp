@@ -39,6 +39,8 @@ If you want to contribute, run the legacy CLI, or build from source — follow t
 | Python 3.10+ | `python3 --version` | Download from https://python.org/downloads |
 | git | `git --version` | Download from https://git-scm.com |
 | ~500 MB free disk space | — | Free up space or choose a smaller install location |
+| Build tools (macOS) | `xcode-select -p` | Run `xcode-select --install` if not found |
+| Build tools (Linux) | `gcc --version` | Run `sudo apt install build-essential python3-dev` |
 
 > **LLM is optional.** The agent works in passthrough mode with no local model installed.
 > Bob's Claude (or whatever AI tool is driving this) answers questions using retrieved context.
