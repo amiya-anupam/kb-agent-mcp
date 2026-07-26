@@ -7,14 +7,13 @@ name = "kb-agent-mcp"
 version = "0.1.0"
 description = "A zero-config MCP server that turns any folder of documents into a queryable multi-agent knowledge base"
 readme = "README-MCP.md"
-license = { text = "MIT" }
+license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "KnowledgeBase Agent Contributors" }]
 keywords = ["mcp", "ai", "knowledge-base", "rag", "agents", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",

@@ -282,6 +282,19 @@ pytest tests/ -q
 
 ---
 
+## Releasing
+
+Merging to `main` triggers the CI/CD pipeline, which automatically:
+
+1. Bumps the **patch** version in `pyproject.toml` (e.g. `0.1.0` → `0.1.1`)
+2. Commits the bump back to `main` with `[skip ci]` to prevent re-triggering
+3. Builds the wheel + source distribution
+4. Publishes to PyPI as `kb-agent-mcp`
+
+For a **minor** or **major** version bump (e.g. `0.2.0` or `1.0.0`), manually edit `version` in `pyproject.toml` in your PR before merging — CI will auto-bump the patch on top of it.
+
+---
+
 ## License
 
 MIT
