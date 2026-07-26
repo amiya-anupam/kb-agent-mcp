@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import pathlib
 from typing import TypedDict
 
@@ -43,6 +44,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.embeddings import embed as _async_embed, _embed_sync
 from kb_agent_mcp.file_parser import INCLUDE_EXTS, should_skip, snippet as _snippet
+
+logger = logging.getLogger(__name__)
 
 
 # ── Types ─────────────────────────────────────────────────────────────────────
@@ -230,8 +233,8 @@ def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
         existing = col.get(ids=[doc_id], include=["metadatas"])
         if existing["metadatas"] and existing["metadatas"][0].get("hash") == current_hash:
             return False  # unchanged
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Hash-check for %s failed (%s); will re-index", doc_id, exc)
 
     # Extract snippet and embed
     text = _snippet(file_path, max_chars=2000)
@@ -314,7 +317,8 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
             ))
         return results
 
-    except Exception:
+    except Exception as exc:
+        logger.warning("Vector search for domain %r failed (%s); using keyword fallback", domain, exc)
         return _keyword_fallback(domain, query, top_n, all_docs)
 
 

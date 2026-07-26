@@ -273,3 +273,6 @@ class Config:
 
 # ── Module-level singleton ─────────────────────────────────────────────────────
 cfg = Config()
+
+# ── Shared API constants ───────────────────────────────────────────────────────
+ANTHROPIC_API_VERSION = "2023-06-01"

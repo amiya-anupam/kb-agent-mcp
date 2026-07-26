@@ -20,6 +20,7 @@ With --fix: attempts to auto-repair fixable failures, then re-runs all checks.
 """
 from __future__ import annotations
 
+import argparse
 import shutil
 import subprocess
 import sys
@@ -525,7 +526,3 @@ def main() -> None:
     sys.exit(run_doctor(fix=args.fix))
 
 
-import argparse  # noqa: E402 — imported here to keep it out of module-level scope used in tests
-
-if __name__ == "__main__":
-    main()

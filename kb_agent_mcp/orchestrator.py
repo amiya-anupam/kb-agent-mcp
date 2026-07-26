@@ -235,7 +235,8 @@ async def _classify_intent(
             "needs_clarification":    data.get("needs_clarification", False),
             "clarification_question": data.get("clarification_question", ""),
         }
-    except Exception:
+    except Exception as exc:
+        logger.warning("LLM domain-routing failed (%s); falling back to keywords", exc)
         kw_matches, _ = _keyword_confidence(question, agents)
         return {
             "domains":                kw_matches or ([fallback] if fallback else []),

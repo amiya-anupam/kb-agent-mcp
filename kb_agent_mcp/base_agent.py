@@ -27,7 +27,7 @@ from pathlib import Path
 
 import httpx
 
-from kb_agent_mcp.config import cfg
+from kb_agent_mcp.config import cfg, ANTHROPIC_API_VERSION
 from kb_agent_mcp.context_budget import (
     trim as _cb_trim,
     build_context as _cb_build_context,
@@ -61,7 +61,8 @@ async def _check_passthrough() -> bool:
         async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(f"{cfg.KB_LLM_BASE_URL}/api/tags")
             return r.status_code >= 400
-    except Exception:
+    except Exception as exc:
+        logger.debug("Ollama reachability check failed (%s); treating as passthrough", exc)
         return True  # unreachable → passthrough
 
 
@@ -288,7 +289,7 @@ def _call_anthropic_sync(messages: list[dict], temperature: float) -> str:
             chat_messages.append(m)
     headers = {
         "x-api-key":         cfg.KB_API_KEY,
-        "anthropic-version": "2023-06-01",
+        "anthropic-version": ANTHROPIC_API_VERSION,
         "Content-Type":      "application/json",
     }
     payload: dict = {
@@ -417,7 +418,7 @@ async def ask(
         results = pre_ranked_results
     else:
         from kb_agent_mcp.vector_store import search as _vs_search
-        results = await _vs_search(question, folder_name, top_n=top_n)
+        results = await _vs_search(folder_name, question, top_n=top_n)
 
     if not results:
         return {

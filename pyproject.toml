@@ -14,6 +14,7 @@ keywords = ["mcp", "ai", "knowledge-base", "rag", "agents", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -54,6 +55,11 @@ dev = [
     "build>=1.0.0",
     "twine>=5.0.0",
 ]
+
+[project.urls]
+Homepage      = "https://github.com/amiya-anupam/kb-agent-mcp"
+Repository    = "https://github.com/amiya-anupam/kb-agent-mcp"
+"Bug Tracker" = "https://github.com/amiya-anupam/kb-agent-mcp/issues"
 
 # ── CLI entry points ───────────────────────────────────────────────────────────
 [project.scripts]

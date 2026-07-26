@@ -131,7 +131,7 @@ def _llm_available() -> bool:
 
 
 def _call_llm_sync(prompt: str) -> str:
-    from kb_agent_mcp.config import cfg
+    from kb_agent_mcp.config import cfg, ANTHROPIC_API_VERSION
     messages = [{"role": "user", "content": prompt}]
 
     provider = cfg.KB_LLM_PROVIDER.lower()
@@ -139,7 +139,7 @@ def _call_llm_sync(prompt: str) -> str:
     if provider == "anthropic":
         r = httpx.post(
             f"{cfg.KB_LLM_BASE_URL}/v1/messages",
-            headers={"x-api-key": cfg.KB_API_KEY, "anthropic-version": "2023-06-01",
+            headers={"x-api-key": cfg.KB_API_KEY, "anthropic-version": ANTHROPIC_API_VERSION,
                      "Content-Type": "application/json"},
             json={"model": cfg.KB_MODEL, "max_tokens": 1024, "temperature": 0.1,
                   "messages": messages},

@@ -332,3 +332,53 @@ class TestBug6RequirementsTxt:
         assert pkg.lower() in content, (
             f"'{pkg}' is missing from requirements.txt"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CODE-QUALITY H1 — base_agent.py Strategy-2 RAG: swapped args to search()
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestH1BaseAgentStrategy2ArgOrder:
+    """base_agent.ask() Strategy-2 path must call search(domain, query) not search(query, domain)."""
+
+    @pytest.mark.asyncio
+    async def test_strategy2_passes_folder_name_as_first_arg(self, tmp_path):
+        """When no README exists, ask() falls through to Strategy-2 vector search.
+        The domain arg (folder_name) must be first, query (question) second."""
+        import kb_agent_mcp.vector_store as vs_mod
+        import kb_agent_mcp.base_agent as ba_mod
+
+        folder_name = "TestDomain"
+        question    = "How many licenses were sold?"
+        captured: list[tuple] = []
+
+        async def fake_search(domain, query, top_n=4):
+            captured.append((domain, query, top_n))
+            return []  # empty → ask() returns "could not find" response
+
+        # Patch: no README found (returns empty string), not passthrough, use Strategy-2
+        original_search = vs_mod.search
+        vs_mod.search = fake_search
+        try:
+            with (
+                patch.object(ba_mod, "_get_readme_context", return_value=("", "")),
+                patch.object(ba_mod, "is_passthrough", new=AsyncMock(return_value=False)),
+            ):
+                await ba_mod.ask(
+                    question=question,
+                    folder_name=folder_name,
+                    agent_name="Test Agent",
+                    system_prompt="You are a test agent.",
+                    pre_ranked_results=None,
+                )
+        finally:
+            vs_mod.search = original_search
+
+        assert len(captured) == 1, "search() should be called exactly once in Strategy-2"
+        called_domain, called_query, _ = captured[0]
+        assert called_domain == folder_name, (
+            f"First arg must be domain ('{folder_name}'), got '{called_domain}'"
+        )
+        assert called_query == question, (
+            f"Second arg must be question ('{question}'), got '{called_query}'"
+        )

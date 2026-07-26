@@ -21,12 +21,15 @@ automatically on the next access.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import asyncio
 from pathlib import Path
 
 from kb_agent_mcp.config import cfg
+
+logger = logging.getLogger(__name__)
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
@@ -59,7 +62,8 @@ def _load_sync(session_id: str) -> dict:
         if elapsed > cfg.KB_SESSION_TIMEOUT_HOURS * 3600:
             return _empty_session()
         return data
-    except Exception:
+    except (json.JSONDecodeError, ValueError, OSError) as exc:
+        logger.warning("Failed to load session %r (%s); starting fresh", session_id, exc)
         return _empty_session()
 
 

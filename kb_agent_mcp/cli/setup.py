@@ -169,6 +169,7 @@ def _test_api_key(provider: str, base_url: str, api_key: str, model: str) -> boo
     """
     import urllib.request
     import urllib.error
+    from kb_agent_mcp.config import ANTHROPIC_API_VERSION
 
     provider = provider.lower()
     try:
@@ -177,7 +178,7 @@ def _test_api_key(provider: str, base_url: str, api_key: str, model: str) -> boo
                 f"{base_url.rstrip('/')}/v1/models",
                 headers={
                     "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
+                    "anthropic-version": ANTHROPIC_API_VERSION,
                 },
             )
         else:
