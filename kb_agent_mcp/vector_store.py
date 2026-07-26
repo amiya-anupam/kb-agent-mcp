@@ -137,7 +137,11 @@ def collection_exists(domain: str) -> bool:
     try:
         client.get_collection(_safe_name(domain))
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "collection_exists check for domain %r failed (%s); returning False",
+            domain, exc,
+        )
         return False
 
 
@@ -179,7 +183,11 @@ def set_domain_metadata(domain: str, metadata: dict) -> None:
     try:
         col = client.get_collection(safe)
         col.modify(metadata=flat)
-    except Exception:
+    except Exception as exc:
+        logger.debug(
+            "Metadata modify failed for domain %r (%s); falling back to get_or_create",
+            domain, exc,
+        )
         client.get_or_create_collection(safe, metadata=flat)
 
 
@@ -196,10 +204,17 @@ def get_domain_metadata(domain: str) -> dict | None:
             if isinstance(v, str) and v.startswith(("[", "{")):
                 try:
                     meta[k] = _json.loads(v)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug(
+                        "JSON decode failed for metadata key %r in domain %r (%s)",
+                        k, domain, exc,
+                    )
         return meta
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "get_domain_metadata for domain %r failed (%s); returning None",
+            domain, exc,
+        )
         return None
 
 
@@ -208,8 +223,11 @@ def delete_collection(domain: str) -> None:
     client = _get_client()
     try:
         client.delete_collection(_safe_name(domain))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "delete_collection for domain %r failed (%s); collection may still exist",
+            domain, exc,
+        )
 
 
 # ── Sync upsert / delete (used internally and by CLI tools) ──────────────────
@@ -261,8 +279,11 @@ def _delete_file_sync(domain: str, file_path: pathlib.Path) -> None:
     doc_id = _file_id(file_path)
     try:
         col.delete(ids=[doc_id])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(
+            "Failed to delete file %s from domain %r index (%s)",
+            file_path, domain, exc,
+        )
 
 
 # ── Sync search (used by base_agent via thread pool) ─────────────────────────
@@ -279,7 +300,11 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
     # sklearn for compatibility with mixed embedding dimensions)
     try:
         all_docs = col.get(include=["embeddings", "documents", "metadatas"])
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "ChromaDB get() failed for domain %r query %r (%s); returning empty results",
+            domain, query, exc,
+        )
         return []
 
     if not all_docs["ids"]:

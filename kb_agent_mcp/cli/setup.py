@@ -21,12 +21,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import textwrap
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────
@@ -196,7 +200,8 @@ def _test_api_key(provider: str, base_url: str, api_key: str, model: str) -> boo
             return False
         else:
             warn(f"API key test returned HTTP {exc.code} — proceeding anyway.")
-    except Exception:
+    except Exception as exc:
+        logger.warning("API key test failed (%s); treating as passing (network may be down)", exc)
         warn("API key test skipped (network unreachable or timeout) — proceeding.")
     return True  # non-auth failures are treated as passing (network may be down)
 
@@ -488,7 +493,8 @@ def _copy_to_clipboard(text: str) -> bool:
             _sp.run(cmd, input=text.encode(), check=True,
                     stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
             return True
-        except Exception:
+        except Exception as exc:
+            logger.debug("Editor candidate failed (%s); trying next", exc)
             continue
     return False
 
@@ -540,8 +546,8 @@ def run_generate(yes: bool) -> list[str]:
                         kws = data.get("keywords", [])
                         if len(kws) <= 1:
                             minimal_domains.append(entry.name)
-        except Exception:
-            pass  # non-fatal — keyword editor is optional
+        except Exception as exc:
+            logger.warning("Failed to scan domains for minimal YAML detection (%s); skipping keyword editor pre-check", exc)
     return minimal_domains
 
 
@@ -600,7 +606,8 @@ def _kw_editor_prompt(domain_name: str, current: list[str]) -> list[str] | None:
             return None
         return [k.strip() for k in raw.split(",") if k.strip()]
 
-    except Exception:
+    except Exception as exc:
+        logger.debug("Rich keyword editor failed (%s); falling back to plain input", exc)
         # Plain fallback (Rich unavailable or tty issue)
         print(f"\n{_DIVIDER}")
         print(f"  📁 {domain_name}/  (current: {', '.join(current) or '(none)'})")

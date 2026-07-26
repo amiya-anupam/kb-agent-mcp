@@ -11,6 +11,7 @@ calls `domain_agent.run(question, history, format_instruction)`.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING
 
 from kb_agent_mcp.config import cfg
@@ -26,6 +27,8 @@ from kb_agent_mcp.domain_rules import (
 
 if TYPE_CHECKING:
     pass
+
+logger = logging.getLogger(__name__)
 
 
 # ── Format instruction helpers ─────────────────────────────────────────────────
@@ -139,7 +142,11 @@ class DomainAgent:
             col = get_or_create_collection(self.folder_name)
             files_indexed = col.count()
             return files_on_disk, files_indexed
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "stale_file_count for domain %r failed (%s); returning (0, 0)",
+                self.folder_name, exc,
+            )
             return 0, 0
 
     # ── Internal helpers ───────────────────────────────────────────────────────

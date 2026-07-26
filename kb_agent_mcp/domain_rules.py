@@ -32,6 +32,7 @@ All fields are optional — sensible defaults are used when absent.
 from __future__ import annotations
 
 import fnmatch
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,8 @@ except ImportError:
     _HAS_YAML = False
 
 from kb_agent_mcp.config import cfg
+
+logger = logging.getLogger(__name__)
 
 
 # ── Domain config dataclass ────────────────────────────────────────────────────
@@ -116,7 +119,8 @@ def _parse_yaml(text: str) -> dict[str, Any]:
         try:
             result = _yaml.safe_load(text)
             return result if isinstance(result, dict) else {}
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to parse YAML (%s); returning empty config", exc)
             return {}
     # Minimal fallback: key: value pairs only (no nested keys)
     data: dict[str, Any] = {}
@@ -139,7 +143,11 @@ def load_domain_config(folder_name: str) -> DomainConfig | None:
         return None
     try:
         raw = _parse_yaml(config_path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "Failed to read domain config at %s (%s); skipping domain",
+            config_path, exc,
+        )
         return None
     return _build_config(folder_name, raw)
 
@@ -208,7 +216,11 @@ def apply_pin_rules(
         folder_path = cfg.kb_root_path / folder_name
         try:
             all_files = list(folder_path.rglob("*"))
-        except Exception:
+        except Exception as exc:
+            logger.debug(
+                "rglob failed on %s when applying pin rules (%s); skipping pins",
+                folder_path, exc,
+            )
             all_files = []
         for fpath in all_files:
             if not fpath.is_file():

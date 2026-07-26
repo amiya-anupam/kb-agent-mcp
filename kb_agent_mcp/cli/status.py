@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -25,6 +26,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 from rich import box
+
+logger = logging.getLogger(__name__)
 
 # ── Stale threshold constant ───────────────────────────────────────────────────
 # Doctor uses 7 days; keep them in sync by centralising the constant here and
@@ -103,7 +106,8 @@ def _domain_row(domain_name: str, kb_root: Path) -> dict:
                     indexed_str = f"{age_days}d ago"
             elif doc_count > 0:
                 indexed_str = "indexed"
-        except Exception:
+        except Exception as exc:
+            logger.debug("indexed_at timestamp parse failed for %r (%s)", domain_name, exc)
             if doc_count and doc_count > 0:
                 indexed_str = "indexed"
 
@@ -116,8 +120,8 @@ def _domain_row(domain_name: str, kb_root: Path) -> dict:
 
     except RuntimeError:
         status_icon, status_text = "✗", "DB mismatch"
-    except Exception:
-        pass  # not indexed yet — defaults stand
+    except Exception as exc:
+        logger.debug("Domain status check for %r failed (%s); defaults used", domain_name, exc)
 
     return {
         "name":         domain_name,
@@ -144,8 +148,8 @@ def _system_info() -> dict:
         embed_label = f"{_ST_MODEL_NAME} ({'cached' if cached else 'not cached'})"
         if cfg.KB_EMBED_MODEL:
             embed_label = cfg.KB_EMBED_MODEL
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Failed to read embedding model info (%s); using default label", exc)
 
     # Reuse doctor's path logic
     serve_path: str | None = None
@@ -242,7 +246,8 @@ def _get_indexed_file_hashes(domain_name: str) -> dict[str, str]:
                 if path_key:
                     hashes[path_key] = file_hash
         return hashes
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to read indexed file hashes for %r (%s); returning empty", domain_name, exc)
         return {}
 
 
@@ -304,8 +309,8 @@ def _diff_domain(domain_name: str, kb_root: Path) -> dict:
                         except ValueError:
                             pass
                     break
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Diff computation for %r failed (%s); skipping stale/missing detection", domain_name, exc)
 
     missing: list[Path] = []
     stale:   list[Path] = []

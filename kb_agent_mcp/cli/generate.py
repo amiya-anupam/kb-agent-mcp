@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import sys
 import textwrap
@@ -29,6 +30,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # ── Config is loaded lazily inside each function so KB_ROOT from .env is used ──
 
@@ -126,7 +129,8 @@ def _llm_available() -> bool:
         else:
             r = httpx.get(cfg.KB_LLM_BASE_URL.rstrip("/"), timeout=5.0)
         return r.status_code < 500
-    except Exception:
+    except Exception as exc:
+        logger.debug("LLM availability check failed (%s); treating as unavailable", exc)
         return False
 
 

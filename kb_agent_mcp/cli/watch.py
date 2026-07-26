@@ -224,7 +224,8 @@ class _KBWatcher:
                 e.name for e in self.kb_root.iterdir()
                 if e.is_dir() and not cfg.is_ignored(e.name)
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("Failed to enumerate KB_ROOT for new folder detection (%s); skipping domain scan", exc)
             return
 
         new_folders     = entries - self._known_folders

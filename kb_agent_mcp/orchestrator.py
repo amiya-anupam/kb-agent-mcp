@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 from typing import Any
@@ -37,6 +38,9 @@ from kb_agent_mcp.memory import (
     get_history_sync,
     add_turn_sync,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ── Orchestrator singleton (loaded lazily, refreshed by reindex) ───────────────

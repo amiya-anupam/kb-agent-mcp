@@ -22,6 +22,7 @@ All config from kb_agent_mcp.config.cfg.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 
@@ -34,6 +35,8 @@ from kb_agent_mcp.context_budget import (
     get as _cb_get,
 )
 from kb_agent_mcp.file_parser import extract as _extract_file
+
+logger = logging.getLogger(__name__)
 
 
 # ── Passthrough detection ──────────────────────────────────────────────────────
@@ -138,7 +141,8 @@ def _find_readme(folder: Path) -> Path | None:
     """
     try:
         md_files = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() == ".md"]
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to list markdown files in %s (%s); no README available", folder, exc)
         return None
     if not md_files:
         return None
@@ -154,7 +158,8 @@ def _find_readme(folder: Path) -> Path | None:
             head = f.read_text(encoding="utf-8", errors="ignore")[:500]
             if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
                 return f
-        except Exception:
+        except Exception as exc:
+            logger.debug("Could not read candidate README %s (%s); skipping", f, exc)
             continue
     return md_files[0]
 
@@ -193,7 +198,8 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 
     try:
         text = readme.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    except Exception as exc:
+        logger.debug("Failed to read README %s (%s); skipping README-first strategy", readme, exc)
         return None, ""
 
     if _non_index_chars(text) < _cb_get("min_readme"):

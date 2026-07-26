@@ -21,6 +21,7 @@ With --fix: attempts to auto-repair fixable failures, then re-runs all checks.
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import subprocess
 import sys
@@ -28,6 +29,8 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 from kb_agent_mcp.config import Config  # imported at module level so tests can patch it
+
+logger = logging.getLogger(__name__)
 
 # Stale-index threshold in days — shared with status.py
 STALE_DAYS = 7
@@ -218,8 +221,8 @@ def _check_chroma_collections(domains: list[str]) -> list[CheckResult]:
         )
         return [CheckResult("chromadb_mismatch", False, _fix_chroma_mismatch)]
 
-    except Exception:
-        pass  # non-RuntimeError errors handled per-collection below
+    except Exception as exc:
+        logger.warning("ChromaDB client check raised unexpected error (%s); continuing per-collection", exc)
 
     results = []
     for name in domains:
@@ -278,7 +281,8 @@ def _check_chroma_collections(domains: list[str]) -> list[CheckResult]:
                     )
                     results.append(CheckResult(f"chroma_empty:{name}", False, _fix_empty))
                     continue
-            except Exception:
+            except Exception as exc:
+                logger.debug("indexed_at metadata parse failed for collection %r (%s)", name, exc)
                 if count > 0:
                     _pass(f"ChromaDB index: {name}/  ({count} documents)")
                 else:

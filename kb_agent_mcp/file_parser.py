@@ -174,7 +174,8 @@ def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
                         "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", ""
                     )
                     sheet_names.append((s.get("name", r_id), r_id))
-            except Exception:
+            except Exception as exc:
+                logger.debug("Failed to parse xl/workbook.xml (%s); using default sheet name", exc)
                 sheet_names = [("Sheet1", "rId1")]
 
             rid_to_path: dict[str, str] = {}
@@ -182,8 +183,8 @@ def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
                 rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
                 for rel in rels:
                     rid_to_path[rel.get("Id", "")] = "xl/" + rel.get("Target", "").lstrip("/")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to parse xl/_rels/workbook.xml.rels (%s); sheet paths unavailable", exc)
 
             # ── Load shared strings ───────────────────────────────────────────
             shared: list[str] = []
@@ -193,8 +194,8 @@ def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
                 for si in ss_xml.findall("w:si", ns_ss):
                     parts = [t.text or "" for t in si.findall(".//w:t", ns_ss)]
                     shared.append("".join(parts))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to parse xl/sharedStrings.xml (%s); string values may be missing", exc)
 
             def cell_value(cell_el: Any) -> Any:
                 t = cell_el.get("t", "")
