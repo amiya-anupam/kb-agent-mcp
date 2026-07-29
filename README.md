@@ -414,69 +414,89 @@ The watcher automatically checks all indexed files against a configurable age th
 
 ## Architecture
 
-> For the complete technical reference — call graphs, security model, every decision tree, all environment variables — see **[ARCHITECTURE.md](ARCHITECTURE.md)** (18 sections, ground-truth from source).
+> For the complete technical reference — module descriptions, call graphs, data-flow diagrams, and all environment variables — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
-### Component map
+### System overview
+
+The `kb-agent-mcp` package exposes **two independent pipelines** through a single MCP server:
+
+```
+AI tool (Claude, Bob, Cursor, …)
+        │   MCP protocol
+        ▼
+┌───────────────────────────────────────────────────────────────┐
+│  server.py  (FastMCP — 9 tools)                               │
+├──────────────────────────┬────────────────────────────────────┤
+│  Knowledge Base (5)      │  Data Analyst (4) — NEW            │
+│  ask()                   │  analyze_file()                    │
+│  list_domains()          │  suggest_questions()               │
+│  reindex()               │  query_data()                      │
+│  clear_memory()          │  refine_query()                    │
+│  show_memory()           │                                    │
+└──────────┬───────────────┴──────────────┬─────────────────────┘
+           │                              │
+           ▼                              ▼
+  ┌─────────────────┐          ┌──────────────────────┐
+  │ orchestrator.py │          │ analyst/             │
+  │ route→dispatch  │          │   inspector.py       │
+  │ keyword+LLM     │          │   planner.py         │
+  └────────┬────────┘          │   engine.py          │
+           │                   │   session.py         │
+           ▼                   └──────────┬───────────┘
+  ┌─────────────────┐                     │
+  │ domain_agent.py │          loads file data live
+  │ base_agent.py   │          (no ChromaDB needed)
+  │ vector_store.py │
+  │ ChromaDB index  │
+  └─────────────────┘
+```
+
+**RAG pipeline** (left) — uses the vector index. Best for semantic questions:
+_"What is IBM ACE?" · "Explain the CP4I architecture" · "What are the migration steps?"_
+
+**Data Analyst pipeline** (right) — loads raw files and computes. Best for data questions:
+_"Top 10 customers by revenue in FY2025" · "Which accounts churned?" · "Revenue breakdown by region"_
+
+### Component map (pip-installed MCP server)
 
 ```
 +---------------------------------------------------------------+
 |  CLOUD  [internet required]                                   |
 |                                                               |
-|  Bob's Claude (or any AI tool)                                |
-|    - detects skill trigger from your question                 |
-|    - runs agent_knowledgebase.py (subprocess, for agent)      |
-|    - relays the answer back to you                            |
+|  Any AI tool (Claude, Bob, Cursor, …)                         |
+|    - calls MCP tools via the protocol                         |
 |    - passthrough mode: answers using retrieved context        |
 +---------------------------------------------------------------+
-         |  subprocess / execute_command        ^  stdout
+         |  MCP protocol (stdio or HTTP/SSE)    ^  tool response
          v                                      |
 +---------------------------------------------------------------+
 |  YOUR MACHINE  [fully offline once set up]                    |
 |                                                               |
-|  agent_knowledgebase.py  (orchestrator)                       |
-|    reads domain_meta.json to discover all domains             |
-|    detect_format_intent() -- --format flag or NL              |
-|    keyword_route() + _keyword_confidence()                    |
-|      fast match, no LLM; confident if 1 domain >= 2 hits OR  |
-|      one domain has >=3x hits of any other (dominant-match)   |
-|    classify_intent() -- local LLM only if keyword ambiguous   |
-|    call_sub_agent() -- loads agents/agent_<domain>.py via     |
-|      importlib; falls back to agent_base.ask() if no file     |
-|    run_agents_parallel() -- ThreadPoolExecutor fan-out        |
+|  kb-agent-serve  (server.py / FastMCP)                        |
+|    9 registered tools — 5 KB core + 4 Data Analyst            |
 |                                                               |
-|  agent_base.py  (shared RAG logic)                            |
-|    _apply_format_instruction() — appends OUTPUT FORMAT        |
-|      DIRECTIVE to system_prompt (imported by sub-agents too)  |
-|    Data-question bypass: _is_data_question() skips README     |
-|      for numeric/revenue/breakdown questions → RAG directly   |
-|    Strategy 1: README-first  (primary, non-data questions)    |
-|      reads <Folder>/README.md AUTO-INDEX block                |
-|      simple question  -> index block + intro (8k chars)       |
-|      complex question -> full README (up to 24k chars)        |
-|    Strategy 2: vector search  (fallback / data questions)     |
-|      cosine similarity over *_index.json                      |
-|      XLSX: cache-first (index summary) → streaming aggregation|
-|      _pre_ranked_results kwarg: sub-agents can pin files      |
-|    confidence footer (High/Medium/Low) appended               |
-|    calls Ollama or emits passthrough block                    |
+|  ── KB tools route through ──────────────────────────────     |
+|  orchestrator.py                                              |
+|    keyword_confidence() + classify_intent()                   |
+|    asyncio.gather(DomainAgent.run() × N)                      |
+|  base_agent.py                                                |
+|    Strategy 1: README-first (AUTO-INDEX block)                |
+|    Strategy 2: vector search (ChromaDB → file_parser)         |
+|    Ollama · OpenAI · Anthropic · passthrough                  |
 |                                                               |
-|  watch_kb.py  (daemon)                                        |
-|    watches KB_ROOT for file/folder changes                    |
-|    keeps *_index.json + README AUTO-INDEX current             |
+|  ── Analyst tools route through ────────────────────────────  |
+|  analyst/inspector.py  — DataCard: schema, types, grain       |
+|  analyst/planner.py    — QuestionMenu by theme                |
+|  analyst/engine.py     — clarify → load → compute → answer   |
+|  analyst/session.py    — per-session state (params, answer)   |
 |                                                               |
-|  scripts/ask.py  (CLI wrapper)                                |
-|    runs agent subprocess, intercepts passthrough blocks       |
-|    re-sends context + question directly to Ollama             |
-|    falls back to raw context if Ollama also unreachable       |
+|  kb-agent-watch  (daemon)                                     |
+|    watches KB_ROOT → auto-reindex on change                   |
 |                                                               |
-|  agents/vector_store/                                         |
-|    *_index.json         embeddings cache per domain           |
-|    domain_meta.json     descriptions + keywords               |
-|    session_memory.json  conversation history                  |
-|                                                               |
-|  <Folder>/README.md     primary retrieval context             |
-|    <!-- KB:AUTO-INDEX:START --> ... <!-- END -->               |
-|  <Folder>/.noindex      sentinel: skip entire folder          |
+|  .kb_index/                                                   |
+|    chroma/              ChromaDB vector index                 |
+|    session_memory/      KB conversation history               |
+|    analyst_sessions/    Analyst session state                 |
 +---------------------------------------------------------------+
 ```
 

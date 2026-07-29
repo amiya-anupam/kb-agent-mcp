@@ -1,7 +1,7 @@
 """
 kb_agent_mcp/server.py
 ──────────────────────
-FastMCP server exposing five tools:
+FastMCP server exposing nine tools:
 
   ask(question, format, session_id)
     → Query all relevant knowledge domains and return an answer.
@@ -17,6 +17,20 @@ FastMCP server exposing five tools:
 
   show_memory(session_id)
     → Return a summary of the current session state.
+
+  ── Data Analyst tools ──────────────────────────────────────────────────────
+
+  analyze_file(path)
+    → Profile any file and return a DataCard (schema, grain, themes, summary).
+
+  suggest_questions(path)
+    → Return analytical questions grouped by theme based on the DataCard.
+
+  query_data(path, question, session_id)
+    → Ask clarifying questions OR return answer + reasoning.
+
+  refine_query(session_id, feedback)
+    → Re-run the last query with updated parameters from user feedback.
 
 Transport:
   Default (stdio):  kb-agent-serve
@@ -329,6 +343,132 @@ async def show_memory(session_id: str = "default") -> str:
         lines.append(f"[{turn}] User: {user_msg}")
         lines.append(f"     Bot:  {asst_msg}")
     return "\n".join(lines)
+
+
+# ── Tool: analyze_file ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def analyze_file(path: str) -> str:
+    """
+    Profile any file and return a DataCard — a structured description of what
+    the file contains, its schema, data types, grain, and analytical themes.
+
+    Works with: .xlsx, .xls, .csv, .json, .jsonl, .pdf, .docx, .pptx, .txt, .md
+
+    Args:
+        path: Path to the file. Can be absolute or relative to KB_ROOT.
+
+    Returns:
+        JSON string containing the DataCard profile.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    from kb_agent_mcp.analyst.inspector import inspect_file as _inspect, data_card_to_dict
+
+    file_path = _Path(path)
+    if not file_path.is_absolute():
+        file_path = cfg.kb_root_path / path
+
+    if not file_path.exists():
+        return _json.dumps({"error": f"File not found: {path}"})
+
+    card = await _inspect(str(file_path))
+    return _json.dumps(data_card_to_dict(card), indent=2, default=str)
+
+
+# ── Tool: suggest_questions ────────────────────────────────────────────────────
+
+@mcp.tool()
+async def suggest_questions(path: str) -> str:
+    """
+    Return analytical questions the AI can answer for a given file, grouped
+    by theme (revenue, attrition, growth, concentration, anomaly, summary).
+
+    Args:
+        path: Path to the file. Can be absolute or relative to KB_ROOT.
+
+    Returns:
+        JSON string mapping theme → list of questions with clarification metadata.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    from kb_agent_mcp.analyst.inspector import inspect_file as _inspect, data_card_to_dict
+    from kb_agent_mcp.analyst.planner import suggest_questions as _suggest
+
+    file_path = _Path(path)
+    if not file_path.is_absolute():
+        file_path = cfg.kb_root_path / path
+
+    if not file_path.exists():
+        return _json.dumps({"error": f"File not found: {path}"})
+
+    card = await _inspect(str(file_path))
+    menu = await _suggest(card)
+    return _json.dumps(menu, indent=2, default=str)
+
+
+# ── Tool: query_data ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def query_data(
+    path: str,
+    question: str,
+    session_id: str = "",
+) -> str:
+    """
+    Ask a data computation question about a file.
+
+    The tool will:
+      1. Profile the file (schema, columns, data types).
+      2. Ask clarifying questions if needed (e.g. which time period, which metric).
+      3. Run the computation and return the answer with full reasoning.
+
+    Works with: .xlsx, .xls, .csv, .json, .jsonl and document formats.
+
+    Args:
+        path:       Path to the file (absolute or relative to KB_ROOT).
+        question:   Natural-language question, e.g.:
+                    "What are the top 10 customers by revenue in FY2025?"
+                    "How many customers churned compared to last year?"
+        session_id: Optional session ID for multi-turn conversations.
+                    If blank, a new session is created automatically.
+
+    Returns:
+        JSON string with keys: status, session_id, answer, reasoning,
+        suggested_followups, clarifications (when clarification is needed).
+    """
+    import json as _json
+    from kb_agent_mcp.analyst.engine import query_data as _query
+
+    result = await _query(path=path, question=question, session_id=session_id or None)
+    return _json.dumps(result, indent=2, default=str)
+
+
+# ── Tool: refine_query ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def refine_query(session_id: str, feedback: str) -> str:
+    """
+    Refine the last data query based on user feedback.
+
+    Use this to:
+      • Answer a clarifying question (e.g. "Use FY2025" or "Rev Act @ PC")
+      • Correct an assumption (e.g. "Actually just Q4 data")
+      • Adjust output (e.g. "Show top 20 instead")
+      • Ask a follow-up (e.g. "Now group by geography")
+
+    Args:
+        session_id: The session ID returned by a previous query_data call.
+        feedback:   Your correction or follow-up in natural language.
+
+    Returns:
+        JSON string with the updated answer + reasoning.
+    """
+    import json as _json
+    from kb_agent_mcp.analyst.engine import refine_query as _refine
+
+    result = await _refine(session_id=session_id, feedback=feedback)
+    return _json.dumps(result, indent=2, default=str)
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────

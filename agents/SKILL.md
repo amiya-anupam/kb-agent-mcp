@@ -5,11 +5,14 @@ description: >
   specialist sub-agent automatically based on your knowledge folders.
   Use when asking about any content in your KnowledgeBase.
 
-  Current domains: run kb-agent-generate to index your documents and
-  this file will be updated automatically with your domain list.
+  Current domains (4):
+  - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
+  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
+  - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
+  - **skills**: This folder contains information and notes related to skills and their application in various contexts.
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  what does my KnowledgeBase say, /kb, /agent
+  App Connect, ACE, migration, ACE, purchasing options, renewal, Cloud Pak for Integration, CP4I, presentation, skills, knowledge, application, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -31,25 +34,23 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 **No document content is ever sent to Claude.**
 
 ## Current Domains
-
-Run `kb-agent-generate` (or `python3 scripts/generate.py`) to discover your documents
-and this section will be updated with your indexed domains automatically.
+- **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
+- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
+- **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
+- **skills**: This folder contains information and notes related to skills and their application in various contexts.
 
 ## Usage
-
 Just ask naturally — Bob detects the intent and runs the agent:
 - "What does my KnowledgeBase say about X?"
 - "Ask the KnowledgeBase agent about Y"
 
 ## Commands
-
 - `/kb <question>` — query the knowledge base
 - `/agent <question>` — same as /kb
 - `/kb --clear` — clear conversation memory
 - `/kb --memory` — show conversation history summary
 
 ## How the pipeline works
-
 ```
 You → Bob (Claude) → detects skill trigger
                    → runs: python3 agents/agent_knowledgebase.py "<question>"
@@ -66,14 +67,12 @@ You → Bob (Claude) → detects skill trigger
 ```
 
 ## Setup
-
 To add a new domain: create a folder with documents in your KB root, then run:
 ```
-python3 scripts/generate.py
+python3 generate.py
 ```
 
 ## Technical Details
-
 - Embedding: configurable via `KB_EMBED_MODEL` (Ollama / OpenAI / offline fallback)
 - LLM: configurable via `KB_MODEL` and `KB_LLM_PROVIDER`
 - Conversation memory: persists across sessions (auto-resets after 2h inactivity)

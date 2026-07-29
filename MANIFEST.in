@@ -13,6 +13,7 @@ include LICENSE
 include pyproject.toml
 include requirements.txt
 include .env.example
+include "architecture flow diagram.png"
 
 # ── Exclude tests (for contributors only — not needed to run the server) ─────
 prune tests

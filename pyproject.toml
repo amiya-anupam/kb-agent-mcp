@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kb-agent-mcp"
-version = "0.1.9"
+version = "1.0.0"
 description = "A zero-config MCP server that turns any folder of documents into a queryable multi-agent knowledge base"
 readme = "README-MCP.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "KnowledgeBase Agent Contributors" }]
-keywords = ["mcp", "ai", "knowledge-base", "rag", "agents", "llm"]
+keywords = ["mcp", "ai", "knowledge-base", "rag", "agents", "llm", "data-analyst"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",

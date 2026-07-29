@@ -5,11 +5,19 @@ It covers every module, the two main pipelines (setup and query), and the data f
 
 ---
 
+## System overview
+
+![kb-agent-mcp routing diagram](architecture%20flow%20diagram.png)
+
+*User question → Router agent splits into: Doc question (sub-agent → Vector index) or Data question (Data Analyst ✨ NEW → Schema Inspector + Query Engine → Raw files / Answer + Reasoning)*
+
+---
+
 ## Package layout
 
 ```
 kb_agent_mcp/
-├── server.py            MCP server — exposes 5 tools via FastMCP
+├── server.py            MCP server — exposes 9 tools via FastMCP
 ├── orchestrator.py      Top-level query pipeline: route → dispatch → merge
 ├── domain_agent.py      Per-domain RAG wrapper
 ├── base_agent.py        README-first RAG pipeline + LLM calls
@@ -20,6 +28,12 @@ kb_agent_mcp/
 ├── memory.py            Multi-session conversation memory (disk-persisted JSON)
 ├── context_budget.py    Character budget registry + context compaction engine
 ├── config.py            Configuration singleton (env vars + .env file)
+├── analyst/             Data Analyst capability add-on (live file computation)
+│   ├── __init__.py      Exposes 4 entry points consumed by server.py
+│   ├── inspector.py     Schema profiler → DataCard (columns, types, grain, themes)
+│   ├── planner.py       DataCard → themed analytical question menu
+│   ├── engine.py        Query engine: clarify → load → compute → answer + reasoning
+│   └── session.py       Analyst session state (separate from KB conversation memory)
 └── cli/
     ├── main.py          Unified `kb-agent` root command (dispatches all subcommands)
     ├── setup.py         Interactive setup wizard (kb-agent-setup / kb-agent setup)
@@ -44,7 +58,7 @@ and a `validate()` method used at server startup and by the CLI.
 A module-level singleton `cfg` is imported everywhere else.
 
 ### `server.py`
-The FastMCP application. Registers five MCP tools:
+The FastMCP application. Registers nine MCP tools:
 
 | Tool | What it does |
 |---|---|
@@ -53,6 +67,14 @@ The FastMCP application. Registers five MCP tools:
 | `reindex` | Rebuilds ChromaDB collections for all domains |
 | `clear_memory` | Deletes a session's conversation history |
 | `show_memory` | Returns a session's turn history |
+| `analyze_file` | Profiles any file; returns a DataCard (JSON) |
+| `suggest_questions` | Returns themed analytical questions for a file |
+| `query_data` | Asks clarifying questions then computes answer + reasoning |
+| `refine_query` | Re-runs the last query with updated params from user feedback |
+
+The five core tools delegate to `orchestrator.ask()`. The four analyst tools
+delegate to `kb_agent_mcp.analyst` and are self-contained (no ChromaDB, no
+vector index — raw file computation only).
 
 Also owns the stale-index TTL cache: a lightweight mtime scan runs at most
 once per `KB_STALE_CHECK_TTL_SECONDS` seconds and prepends a `⚠` banner to
@@ -212,6 +234,60 @@ Sessions expire automatically after `KB_SESSION_TIMEOUT_HOURS` hours of
 inactivity. Only the last `KB_SESSION_MAX_TURNS` turns are retained; assistant
 answers are truncated to `KB_SESSION_MAX_ANSWER_CHARS` before storage (the full
 answer was already returned to the caller).
+
+### `analyst/` — Data Analyst capability add-on
+
+A self-contained sub-package that enables **live computation** over raw files.
+It does not use the vector index; it loads actual file data and aggregates,
+filters, or compares it to answer data questions that RAG cannot handle.
+
+**`analyst/inspector.py`** — Schema profiler
+
+Reads any supported file and returns a `DataCard`: a structured description of
+columns, data types, grain (what one row represents), data themes, and quality
+warnings. Column classification (`metric`, `id`, `entity`, `time`,
+`categorical`, `text`) is driven by name-hint dictionaries and value statistics
+(numeric ratio, cardinality). Large XLSX files use a sparse-row cell-reference
+parser (handles files > 50 MB without loading the full workbook). DataCards are
+cached per `(path, mtime)` with a 5-minute TTL — repeated calls do not re-read
+the file.
+
+**`analyst/planner.py`** — Question planner
+
+Takes a `DataCard` and returns a `QuestionMenu`: a dict keyed by theme
+(`revenue`, `attrition`, `growth`, `concentration`, `anomaly`, `summary`,
+`document`). Each question carries a `clarifications` list — the parameters
+that must be collected before the computation can run. The planner is pure logic
+(no I/O) and intentionally over-inclusive: it suggests everything the data
+*could* answer.
+
+**`analyst/engine.py`** — Query engine
+
+`query_data(path, question, session_id)`:
+
+1. Calls `inspect_file()` to get or retrieve the cached `DataCard`.
+2. Calls `_needs_clarification()` — checks for metric ambiguity and unknown
+   time ranges; returns clarifying questions if any params are missing.
+3. Loads the file into `list[dict]` using `_load_rows()` (supports xlsx, csv,
+   json/jsonl; handles sparse-row xlsx encoding).
+4. Applies time and entity filters, then calls `_build_answer()`.
+5. `_build_answer()` dispatches to the right computation branch based on
+   keywords in the question: attrition pivot, total/sum, top-N ranking,
+   group-by breakdown, or summary/data quality.
+6. Returns a structured dict: `{status, session_id, answer, reasoning, suggested_followups}`.
+
+`refine_query(session_id, feedback)` parses free-text feedback, updates
+`sess.params` (time range, metric column, top_n, pending clarification
+answers), then re-runs `query_data()` against the same file and original
+question.
+
+**`analyst/session.py`** — Analyst session state
+
+Separate from `memory.py`. Stores file path, DataCard, original question,
+collected params, pending clarifications, last answer/reasoning, and a rolling
+20-turn conversation window. Persisted as JSON under
+`{KB_ROOT}/.kb_index/analyst_sessions/<session_id>.json`. Uses the same
+in-memory 5-minute TTL cache pattern as `memory.py`.
 
 ### `context_budget.py`
 Central registry of all character budgets (read from `cfg`). Provides:
@@ -383,6 +459,53 @@ MCP client → server.ask()
 
 ---
 
+## Data Analyst pipeline (`query_data()` per MCP call)
+
+```
+MCP client → server.query_data(path, question, session_id?)
+│
+├── analyst.engine.query_data()
+│   │
+│   ├── analyst.inspector.inspect_file(path)
+│   │     └── [cache hit]  return cached DataCard (mtime + 5-min TTL)
+│   │     └── [cache miss] parse file → build DataCard → store in _CARD_CACHE
+│   │
+│   ├── _needs_clarification(question, card, params)
+│   │     checks: metric ambiguity (>1 metric col, none named in question)
+│   │             time ambiguity  (time cols present, no period named)
+│   │
+│   ├── [clarification needed]
+│   │     return { status: "clarifying", clarifications: [...] }
+│   │     save AnalystSession with pending_clarifications
+│   │
+│   └── [all params known]
+│         ├── _load_rows(path)       xlsx / csv / json → list[dict]
+│         ├── _filter_rows(...)      apply time + entity filters
+│         └── _build_answer(...)     dispatch by question keywords:
+│               "churn/attrition"  → _attrition_pivot()  (entity × time pivot)
+│               "total/sum"        → _aggregate(metric, None)
+│               "top/biggest"      → _aggregate(metric, entity), _top_n_by()
+│               "breakdown/group"  → _aggregate(metric, group_col)
+│               "summary/quality"  → DataCard prose summary + warnings
+│               fallback           → SUM of first metric column
+│
+│         return { status: "answered", answer, reasoning, suggested_followups }
+│         save AnalystSession (last_answer, turns)
+
+MCP client → server.refine_query(session_id, feedback)
+│
+└── analyst.engine.refine_query()
+      ├── load_session(session_id)
+      ├── _apply_clarification_feedback(feedback, sess)
+      │     parse: FY2025/Q1/2026 → sess.params["time_range"]
+      │            "top 20"       → sess.params["top_n"]
+      │            pending clq    → match against choices, store in params
+      └── query_data(file_path, original_question, session_id)
+            (re-runs full pipeline with updated params)
+```
+
+---
+
 ## Data storage
 
 ```
@@ -393,8 +516,10 @@ MCP client → server.ask()
 └── .kb_index/
     ├── chroma/                     ChromaDB persistent store (one collection per domain)
     │   └── <collection>/           embeddings, document text, metadata (hash, indexed_at)
-    └── session_memory/
-        └── <session_id>.json       { messages: [...], last_active: <unix ts> }
+    ├── session_memory/
+    │   └── <session_id>.json       { messages: [...], last_active: <unix ts> }
+    └── analyst_sessions/
+        └── <session_id>.json       { file_path, data_card, params, last_answer, turns, … }
 ```
 
 ---

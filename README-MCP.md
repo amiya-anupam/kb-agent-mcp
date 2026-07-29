@@ -4,6 +4,8 @@ A zero-config pip-installable MCP server that turns **any folder of documents** 
 
 Connect it to Claude Desktop, Bob, Cursor, or any MCP-compatible AI tool — then ask questions in natural language.
 
+![kb-agent-mcp routing diagram](architecture%20flow%20diagram.png)
+
 ---
 
 ## Features
@@ -73,7 +75,9 @@ Requires Python 3.10+.
 
 ## MCP Tools
 
-Once the server is running, the following tools are available:
+Once the server is running, the following **nine tools** are available in two groups:
+
+### Knowledge Base tools (5)
 
 | Tool | Description |
 |---|---|
@@ -83,6 +87,19 @@ Once the server is running, the following tools are available:
 | `clear_memory(session_id?)` | Clear conversation history for a session |
 | `show_memory(session_id?)` | Show current session state and recent history |
 
+### Data Analyst tools (4)
+
+These tools run **live computation** over raw files — no vector index required. They answer aggregation, trending, filtering, and comparison questions that semantic search cannot handle.
+
+| Tool | Description |
+|---|---|
+| `analyze_file(path)` | Profile any file → returns a DataCard (schema, column types, grain, themes, warnings) |
+| `suggest_questions(path)` | Returns a menu of analytical questions grouped by theme (revenue, attrition, growth, concentration, anomaly) |
+| `query_data(path, question, session_id?)` | Asks clarifying questions if needed, then computes the answer with full reasoning |
+| `refine_query(session_id, feedback)` | Re-runs the last query using updated parameters from your feedback |
+
+Supported file formats: `.xlsx` `.xls` `.csv` `.json` `.jsonl` `.pdf` `.docx` `.pptx` `.txt` `.md`
+
 ### `ask` examples
 
 ```
@@ -90,6 +107,19 @@ ask("What is IBM ACE?")
 ask("What is our Q3 revenue by product?", format="table")
 ask("Explain the architecture of CP4I", format="bullets")
 ask("How many deals closed last quarter?", session_id="my-session")
+```
+
+### `query_data` examples
+
+```
+query_data("BizOps/Renewal Tracking/Revenue/ACE Revenue.xlsx",
+           "What are the top 10 customers by revenue in FY2025?")
+
+query_data("BizOps/Renewal Tracking/Revenue/ACE Revenue.xlsx",
+           "Which customers churned compared to last year?",
+           session_id="analyst-1")
+
+refine_query("analyst-1", "Show only the Americas region")
 ```
 
 > **Session isolation:** On **HTTP transport**, omitting `session_id` auto-generates a
@@ -172,12 +202,16 @@ Each top-level folder under `KB_ROOT` becomes a **knowledge domain**:
     Revenue.xlsx
     Won Deals.xlsx
     domain_config.yaml
-  .kb_index/         ← ChromaDB + session memory (auto-created)
-    chroma/
-    session_memory/
+  .kb_index/         ← auto-created by kb-agent-generate
+    chroma/                  ChromaDB vector index
+    session_memory/          per-session conversation history
+    analyst_sessions/        per-session analyst state (params, last answer)
 ```
 
 Files in nested subfolders are indexed into their parent domain.
+
+> **Analyst tools work on any file under `KB_ROOT`** — pass either an absolute path
+> or a path relative to `KB_ROOT` (e.g. `"BizOps/Revenue.xlsx"`).
 
 ---
 
