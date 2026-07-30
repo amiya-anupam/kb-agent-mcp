@@ -197,6 +197,14 @@ class Config:
         _str("KB_BUDGET_PASSTHROUGH_THRESHOLD", "0.8") or "0.8"
     ))
 
+    # ── Security gate ─────────────────────────────────────────────────────────
+    # Set KB_SECURITY_GATE_ENABLED=false to disable the confidentiality gate
+    # entirely (e.g. fully air-gapped, private Ollama-only installs where all
+    # documents are already trusted).  Enabled by default.
+    KB_SECURITY_GATE_ENABLED: bool = field(default_factory=lambda: _bool(
+        "KB_SECURITY_GATE_ENABLED", True
+    ))
+
     # ── Output format ─────────────────────────────────────────────────────────
     KB_FORMAT_DEFAULT: str = field(default_factory=lambda: _str(
         "KB_FORMAT_DEFAULT", ""

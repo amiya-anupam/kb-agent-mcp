@@ -65,6 +65,7 @@ class DomainAgent:
         history: list[dict],
         format_instruction: str = "",
         top_n_override: int | None = None,
+        session_id: str = "default",
     ) -> dict:
         """
         Run the full RAG pipeline for this domain.
@@ -72,6 +73,8 @@ class DomainAgent:
         Args:
             top_n_override: When set by the orchestrator (e.g. budget reduction),
                             overrides self.config.top_n for this call only.
+            session_id:     Passed through to base_agent.ask() for the security
+                            gate check (confidential file redaction).
 
         Returns the same dict shape as base_agent.ask():
             { agent, answer, sources, found, passthrough, … }
@@ -101,6 +104,7 @@ class DomainAgent:
                 top_n=effective_top_n,
                 max_chars=self.config.max_chars,
                 pre_ranked_results=pre_ranked,
+                session_id=session_id,
             )
 
         # Normal path: README-first with optional fallback
@@ -112,6 +116,7 @@ class DomainAgent:
             conversation_history=history,
             top_n=effective_top_n,
             max_chars=self.config.max_chars,
+            session_id=session_id,
         )
 
     # ── Stale-index check ──────────────────────────────────────────────────────

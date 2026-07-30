@@ -87,10 +87,36 @@ _PREFERRED_NUM_COLS: list[str] = [
 
 # ── Skip helper ───────────────────────────────────────────────────────────────
 
+def _has_noindex_ancestor(path: pathlib.Path) -> bool:
+    """
+    Return True if any ancestor directory of *path* (up to the KB root)
+    contains a `.noindex` sentinel file.
+
+    Imported here to avoid a circular import with security_gate — both modules
+    need this logic, so file_parser owns the canonical implementation and
+    security_gate delegates to it.
+    """
+    from kb_agent_mcp.config import cfg as _cfg
+    kb_root = _cfg.kb_root_path
+    for parent in path.parents:
+        if (parent / ".noindex").exists():
+            return True
+        if parent == kb_root:
+            break
+    return False
+
+
 def should_skip(path: pathlib.Path) -> bool:
-    """Return True if this file should be excluded from indexing."""
+    """Return True if this file should be excluded from indexing.
+
+    Skips:
+    • files matching _SKIP_PATTERNS (readme, .ds_store, __pycache__)
+    • any file whose ancestor folder contains a `.noindex` sentinel file
+    """
     name = path.name.lower()
-    return any(pat in name for pat in _SKIP_PATTERNS)
+    if any(pat in name for pat in _SKIP_PATTERNS):
+        return True
+    return _has_noindex_ancestor(path)
 
 
 # ── Sync extractors (run in thread pool) ──────────────────────────────────────

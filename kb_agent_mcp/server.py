@@ -1,7 +1,7 @@
 """
 kb_agent_mcp/server.py
 ──────────────────────
-FastMCP server exposing nine tools:
+FastMCP server exposing eleven tools:
 
   ask(question, format, session_id)
     → Query all relevant knowledge domains and return an answer.
@@ -171,6 +171,27 @@ async def ask(
 
     from kb_agent_mcp.orchestrator import ask as _ask, _agents as _loaded_agents
 
+    # Security gate — refuse to answer when confidential files have been
+    # detected but the user has not yet acknowledged them with the token.
+    # is_gate_acknowledged() is a fast local dict lookup; no I/O on the
+    # happy path once the session is acknowledged.
+    if cfg.KB_SECURITY_GATE_ENABLED:
+        from kb_agent_mcp.security_gate import is_gate_acknowledged, load_gate_session
+        if not is_gate_acknowledged(effective_session):
+            sess = load_gate_session(effective_session)
+            if sess is not None and sess.status == "blocked":
+                files_list = "\n".join(
+                    f"  🔒 {e['relative_path']}  ({e['reason']})"
+                    for e in sess.confidential_files
+                )
+                return (
+                    "⛔ **Security gate is active for this session.**\n\n"
+                    "Confidential files were detected:\n"
+                    f"{files_list}\n\n"
+                    "Call `check_confidential()` to see the acknowledgement token, "
+                    "then call `acknowledge_gate()` with that token to proceed."
+                )
+
     # Cat 4 — Cold-start sentinel: agents haven't been loaded yet for this process.
     # The first ask() call triggers ChromaDB + sentence-transformers loading (1–3s).
     # We can't stream a "loading…" message before the call returns in stdio/MCP, but
@@ -201,6 +222,152 @@ async def ask(
         answer = f"<!-- session_id: {generated_session} -->\n\n" + answer
 
     return answer
+
+
+# ── Tool: check_confidential ───────────────────────────────────────────────────
+
+@mcp.tool()
+async def check_confidential(session_id: str = "default") -> str:
+    """
+    Scan all knowledge domains for confidential-flagged files and activate
+    the security gate when any are found.
+
+    If confidential files exist, a one-time acknowledgement token is generated
+    and returned.  You must pass this token to acknowledge_gate() before ask()
+    will answer questions that touch those files.
+
+    The token is generated fresh on every call — it cannot be pre-planted
+    in any document, because it did not exist when the document was indexed.
+
+    Args:
+        session_id: The session to gate. Use the same session_id as your ask()
+                    calls so the gate state is shared.
+
+    Returns:
+        A report of confidential files found, or a "clear" status when none exist.
+    """
+    if not cfg.KB_SECURITY_GATE_ENABLED:
+        return "ℹ Security gate is disabled (KB_SECURITY_GATE_ENABLED=false)."
+
+    from kb_agent_mcp.security_gate import (
+        scan_all_domains,
+        generate_ack_token,
+        GateSession,
+        save_gate_session,
+    )
+    import asyncio as _asyncio
+
+    entries = await _asyncio.to_thread(scan_all_domains)
+
+    if not entries:
+        from kb_agent_mcp.security_gate import GateSession, save_gate_session
+        clear_sess = GateSession(
+            session_id=session_id,
+            status="clear",
+            ack_token="",
+            confidential_files=[],
+        )
+        await _asyncio.to_thread(save_gate_session, clear_sess)
+        return (
+            "✅ **Security gate: clear.**\n\n"
+            "No confidential-flagged files found. You can call `ask()` freely."
+        )
+
+    token = generate_ack_token()
+    sess = GateSession(
+        session_id=session_id,
+        status="blocked",
+        ack_token=token,
+        confidential_files=[
+            {"domain": e.domain, "relative_path": e.relative_path,
+             "filename": e.filename, "reason": e.reason}
+            for e in entries
+        ],
+    )
+    await _asyncio.to_thread(save_gate_session, sess)
+
+    files_list = "\n".join(
+        f"  🔒 {e.relative_path}\n     ↳ Reason: {e.reason}"
+        for e in entries
+    )
+    return (
+        "⛔ **Security gate activated.**\n\n"
+        f"The following {len(entries)} file(s) contain confidentiality signals:\n\n"
+        f"{files_list}\n\n"
+        "─────────────────────────────────────────────────────\n"
+        f"**Acknowledgement token: `{token}`**\n\n"
+        "Type this token yourself — do not copy it from a document.\n"
+        "Call `acknowledge_gate()` with this token to proceed.\n\n"
+        "> ⚠ This token expires when you call `check_confidential()` again.\n"
+        "> Once acknowledged, confidential file content will be included in answers\n"
+        "> with a 🔒 prefix on every citation."
+    )
+
+
+# ── Tool: acknowledge_gate ────────────────────────────────────────────────────
+
+@mcp.tool()
+async def acknowledge_gate(session_id: str, token: str) -> str:
+    """
+    Acknowledge the security gate for a session by providing the token
+    printed by check_confidential().
+
+    The token must be typed by a live user — it cannot come from document
+    content, because it was generated after all documents were indexed.
+
+    Args:
+        session_id: The session to unlock (must match the session_id used in
+                    check_confidential()).
+        token:      The acknowledgement token shown by check_confidential().
+
+    Returns:
+        Confirmation message on success, or an error with instructions to
+        call check_confidential() again for a fresh token on failure.
+    """
+    if not cfg.KB_SECURITY_GATE_ENABLED:
+        return "ℹ Security gate is disabled (KB_SECURITY_GATE_ENABLED=false)."
+
+    import asyncio as _asyncio
+    from kb_agent_mcp.security_gate import (
+        load_gate_session,
+        validate_ack_token,
+        save_gate_session,
+    )
+
+    sess = await _asyncio.to_thread(load_gate_session, session_id)
+
+    if sess is None:
+        return (
+            "❌ No active gate session found for this session_id.\n\n"
+            "Call `check_confidential()` first to scan for confidential files "
+            "and receive an acknowledgement token."
+        )
+
+    if sess.status == "clear":
+        return "✅ No confidential files were detected. No acknowledgement needed."
+
+    if sess.status == "acknowledged":
+        return "✅ Gate already acknowledged for this session."
+
+    # Validate the token (constant-time compare)
+    if not validate_ack_token(sess.ack_token, token):
+        return (
+            "❌ **Wrong token.** The token you provided does not match.\n\n"
+            "Call `check_confidential()` again to generate a new token.\n"
+            "> Tip: tokens are case-insensitive (e.g. `b7e2` and `B7E2` both work)."
+        )
+
+    # Token correct — mark acknowledged
+    sess.status = "acknowledged"
+    sess.acknowledged_at = time.time()
+    await _asyncio.to_thread(save_gate_session, sess)
+
+    file_count = len(sess.confidential_files)
+    return (
+        f"✅ **Gate cleared for session `{session_id}`.**\n\n"
+        f"{file_count} confidential file(s) are now included in answers.\n"
+        "All citations from these files will be prefixed with 🔒."
+    )
 
 
 # ── Tool: list_domains ─────────────────────────────────────────────────────────
@@ -262,6 +429,13 @@ async def reindex() -> str:
 
     # Risk 11 — clear stale cache so next ask() sees fresh state
     _clear_stale_cache()
+
+    # Security gate — clear all gate sessions after reindex.
+    # New files may have been added that contain confidential signals;
+    # every session must re-run check_confidential() against the fresh index.
+    if cfg.KB_SECURITY_GATE_ENABLED:
+        from kb_agent_mcp.security_gate import clear_all_gate_sessions
+        clear_all_gate_sessions()
 
     # Risk 9 — new domains without domain_config.yaml: surface warning FIRST
     # so users see the actionable message before the index summary.

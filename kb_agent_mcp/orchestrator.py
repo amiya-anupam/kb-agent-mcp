@@ -554,7 +554,11 @@ async def ask(
 
     # Dispatch to selected domain agents in parallel
     tasks = [
-        agents[name].run(question, history, format_instruction, top_n_override=top_n_override)
+        agents[name].run(
+            question, history, format_instruction,
+            top_n_override=top_n_override,
+            session_id=session_id,
+        )
         for name in domain_names
         if name in agents
     ]

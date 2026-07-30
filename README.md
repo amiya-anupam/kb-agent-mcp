@@ -190,53 +190,56 @@ python3 scripts/generate.py
 
 | Operation | Goes to | Condition |
 |---|---|---|
-| Ingest script (`ingest.py`) | **Nowhere** — 100% local | Always |
+| Indexing (`kb-agent-generate`) | **Nowhere** — 100% local | Always |
 | Q&A via local LLM (Ollama) | **Nowhere** | When Ollama is running |
 | Q&A via cloud LLM (passthrough / OpenAI / Anthropic) | Remote cloud API | When `KB_LLM_PROVIDER` ≠ `ollama` or Ollama is unreachable |
 
 > **Rule of thumb:** If `KB_LLM_PROVIDER=ollama` and Ollama is reachable, zero document content leaves your machine. Use `KB_PASSTHROUGH_FALLBACK=false` to prevent silent fallback to passthrough.
 
-### Ingest script hardening
+### MCP security gate
 
-The `ingest.py` extraction script includes the following security controls:
+The `kb-agent-mcp` server implements an **anti-trick confidentiality gate**
+(`kb_agent_mcp/security_gate.py`). The gate prevents prompt-injection attacks where
+a malicious document pre-plants an acknowledgement token — the token is generated
+**at call time** (after indexing) so no document can contain the correct value.
 
-| Control | Detail |
-|---|---|
-| Path traversal prevention | `sys.argv[1]` validated against an allowlist (`~/Desktop/KnowledgeBase`, `/tmp`) — any path outside exits with code 2 |
-| Symlink traversal prevention | All symlinks skipped unconditionally during `rglob` walk |
-| XML bomb / XXE prevention | All XML parsing uses `defusedxml` — stdlib `ElementTree` is not used |
-| Image memory guard | Images over 50 MB are skipped before loading — only the path is emitted |
-| EML recursion bomb prevention | MIME walk depth-limited to 50 parts per email |
-| Error message sanitisation | Exception text stripped of absolute paths before entering LLM context |
-| Per-file text cap | 50,000 chars per file |
-| Total aggregate cap | 10,000,000 chars across all files — hard stop with truncation sentinel |
+**Workflow:**
 
-### Confidentiality classification
+1. Call `check_confidential(session_id)` — scans all domains for sensitivity signals.
+   If flagged files are found, a one-time 8-character hex token is printed in the chat.
+2. Call `acknowledge_gate(session_id, token)` — type the token shown in step 1.
+   The gate is cleared; subsequent `ask()` calls include confidential content with
+   `🔒` prefix on all citations from flagged files.
+3. If no confidential files exist, `check_confidential` returns "✅ clear" and
+   `ask()` proceeds without any gate check.
 
-Every extracted file is automatically scanned for sensitivity signals. The result is surfaced in the Q&A skill as a consent gate — you choose whether to include flagged files in the session.
+**Confidentiality classification signals (priority order):**
 
 | Signal source | What is checked |
 |---|---|
-| **Text body** | Case-insensitive scan for keywords: `CONFIDENTIAL`, `INTERNAL USE ONLY`, `NOT FOR DISTRIBUTION`, `NOT FOR SHARING`, `DO NOT SHARE`, `DO NOT DISTRIBUTE`, `PROPRIETARY`, `RESTRICTED`, `PRIVILEGED`, `IBM CONFIDENTIAL`, `COMPANY CONFIDENTIAL`, `FOR INTERNAL USE`, `CLASSIFICATION:`, `SENSITIVE`, `TOP SECRET`, `PRIVATE AND CONFIDENTIAL` |
-| **Filename / folder path** | Same keyword list applied to the full path string |
-| **PDF metadata** | `/Keywords` and `/Subject` fields from the PDF information dictionary |
-| **DOCX core properties** | `category` and `keywords` fields from the document's core properties |
 | **EML header** | `Sensitivity:` header — matches `confidential`, `company-confidential`, `personal`, `private`, `restricted` |
-
-**How it works in the skill:**
-1. Step 2 shows `🔒` next to flagged files in the inventory, with the detection reason
-2. Step 2b pauses and asks: include flagged files? (yes / no / pick by number)
-3. Excluded files are never loaded into the LLM context — their content is replaced with a placeholder
-4. Included flagged files are answered normally, with `🔒` prefix on all citations from them
+| **PDF metadata** | `/Keywords` and `/Subject` fields from the PDF information dictionary |
+| **DOCX core properties** | `category` and `keywords` fields from the document's core properties (`docProps/core.xml`) |
+| **Filename / folder path** | Full path string (with `_` and `-` normalised to spaces) scanned for 16 keywords |
+| **Text body** | First 4,000 characters of extracted text scanned for keywords: `CONFIDENTIAL`, `INTERNAL USE ONLY`, `NOT FOR DISTRIBUTION`, `NOT FOR SHARING`, `DO NOT SHARE`, `DO NOT DISTRIBUTE`, `PROPRIETARY`, `RESTRICTED`, `PRIVILEGED`, `IBM CONFIDENTIAL`, `COMPANY CONFIDENTIAL`, `FOR INTERNAL USE`, `CLASSIFICATION:`, `SENSITIVE`, `TOP SECRET`, `PRIVATE AND CONFIDENTIAL` |
 
 **`.noindex` sentinel — hard exclusion:**
-Place an empty file named `.noindex` inside any subfolder to prevent **all** files in that folder (and nested subfolders) from being extracted at all — they won't even appear in the inventory. Use this for truly off-limits directories:
+Place an empty file named `.noindex` inside any subfolder to hard-exclude **all**
+files in that folder and every nested subfolder. Files under a `.noindex` ancestor
+are excluded at both scan time (never appear in `check_confidential` results) and
+at index time (never added to the vector database):
 ```
-~/Desktop/KnowledgeBase/
-  passwords/
-    .noindex          ← drop this empty file here
-    my-passwords.txt  ← never extracted, never in context
+~/KnowledgeBase/
+  secrets/
+    .noindex             ← drop this empty file here
+    my-passwords.txt     ← never indexed, never scanned, never in context
 ```
+
+**Disable the gate:**
+```env
+KB_SECURITY_GATE_ENABLED=false
+```
+Use this for fully air-gapped installs where all documents are already trusted.
 
 ---
 

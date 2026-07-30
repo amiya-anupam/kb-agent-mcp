@@ -396,6 +396,7 @@ async def ask(
     top_n: int = 4,
     max_chars: int | None = None,
     pre_ranked_results: list[dict] | None = None,
+    session_id: str = "default",
 ) -> dict:
     """
     README-first async RAG pipeline for a single domain folder.
@@ -476,19 +477,44 @@ async def ask(
             "passthrough": False,
         }
 
+    # ── Security gate — classify each result file ─────────────────────────────
+    # Files flagged as confidential are either redacted (gate not acknowledged)
+    # or included with a 🔒 marker on the source label (gate acknowledged).
+    gate_acknowledged = True
+    if cfg.KB_SECURITY_GATE_ENABLED:
+        from kb_agent_mcp.security_gate import is_gate_acknowledged
+        gate_acknowledged = is_gate_acknowledged(session_id)
+
+    def _is_confidential_file(file_path: Path) -> bool:
+        if not cfg.KB_SECURITY_GATE_ENABLED:
+            return False
+        from kb_agent_mcp.security_gate import classify_confidential
+        is_conf, _ = classify_confidential(file_path)
+        return is_conf
+
     # Extract text from each result file concurrently
     context_blocks: list[str] = []
     sources: list[dict] = []
     extract_tasks = []
     valid_results = []
+    redacted_names: list[str] = []
+
     for r in results:
         file_path = cfg.kb_root_path / r["path"]
         if not file_path.exists():
             continue
+        is_conf = _is_confidential_file(file_path)
+        if is_conf and not gate_acknowledged:
+            # Gate not yet acknowledged — exclude this file entirely
+            redacted_names.append(r["name"])
+            continue
         extract_tasks.append(_extract_file(file_path, max_chars=max_chars))
-        valid_results.append(r)
+        r_annotated = dict(r)
+        if is_conf:
+            r_annotated["confidential"] = True   # signals 🔒 prefix in footer
+        valid_results.append(r_annotated)
 
-    if not extract_tasks:
+    if not extract_tasks and not redacted_names:
         return {
             "agent":       agent_name,
             "answer":      f"Found index entries for '{folder_name}' but source files are missing.",
@@ -497,15 +523,47 @@ async def ask(
             "passthrough": False,
         }
 
+    if not extract_tasks and redacted_names:
+        names = ", ".join(f"`{n}`" for n in redacted_names)
+        return {
+            "agent":   agent_name,
+            "answer":  (
+                f"The most relevant file(s) for this question ({names}) are flagged as "
+                "confidential and have been excluded.\n\n"
+                "Call `check_confidential()` then `acknowledge_gate()` to include them."
+            ),
+            "sources":     [],
+            "found":       True,
+            "passthrough": False,
+        }
+
     texts = await asyncio.gather(*extract_tasks)
     context_was_truncated = False
     for r, text in zip(valid_results, texts):
+        label = r["name"]
+        if r.get("confidential"):
+            label = f"🔒 {label}"
         context_blocks.append(
-            f"--- Source: {r['name']} (relevance: {r.get('score', 0):.2f}) ---\n{text}"
+            f"--- Source: {label} (relevance: {r.get('score', 0):.2f}) ---\n{text}"
         )
-        sources.append({"name": r["name"], "path": r["path"], "score": r.get("score", 0.0)})
+        sources.append({
+            "name":         label,
+            "path":         r["path"],
+            "score":        r.get("score", 0.0),
+            "confidential": r.get("confidential", False),
+        })
         if text.endswith("…"):
             context_was_truncated = True
+
+    # Append a note when some files were redacted
+    if redacted_names:
+        redacted_note = (
+            "\n\n> ⚠ Note: "
+            + ", ".join(f"`{n}`" for n in redacted_names)
+            + " were excluded (confidential — call `acknowledge_gate()` to include)."
+        )
+    else:
+        redacted_note = ""
 
     context = "\n\n".join(context_blocks)
 
@@ -541,7 +599,7 @@ async def ask(
     answer = await call_llm(messages)
     return {
         "agent":             agent_name,
-        "answer":            answer,
+        "answer":            answer + redacted_note,
         "sources":           sources,
         "confidence_footer": format_confidence_footer(sources),
         "found":             True,

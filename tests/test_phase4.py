@@ -259,7 +259,7 @@ class TestDomainAgentTopNOverride:
 
         async def _fake_ask(question, folder_name, agent_name, system_prompt,
                             conversation_history=None, top_n=4, max_chars=None,
-                            pre_ranked_results=None):
+                            pre_ranked_results=None, **kwargs):
             received_top_n.append(top_n)
             return {"agent": agent_name, "answer": "ok", "sources": [], "found": True,
                     "passthrough": False}
@@ -291,7 +291,7 @@ class TestDomainAgentTopNOverride:
 
         async def _fake_ask(question, folder_name, agent_name, system_prompt,
                             conversation_history=None, top_n=4, max_chars=None,
-                            pre_ranked_results=None):
+                            pre_ranked_results=None, **kwargs):
             received_top_n.append(top_n)
             return {"agent": agent_name, "answer": "ok", "sources": [], "found": True,
                     "passthrough": False}

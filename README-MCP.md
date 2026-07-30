@@ -75,7 +75,7 @@ Requires Python 3.10+.
 
 ## MCP Tools
 
-Once the server is running, the following **nine tools** are available in two groups:
+Once the server is running, the following **eleven tools** are available in three groups:
 
 ### Knowledge Base tools (5)
 
@@ -86,6 +86,21 @@ Once the server is running, the following **nine tools** are available in two gr
 | `reindex()` | Re-scan KB_ROOT and rebuild ChromaDB indexes. After reindexing, any new domain folders that are still missing `domain_config.yaml` are surfaced as a warning in the tool response — run `kb-agent-generate` from the CLI to generate them. |
 | `clear_memory(session_id?)` | Clear conversation history for a session |
 | `show_memory(session_id?)` | Show current session state and recent history |
+
+### Security Gate tools (2)
+
+These tools implement the **anti-trick confidentiality gate**. Call `check_confidential()` before asking sensitive questions when your knowledge base may contain restricted documents.
+
+| Tool | Description |
+|---|---|
+| `check_confidential(session_id?)` | Scan all domains for confidential-flagged files. If any are found, activates the gate and returns a one-time acknowledgement token that you must supply to `acknowledge_gate()`. Returns "✅ clear" when nothing is flagged. |
+| `acknowledge_gate(session_id, token)` | Unlock the gate for a session by supplying the token printed by `check_confidential()`. The token is generated at call time — it cannot be pre-planted in any document, preventing prompt-injection attacks. Once cleared, confidential file citations are prefixed with 🔒. |
+
+> **How the anti-trick mechanism works:** `check_confidential()` calls `secrets.token_hex(4)` at that moment — after all documents were indexed. No document content can contain the correct token because it did not exist when the document was written. Only a live user reading the chat can supply the right value.
+
+> **`.noindex` sentinel:** Place an empty file named `.noindex` in any subfolder to hard-exclude all files in that subtree from both scanning and indexing. Files under `.noindex` ancestors never appear in scan results and are never added to the vector index.
+
+> **Disable the gate:** Set `KB_SECURITY_GATE_ENABLED=false` in your `.env` to bypass the gate entirely (e.g. fully air-gapped installs with only trusted documents).
 
 ### Data Analyst tools (4)
 
@@ -157,6 +172,10 @@ KB_BUDGET_RAG_FILE=4000
 KB_SESSION_TIMEOUT_HOURS=2
 KB_SESSION_MAX_TURNS=20
 KB_SESSION_MAX_ANSWER_CHARS=400
+
+# Security gate (default: enabled)
+# Set to false for fully air-gapped installs with only trusted documents
+KB_SECURITY_GATE_ENABLED=true
 
 # Ignore these top-level folders
 KB_IGNORE_FOLDERS=archive,tmp

@@ -1,15 +1,127 @@
 # Architecture: kb-agent-mcp
 
-This document describes the internal structure of the `kb-agent-mcp` package.
-It covers every module, the two main pipelines (setup and query), and the data flows between them.
+This document is the authoritative internal reference for the `kb-agent-mcp`
+package. It covers every module, the three main pipelines (setup, query, and
+data-analyst), the security gate mechanism, the data storage layout, all
+environment variables, and the complete inter-module import graph.
+
+Every statement here is grounded in the source code — no speculation.
 
 ---
 
 ## System overview
 
-![kb-agent-mcp routing diagram](architecture%20flow%20diagram.png)
+[![Architecture Flow Diagram](architecture_flow_diagram.png)](architecture_flow_diagram.png)
 
-*User question → Router agent splits into: Doc question (sub-agent → Vector index) or Data question (Data Analyst ✨ NEW → Schema Inspector + Query Engine → Raw files / Answer + Reasoning)*
+The diagram above shows all three pipelines and every major component.
+
+```
+╔══════════════════════════════════════════════════════════════════════════════════════════╗
+║  MCP HOST  (Claude Desktop / Bob / Cursor)                                               ║
+║  ┌──────────────────────────────────────────────────────────────────────────────────┐    ║
+║  │  AI Model  ←── tool responses (markdown / JSON) ── MCP Client SDK               │    ║
+║  │                                                         ↑                        │    ║
+║  │              tool calls (JSON-RPC over stdio or HTTP) ──┘                        │    ║
+║  └──────────────────────────────────────────────────────────────────────────────────┘    ║
+╚══════════════════════════════════════╦═══════════════════════════════════════════════════╝
+                                       ║ stdio pipe  OR  HTTP/SSE
+╔══════════════════════════════════════╩═══════════════════════════════════════════════════╗
+║  kb-agent-serve  (FastMCP server process)                                                ║
+║                                                                                          ║
+║  ┌─────────────────────────────────  server.py  (11 tools)  ──────────────────────────┐  ║
+║  │                                                                                     │  ║
+║  │  ╔══ KB tools ════════════╗  ╔══ Security Gate ══════════╗  ╔══ Analyst tools ════╗ │  ║
+║  │  ║ ask()                  ║  ║ check_confidential()      ║  ║ analyze_file()      ║ │  ║
+║  │  ║ list_domains()         ║  ║ acknowledge_gate()        ║  ║ suggest_questions() ║ │  ║
+║  │  ║ reindex()              ║  ╚═══════════════╦══════════╝  ║ query_data()        ║ │  ║
+║  │  ║ clear_memory()         ║                  ║             ║ refine_query()      ║ │  ║
+║  │  ║ show_memory()          ║                  ║             ╚══════════╦══════════╝ │  ║
+║  │  ╚══════════╦═════════════╝                  ║                        ║            │  ║
+║  └─────────────╫───────────────────────────────╫────────────────────────╫────────────┘  ║
+║                ║                               ║                        ║                ║
+║  ┌─────────────╨──────────────────────────┐    ║security_gate.py        ║                ║
+║  │  orchestrator.py                       │    ║ classify_confidential  ║                ║
+║  │                                        │    ║ scan_all_domains       ║                ║
+║  │  1. detect_format_intent()             │    ║ generate_ack_token     ║                ║
+║  │  2. _keyword_confidence()  ─────┐      │    ║ validate_ack_token     ║                ║
+║  │  3. _classify_intent() (LLM) ◄──┘      │    ║ GateSession → disk     ║                ║
+║  │  4. _adjusted_top_n()                  │    ╚════════════════════════╝                ║
+║  │  5. asyncio.gather( DomainAgent × N )  │                                              ║
+║  │  6. _merge_answers()                   │    ┌────────────────────────────────────┐    ║
+║  │  7. add_turn_sync() → session file     │    │  analyst/                          │    ║
+║  └────────────┬───────────────────────────┘    │  inspector.py → DataCard           │    ║
+║               │                               │  planner.py   → QuestionMenu       │    ║
+║       ┌───────┴──────────────────────┐         │  engine.py    → answer+reasoning   │    ║
+║       │  DomainAgent × N (per domain)│         │  session.py   → AnalystSession     │    ║
+║       │  domain_rules.py (DomainConfig│        └────────────────────┬───────────────┘    ║
+║       │  pin_files, boost_keywords)  │                              │                    ║
+║       └───────┬──────────────────────┘                              │ raw file reads     ║
+║               │                                                     │                    ║
+║  ┌────────────╨────────────────────────────────────────────────┐    │                    ║
+║  │  base_agent.py                                              │    │                    ║
+║  │                                                             │    │                    ║
+║  │  is_complex_question() / is_data_question()                 │    │                    ║
+║  │                                                             │    │                    ║
+║  │  ┌─ README-first path ──────────────────────────────────┐   │    │                    ║
+║  │  │  _find_readme() → _README_CACHE (5-min TTL)          │   │    │                    ║
+║  │  │  simple  → AUTO-INDEX block + context_budget         │   │    │                    ║
+║  │  │  complex → full README (up to KB_BUDGET_FULL_README) │   │    │                    ║
+║  │  └──────────────────────────────────────────────────────┘   │    │                    ║
+║  │                                                             │    │                    ║
+║  │  ┌─ RAG fallback path ──────────────────────────────────┐   │    │                    ║
+║  │  │  vector_store.search() → file_parser.extract() × N  │   │    │                    ║
+║  │  └──────────────────────────────────────────────────────┘   │    │                    ║
+║  │                                                             │    │                    ║
+║  │  ┌─ LLM call  OR  passthrough block ───────────────────┐   │    │                    ║
+║  │  │  Ollama /api/chat                                    │   │    │                    ║
+║  │  │  OpenAI /chat/completions                           │   │    │                    ║
+║  │  │  Anthropic /v1/messages                             │   │    │                    ║
+║  │  │  passthrough → <<<KB_PASSTHROUGH>>> block           │   │    │                    ║
+║  │  └─────────────────────────────────────────────────────┘   │    │                    ║
+║  └────────────┬────────────────────────────────────────────────┘    │                    ║
+║               │                                                     │                    ║
+║  ┌────────────╨──────────────┐  ┌─────────────────────────────────┐ │                    ║
+║  │  vector_store.py          │  │  embeddings.py                  │ │                    ║
+║  │  ChromaDB PersistentClient│  │  Ollama /api/embeddings         │ │                    ║
+║  │  one collection per domain│  │  OpenAI /embeddings             │ │                    ║
+║  │  MD5 hash change detection│  │  sentence-transformers fallback │ │                    ║
+║  │  128-entry embed LRU cache│  │  _embed_sync() ← vector_store  │ │                    ║
+║  └───────────────────────────┘  └─────────────────────────────────┘ │                    ║
+╚═══════════════════════════════════════════════════════════╦══════════╧══════════════════╝
+                                                            ║
+╔═══════════════════════════════════════════════════════════╩════════════════════════════╗
+║  FILESYSTEM  (KB_ROOT)                                                                 ║
+║                                                                                        ║
+║  ┌─────────────────────────────────────────────────────────────────────────────────┐  ║
+║  │  <Domain A>/        PDF  DOCX  XLSX  MD  TXT  CSV  …      domain_config.yaml   │  ║
+║  │  <Domain B>/        …                                      domain_config.yaml   │  ║
+║  │  <Domain N>/        …                                      domain_config.yaml   │  ║
+║  │                                                                                 │  ║
+║  │  .kb_index/                                                                     │  ║
+║  │    chroma/                  ChromaDB collections — embeddings + metadata         │  ║
+║  │      <domain_a>/            {id, embedding, {path, hash, summary, …}}           │  ║
+║  │      <domain_b>/            …                                                   │  ║
+║  │    session_memory/          <session_id>.json  {messages, last_active}          │  ║
+║  │    analyst_sessions/        <session_id>.json  {file_path, params, answer, …}   │  ║
+║  │    gate_sessions.json       {session_id: GateSession, …}                        │  ║
+║  └─────────────────────────────────────────────────────────────────────────────────┘  ║
+╚════════════════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Legend:**
+- `╔══╗` / `╚══╝` — major system boundaries (MCP host, server process, filesystem)
+- `┌──┐` / `└──┘` — internal modules / sub-systems
+- `║` / `│` — data-flow connections
+- Analyst tools (right column) bypass the vector index entirely — they read raw files directly from `KB_ROOT`
+- Security gate sits between `server.ask()` and `orchestrator.ask()` — unanswered sessions are blocked before any retrieval occurs
+
+There are three independent processing pipelines:
+
+| Pipeline | Entry point | Purpose |
+|---|---|---|
+| **Setup** | `kb-agent-setup` / `kb-agent-generate` | Index knowledge folders into ChromaDB; generate `domain_config.yaml`; install Bob skill |
+| **Query** | MCP `ask()` | Route question → retrieve context → call LLM (or passthrough) → return answer |
+| **Data Analyst** | MCP `query_data()` | Profile file → clarify params → load rows → compute → return answer + reasoning |
 
 ---
 
@@ -17,33 +129,35 @@ It covers every module, the two main pipelines (setup and query), and the data f
 
 ```
 kb_agent_mcp/
-├── server.py            MCP server — exposes 9 tools via FastMCP
-├── orchestrator.py      Top-level query pipeline: route → dispatch → merge
-├── domain_agent.py      Per-domain RAG wrapper
-├── base_agent.py        README-first RAG pipeline + LLM calls
-├── vector_store.py      ChromaDB client, upsert, search, metadata
-├── embeddings.py        Embedding backends with fallback chain
-├── file_parser.py       Multi-format text extractor
-├── domain_rules.py      domain_config.yaml loader + retrieval rule application
-├── memory.py            Multi-session conversation memory (disk-persisted JSON)
-├── context_budget.py    Character budget registry + context compaction engine
-├── config.py            Configuration singleton (env vars + .env file)
-├── analyst/             Data Analyst capability add-on (live file computation)
-│   ├── __init__.py      Exposes 4 entry points consumed by server.py
-│   ├── inspector.py     Schema profiler → DataCard (columns, types, grain, themes)
-│   ├── planner.py       DataCard → themed analytical question menu
-│   ├── engine.py        Query engine: clarify → load → compute → answer + reasoning
-│   └── session.py       Analyst session state (separate from KB conversation memory)
+├── __init__.py          Package metadata (__version__ from importlib.metadata)
+├── server.py            FastMCP server — 11 MCP tools; startup validation; stale-index TTL cache
+├── orchestrator.py      Query pipeline: format detection → keyword route → LLM classify → dispatch → merge
+├── domain_agent.py      DomainAgent wrapper — per-domain config, pre-rank, stale_file_count
+├── base_agent.py        README-first RAG pipeline + all LLM call implementations + question classifiers
+├── vector_store.py      ChromaDB client — upsert, search, collection metadata, 128-entry embed LRU cache
+├── embeddings.py        2-tier embedding backend with sentence-transformers fallback
+├── file_parser.py       Multi-format text extractor — sync + async; .noindex sentinel enforcement
+├── domain_rules.py      domain_config.yaml loader + DomainConfig dataclass + pin/boost rules
+├── memory.py            Per-session conversation memory — disk-persisted JSON, 5-min in-process cache
+├── context_budget.py    Character budget registry + compaction engine (trim, compact, build_context)
+├── config.py            Frozen Config dataclass — reads all env vars + .env; module-level cfg singleton
+├── security_gate.py     Anti-trick confidentiality gate — classify, scan, token, GateSession persistence
+├── analyst/
+│   ├── __init__.py      Re-exports: inspect_file, DataCard, suggest_questions, query_data, refine_query
+│   ├── inspector.py     Schema profiler → DataCard (columns, types, grain, themes); (path, mtime) cache
+│   ├── planner.py       DataCard → QuestionMenu (themed analytical questions); pure logic, no I/O
+│   ├── engine.py        Query engine: clarify → load rows → compute → answer + reasoning; refine_query
+│   └── session.py       AnalystSession dataclass — disk-persisted, 5-min in-process cache
 └── cli/
-    ├── main.py          Unified `kb-agent` root command (dispatches all subcommands)
+    ├── main.py          Unified `kb-agent` root command (in-process dispatch, no subprocess fork)
     ├── setup.py         Interactive setup wizard (kb-agent-setup / kb-agent setup)
     ├── generate.py      Index builder + domain YAML generator (kb-agent-generate / kb-agent generate)
-    ├── watch.py         Filesystem watcher (kb-agent-watch / kb-agent watch)
-    ├── doctor.py        Health checklist with auto-fix (kb-agent-doctor / kb-agent doctor)
-    └── status.py        Per-domain status table (kb-agent-status / kb-agent status)
+    ├── watch.py         Filesystem watcher with debounce (kb-agent-watch / kb-agent watch)
+    ├── doctor.py        9-check health checklist with auto-fix (kb-agent-doctor / kb-agent doctor)
+    └── status.py        Read-only per-domain status table with Rich (kb-agent-status / kb-agent status)
 
 scripts/
-└── setup.py             Compatibility shim → delegates to kb_agent_mcp.cli.setup
+└── setup.py             12-line shim → delegates to kb_agent_mcp.cli.setup (backward compat)
 ```
 
 ---
@@ -51,102 +165,162 @@ scripts/
 ## Module responsibilities
 
 ### `config.py`
-A frozen dataclass (`Config`) that reads every tunable value from environment
-variables (or a `.env` file auto-discovered in CWD → `$HOME` → `KB_ROOT`).
-Exposes derived paths (`kb_root_path`, `kb_index_path`, `session_memory_path`)
-and a `validate()` method used at server startup and by the CLI.
-A module-level singleton `cfg` is imported everywhere else.
+A **frozen dataclass** (`Config`) that reads every tunable value from environment
+variables (or a `.env` file auto-discovered in order: CWD → `$HOME` → `KB_ROOT`
+→ package root). Values already in `os.environ` are never overwritten.
+
+Key derived properties:
+
+| Property | Value |
+|---|---|
+| `kb_root_path` | `Path(KB_ROOT).expanduser().resolve()` |
+| `kb_index_path` | `kb_root_path / ".kb_index"` |
+| `kb_root_is_explicit` | `True` only when `KB_ROOT` is in the environment (not the CWD fallback) |
+
+`validate()` checks `KB_ROOT` exists, `KB_LLM_PROVIDER` is valid, and `KB_API_KEY`
+is set when required. Called at server startup (exits on failure) and by the CLI.
+
+`is_ignored(folder_name)` returns `True` for: dotfolders, `BUILTIN_IGNORE` names
+(`.kb_index`, `.git`, `__pycache__`, `agents`, `scripts`, `tests`, `kb_agent_mcp`,
+etc.), `.egg-info` / `.dist-info` suffixes, and any name in `KB_IGNORE_FOLDERS`.
+
+A module-level singleton `cfg = Config()` is imported by every other module.
+
+---
 
 ### `server.py`
-The FastMCP application. Registers nine MCP tools:
+The FastMCP application. Registers **eleven MCP tools** in three groups:
 
-| Tool | What it does |
-|---|---|
-| `ask` | Full query pipeline via `orchestrator.ask()` |
-| `list_domains` | Returns indexed domain names and descriptions |
-| `reindex` | Rebuilds ChromaDB collections for all domains |
-| `clear_memory` | Deletes a session's conversation history |
-| `show_memory` | Returns a session's turn history |
-| `analyze_file` | Profiles any file; returns a DataCard (JSON) |
-| `suggest_questions` | Returns themed analytical questions for a file |
-| `query_data` | Asks clarifying questions then computes answer + reasoning |
-| `refine_query` | Re-runs the last query with updated params from user feedback |
+**Knowledge Base tools:**
 
-The five core tools delegate to `orchestrator.ask()`. The four analyst tools
-delegate to `kb_agent_mcp.analyst` and are self-contained (no ChromaDB, no
-vector index — raw file computation only).
+| Tool | Signature | What it does |
+|---|---|---|
+| `ask` | `ask(question, format?, session_id?)` | Gate check → stale check → `orchestrator.ask()` → optional ⚠ banner |
+| `list_domains` | `list_domains()` | `orchestrator.list_domains()` → names + descriptions |
+| `reindex` | `reindex()` | Rebuilds ChromaDB; clears stale cache, passthrough cache, gate sessions |
+| `clear_memory` | `clear_memory(session_id?)` | `memory.clear(session_id)` |
+| `show_memory` | `show_memory(session_id?)` | Session summary + last N turns (200-char truncated) |
 
-Also owns the stale-index TTL cache: a lightweight mtime scan runs at most
-once per `KB_STALE_CHECK_TTL_SECONDS` seconds and prepends a `⚠` banner to
-answers when new files are detected. At startup, validates `KB_ROOT` and the
-ChromaDB client; exits immediately with a human-readable error if either fails.
+**Security Gate tools:**
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `check_confidential` | `check_confidential(session_id?)` | `scan_all_domains()` → `generate_ack_token()` → save `GateSession(blocked)` |
+| `acknowledge_gate` | `acknowledge_gate(session_id, token)` | `validate_ack_token()` → save `GateSession(acknowledged)` |
+
+**Data Analyst tools:**
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `analyze_file` | `analyze_file(path)` | `inspector.inspect_file()` → DataCard JSON |
+| `suggest_questions` | `suggest_questions(path)` | `planner.suggest_questions(card)` → QuestionMenu JSON |
+| `query_data` | `query_data(path, question, session_id?)` | `engine.query_data()` → answer or clarifications |
+| `refine_query` | `refine_query(session_id, feedback)` | `engine.refine_query()` → updated answer |
+
+**Module-level state:**
+- `_stale_cache: dict` — `{stale, details, checked_at}`; TTL-guarded mtime scan
+- `_transport_mode: str` — `"stdio"` (default) or `"http"` (set by `main()`)
+
+---
 
 ### `orchestrator.py`
 Coordinates the full query pipeline for every `ask()` call:
 
-1. **Format intent detection** — regex phrases in the question (`"as a table"`,
-   `"in bullet points"`) are mapped to explicit format instructions passed to
-   every domain agent.
-2. **Keyword pre-filter** — each `DomainAgent`'s keyword list is scored against
-   the question. A confident match (≥2 hits in one domain, or 3× lead over
-   others) skips the LLM classifier entirely.
-3. **LLM intent classifier** — when keyword routing is ambiguous, an LLM call
-   returns a JSON `{ domains, needs_clarification, clarification_question }`.
-   In passthrough mode, keyword matching is used as a fallback (no LLM
-   available for routing).
-4. **Passthrough budget check** — before dispatch, estimates total context size
-   (`n_domains × top_n × max_chars`) against `KB_BUDGET_PASSTHROUGH_THRESHOLD`.
-   Reduces `top_n` if the estimate would overflow, and emits a warning in the
-   response.
-5. **Parallel dispatch** — calls `DomainAgent.run()` for each selected domain
-   concurrently via `asyncio.gather()`.
-6. **Answer merge** — if a single domain matched, returns its answer directly.
-   Multiple domains are joined with `---` separators. Passthrough blocks are
-   unwrapped into clean markdown with an instruction header for the host AI.
-7. **Memory persistence** — the question + answer are appended to the session
-   file (sync disk write, negligible latency).
+1. **Format intent detection** — `detect_format_intent()` scans for regex phrases
+   (`"as a table"`, `"in bullet points"`, etc.) and explicit `format=` flag.
+   Returns an instruction string injected into every domain agent's system prompt.
+2. **Keyword pre-filter** — `_keyword_confidence()` scores each domain's keyword list
+   against the question. Confident (≥2 hits in one domain, or 3× lead over others)
+   → skip LLM routing entirely.
+3. **LLM intent classifier** — `_classify_intent()` calls the LLM when keyword routing
+   is ambiguous. Returns `{ domains, needs_clarification, clarification_question }`.
+   Falls back to keyword routing in passthrough mode (no LLM call made).
+4. **Passthrough budget check** — `_adjusted_top_n()` estimates
+   `n_domains × top_n × max_chars` vs `KB_BUDGET_PASSTHROUGH_THRESHOLD × KB_BUDGET_TOTAL`.
+   Reduces `top_n` if overflow; emits a warning.
+5. **Parallel dispatch** — `asyncio.gather(DomainAgent.run() × N)` across selected domains.
+6. **Answer merge** — single domain → answer returned directly. Multiple → joined
+   with `---` separators. Passthrough blocks are unwrapped into clean markdown.
+7. **Memory persistence** — `add_turn_sync(session_id, question, answer)` appends
+   to the session file (sync disk write at the end of the pipeline).
+
+`_agents` is a module-level dict loaded lazily on first `ask()` call (double-checked
+locking via `asyncio.Lock`). `refresh_agents()` rebuilds it after `reindex()`.
+
+---
 
 ### `domain_agent.py`
-A thin per-domain wrapper around `base_agent.ask()`. On each `run()` call:
+`DomainAgent` wraps one knowledge folder. On each `run()` call:
 
-- Resolves `effective_top_n` (may be overridden by orchestrator for budget control).
-- Checks whether the question matches domain-specific `data_patterns` or the
-  global `is_data_question()` classifier; if so, bypasses README-first and calls
-  `_pre_rank()` first (vector search + pin/boost rules).
-- Otherwise delegates directly to `base_agent.ask()`.
-- `stale_file_count()` does a cheap `rglob` + ChromaDB `count()` comparison to
-  feed the orchestrator's stale-index warning.
+- Resolves `effective_top_n` — uses `top_n_override` from orchestrator (budget
+  reduction) when set, otherwise `self.config.top_n`.
+- Checks `_global_data_q(question)` (global data regex) OR
+  `self.config.is_data_question(question)` (domain data patterns). When true:
+  calls `_pre_rank()` (vector search + `apply_pin_rules()`) and passes
+  pre-ranked results directly to `base_agent.ask()`.
+- When not a data question: calls `base_agent.ask()` with no pre-ranked results
+  (README-first path).
+- `session_id` is threaded from orchestrator → `run()` → `base_agent.ask()` for
+  per-file confidential redaction in the security gate.
+- `stale_file_count()` returns `(files_on_disk, files_indexed)` using `rglob` +
+  `col.count()`. Returns `(0, 0)` on any error.
+
+`build_all_domain_agents()` (called by `refresh_agents()`) walks `KB_ROOT`,
+calls `load_domain_config(folder_name)` for each non-ignored directory, and
+instantiates one `DomainAgent` per discovered domain.
+
+---
 
 ### `base_agent.py`
-The README-first RAG pipeline. For each domain:
+The README-first RAG pipeline. Also owns all LLM call implementations and
+question classifiers.
 
-**Strategy 1 — README-first:**
-- Looks for a README (`.md` file in the domain folder, priority cascade).
-  Result is cached in `_README_CACHE` (5-min TTL via `_get_readme_cached()`) — the
-  filesystem is not re-read on every query.
-- Simple question → extracts the `<!-- KB:AUTO-INDEX:START -->` block and
-  the pre-index intro; compacts them via `context_budget.build_context()`.
-- Complex question (matches `_COMPLEX_QUESTION_RE`) → uses the full README
-  up to `KB_BUDGET_FULL_README` chars.
-- Data question (matches `_DATA_QUESTION_RE`) → skips README entirely.
+**Question classifiers** (module-level compiled regexes):
 
-**Strategy 2 — Raw-file RAG fallback:**
-- Used when README is absent/thin, or the question is a data query.
-- Calls `vector_store.search()` for top-N results.
-- Extracts text from each matched file concurrently via `file_parser.extract()`.
-- Assembles a context block with source labels and relevance scores.
+| Function | Regex | Effect |
+|---|---|---|
+| `is_complex_question()` | `_COMPLEX_QUESTION_RE` — compare, contrast, step-by-step, architecture, pros/cons, trade-off, etc. | Forces full README mode |
+| `is_data_question()` | `_DATA_QUESTION_RE` — revenue, total, how many, breakdown, by quarter/region, FY20XX, YTD, etc. | Forces raw-file RAG |
 
-In both strategies, if `is_passthrough()` is true, a structured
-`<<<KB_PASSTHROUGH>>>…<<<KB_PASSTHROUGH_END>>>` block is returned instead of
-an LLM answer. The orchestrator unwraps this into readable markdown.
+**README discovery priority cascade** (`_find_readme()`):
+1. Any `.md` whose name contains `readme`
+2. `<FolderName>.md`
+3. First `.md` with a Markdown heading in its first 500 chars
+4. First `.md` found in the folder
 
-Also owns all LLM call implementations (Ollama, OpenAI-compatible, Anthropic),
-and the `is_passthrough()` cache (checked once per process against Ollama;
-reset by `reindex()`).
+README is cached per `folder_name` in `_README_CACHE` (dict of `(path, text, loaded_at)`).
+TTL = 300 s. Only disk I/O on cold start or after TTL expiry.
 
-All outbound HTTP calls (LLM providers) reuse a shared `httpx.Client` singleton
-returned by `_get_http_client()`. The client is created once per process with
-connection pooling, saving 100–500 ms per call compared to a per-request client.
+**README context selection:**
+- Data question → skip README, go straight to RAG
+- README body < `KB_MIN_README_CHARS` (200) → treat as absent, go to RAG
+- Simple question → `_extract_auto_index()` (between `<!-- KB:AUTO-INDEX:START/END -->`)
+  + `context_budget.build_context()`
+- Complex question → full README text, trimmed to `KB_BUDGET_FULL_README`
+
+**RAG fallback** (when README absent/thin or data question):
+- `vector_store.search(domain, query, top_n)` → ranked `SearchResult` list
+- `asyncio.gather(file_parser.extract(f) for f in results)` — concurrent extraction
+- Context assembled as labelled blocks with source path and similarity score
+
+**Passthrough path** (`is_passthrough()` → `True`):
+- Returns `<<<KB_PASSTHROUGH>>>…<<<KB_PASSTHROUGH_END>>>` block with the retrieved
+  context. Orchestrator unwraps to clean markdown for the host AI.
+- `_passthrough_cache: bool | None` — checked once per process; reset by `reindex()`.
+
+**LLM call dispatch** (all in `base_agent.py`, called by `base_agent.ask()`):
+- Ollama: `POST /api/chat` with `{"model", "messages", "stream": false, "options": {"num_ctx"}}`
+- OpenAI / custom: `POST /chat/completions` with `{"model", "messages"}`
+- Anthropic: `POST /v1/messages` with `{"model", "messages", "max_tokens"}` + `x-api-key` header
+
+All three use `_get_http_client()` — a `httpx.Client` singleton with connection
+pooling (`max_keepalive=5`, `max_connections=10`). Saves 100–500 ms per call vs
+a per-request client.
+
+**Security gate integration** (`session_id` param):
+- `is_gate_acknowledged(session_id)` is checked before returning context.
+- Unacknowledged confidential files: their extracted text is replaced with a
+  placeholder (redacted); acknowledged ones are included with a `🔒` citation prefix.
 
 ### `vector_store.py`
 ChromaDB persistence layer. One collection per domain, stored under
@@ -177,206 +351,328 @@ Both keys are written together by `build_collection()`. Old indexes that predate
 this change only have `indexed_at`; the CLI tools fall back to converting it.
 
 ### `embeddings.py`
-Embedding backend with a three-tier fallback chain:
+Embedding backend with a two-tier fallback chain:
 
-1. **Configured provider** (Ollama `/api/embeddings`, OpenAI-compatible
-   `/embeddings`) — used when `KB_LLM_PROVIDER` is `ollama`, `openai`,
-   `anthropic`, or `custom`.
+1. **Configured provider** — used based on `KB_LLM_PROVIDER`:
+   - `ollama`: `POST {KB_LLM_BASE_URL}/api/embeddings` with `{"model", "prompt"}`
+   - `openai` / `anthropic` / `custom`: `POST {KB_LLM_BASE_URL}/embeddings` with `{"model", "input"}`
+   - `passthrough`: goes directly to tier 2 (no LLM endpoint called)
 2. **sentence-transformers** (`all-MiniLM-L6-v2`, ~80 MB, 384-dim) — used
-   directly when `KB_LLM_PROVIDER=passthrough`, or as a fallback when the
-   primary provider is unreachable and `KB_PASSTHROUGH_FALLBACK=true`.
+   when `KB_LLM_PROVIDER=passthrough`, or as an auto-fallback when the primary
+   provider fails and `KB_PASSTHROUGH_FALLBACK=true`.
 
-`_st_model_is_cached()` checks both the HuggingFace hub cache and the legacy
-torch cache before attempting a download. `_ensure_embedding_model()` is called
-at generate-time to front-load the download with a visible progress message.
+Public API: `await embed(text) → list[float]`, `_embed_sync(text) → list[float]`
+(sync wrapper used by `vector_store`), `embedding_dim() → int`, `backend_name() → str`.
 
-When `TRANSFORMERS_OFFLINE=1` is set and the model is not cached, a clear
-`RuntimeError` is raised with pre-cache instructions rather than hanging.
+`_st_model_is_cached()` checks `~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2`
+and the legacy torch path before attempting a download. `_ensure_embedding_model()`
+is called at generate-time to front-load the download with a progress message.
+
+When `TRANSFORMERS_OFFLINE=1` is set and the model is not cached, a `RuntimeError`
+is raised with pre-cache instructions rather than silently hanging.
+
+---
 
 ### `file_parser.py`
-Synchronous text extractors (run in thread pool via `asyncio.to_thread()`):
+Multi-format text extractor. All extractors are synchronous and are called via
+`asyncio.to_thread()` from the async pipeline.
+
+**`INCLUDE_EXTS`** (the set of indexed extensions):
+`.pdf`, `.docx`, `.pptx`, `.ppt`, `.xlsx`, `.xls`, `.md`, `.txt`, `.csv`, `.boxnote`, `.doc`
 
 | Format | Extractor |
 |---|---|
-| `.txt` `.md` `.csv` | UTF-8 read |
-| `.docx` | XML extraction from zip (`word/document.xml`) |
+| `.txt` `.md` `.csv` | UTF-8 read with `errors="ignore"` |
+| `.docx` `.doc` | XML extraction from zip (`word/document.xml`) |
 | `.pdf` | `pypdf` page iteration |
 | `.pptx` `.ppt` | `python-pptx` shape text |
 | `.xlsx` `.xls` < 50 MB | `openpyxl` with smart aggregation for sheets > 200 rows |
 | `.xlsx` `.xls` ≥ 50 MB | Streaming XML `iterparse` — never loads full workbook |
 | `.boxnote` | Recursive JSON tree walk |
+| other extensions | Filename returned as fallback text |
 
-Large XLSX files use a streaming aggregation strategy: the sheet is walked once
-with `iterparse`, numeric columns are summed by detected group-by dimensions
-(product, geography, quarter, etc.), and a compact markdown summary is returned
-instead of raw rows. This keeps context tokens small while preserving all
-analytically relevant information.
+**Large XLSX streaming strategy:** the sheet is walked once with `iterparse`,
+numeric columns are summed by detected group-by dimensions (`_AGG_KEYWORDS` dict:
+product, geography, quarter, year, division, etc.), and a compact markdown summary
+is returned instead of raw rows. Threshold = 50 MB (`_LARGE_XLSX_BYTES`).
+
+**`.noindex` sentinel** (`_has_noindex_ancestor(path)`): walks up the path from
+the file to `KB_ROOT` looking for a `.noindex` file. Returns `True` if found.
+`should_skip(path)` calls this (plus checks `_SKIP_PATTERNS` and non-`INCLUDE_EXTS`).
+
+Public API: `await extract(file_path, max_chars?) → str`, `snippet(file_path, max_chars=2000) → str` (sync, used by indexing).
+
+---
 
 ### `domain_rules.py`
-Loads and validates `domain_config.yaml` for each knowledge folder into a
-`DomainConfig` dataclass. Compiles `data_patterns` and `complex_patterns` as
-`re.Pattern` objects on first use (lazy). Applies `pin_files` (glob-forced
-inclusion) and `boost_keywords` (filename-based sort boost) to vector search
-results via `apply_pin_rules()`.
+Loads and validates `domain_config.yaml` for each knowledge folder.
+
+`DomainConfig` dataclass fields:
+`folder_name`, `agent_name`, `description`, `keywords` (list), `top_n` (int, default 5),
+`max_chars` (int), `system_prompt` (str), `pin_files` (list of glob patterns),
+`boost_keywords` (list), `data_patterns` (list of regex strings), `complex_patterns` (list).
+
+`load_domain_config(folder_name)` reads `domain_config.yaml` from the domain folder
+(via PyYAML when available, else falls back to a minimal config). Compiled
+`re.Pattern` objects for `data_patterns` / `complex_patterns` are materialised lazily
+on first `is_data_question()` / `is_complex_question()` call.
+
+`apply_pin_rules(results, config)` applies two retrieval adjustments to the
+`SearchResult` list returned by `vector_store.search()`:
+- **pin_files** — any result whose path matches a glob is prepended regardless of score
+- **boost_keywords** — results whose filename contains a boost keyword are sorted to top
+
+---
 
 ### `memory.py`
-Session memory with an in-memory cache layer. Each session is persisted as a
-JSON file at `{KB_ROOT}/.kb_index/session_memory/<session_id>.json` containing
-a message list and a `last_active` timestamp.
+Per-session conversation memory with disk persistence and an in-process cache.
 
-An in-process `_SESSION_CACHE` dict (5-min TTL) acts as a first-read layer:
-`_load_sync()` returns the cached value on warm reads and only hits disk on cold
-start or after the TTL expires. `_save_sync()` writes to both cache and disk.
-This avoids repeated disk I/O for sessions that receive multiple turns in quick
-succession.
+**Storage:** one JSON file per session at `{KB_ROOT}/.kb_index/session_memory/<session_id>.json`.
 
-Sessions expire automatically after `KB_SESSION_TIMEOUT_HOURS` hours of
-inactivity. Only the last `KB_SESSION_MAX_TURNS` turns are retained; assistant
-answers are truncated to `KB_SESSION_MAX_ANSWER_CHARS` before storage (the full
-answer was already returned to the caller).
+Session schema:
+```json
+{ "messages": [{"role": "user"|"assistant", "content": "…"}, …], "last_active": <unix float> }
+```
+
+`_SESSION_CACHE: dict[str, tuple[dict, float]]` — in-process cache keyed by
+`session_id`, value is `(data, loaded_at)`. TTL = 300 s. Warm reads return from
+cache without disk I/O. `_save_sync()` writes to both cache and disk.
+
+Session lifecycle:
+- Expires after `KB_SESSION_TIMEOUT_HOURS` of inactivity (reset to empty on access)
+- Last `KB_SESSION_MAX_TURNS` turns retained (`messages[:KB_SESSION_MAX_TURNS*2]`)
+- Assistant answers truncated to `KB_SESSION_MAX_ANSWER_CHARS` before storage
+
+Session filename is sanitised: `_SAFE_SESSION_RE = re.compile(r"[^a-zA-Z0-9_\-]")`.
 
 ### `analyst/` — Data Analyst capability add-on
 
-A self-contained sub-package that enables **live computation** over raw files.
-It does not use the vector index; it loads actual file data and aggregates,
-filters, or compares it to answer data questions that RAG cannot handle.
+A self-contained sub-package for **live file computation**. Does not use the
+vector index. Invoked when the question requires aggregation, trending,
+filtering, or comparison rather than semantic retrieval.
+
+Re-exports from `analyst/__init__.py`: `inspect_file`, `DataCard`,
+`suggest_questions`, `query_data`, `refine_query`.
 
 **`analyst/inspector.py`** — Schema profiler
 
-Reads any supported file and returns a `DataCard`: a structured description of
-columns, data types, grain (what one row represents), data themes, and quality
-warnings. Column classification (`metric`, `id`, `entity`, `time`,
-`categorical`, `text`) is driven by name-hint dictionaries and value statistics
-(numeric ratio, cardinality). Large XLSX files use a sparse-row cell-reference
-parser (handles files > 50 MB without loading the full workbook). DataCards are
-cached per `(path, mtime)` with a 5-minute TTL — repeated calls do not re-read
-the file.
+Reads any supported file and returns a `DataCard` dataclass:
+- `columns`: list of `ColumnInfo(name, kind, sample_values, …)`
+- Column kinds: `metric`, `id`, `entity`, `time`, `categorical`, `text`, `unknown`
+  (classified by `_METRIC_HINTS` / `_ID_HINTS` / `_TIME_HINTS` name dictionaries
+  + value statistics: numeric ratio, cardinality)
+- `grain`: what one row represents (detected by entity+time duplicity rate)
+- `themes`, `quality_warnings`, `row_count`, `col_count`
 
-**`analyst/planner.py`** — Question planner
+Tabular formats: `.xlsx`, `.xls`, `.csv`, `.tsv`, `.json` (list-of-dicts), `.jsonl`.
+Document formats: `.pdf`, `.docx`, `.pptx`, `.txt`, `.md`, `.boxnote`, `.rtf`.
+Mixed: PDFs with ≥1 table of ≥3 columns and ≥5 rows are profiled as tabular.
+Large XLSX (> 50 MB) uses a sparse-row cell-reference XML parser.
 
-Takes a `DataCard` and returns a `QuestionMenu`: a dict keyed by theme
-(`revenue`, `attrition`, `growth`, `concentration`, `anomaly`, `summary`,
-`document`). Each question carries a `clarifications` list — the parameters
-that must be collected before the computation can run. The planner is pure logic
-(no I/O) and intentionally over-inclusive: it suggests everything the data
-*could* answer.
+DataCards are cached in `_CARD_CACHE` per `(path_str, mtime)` with a 5-min TTL.
+
+**`analyst/planner.py`** — Question planner (pure logic, no I/O)
+
+`suggest_questions(card: DataCard) → QuestionMenu` returns a dict keyed by theme:
+`revenue`, `attrition`, `growth`, `concentration`, `anomaly`, `summary`, `document`.
+Each `Question` dict carries: `question`, `theme`, `requires` (column kinds needed),
+`clarifications` (list of clarifying-question dicts the engine will ask before running).
+Intentionally over-inclusive — suggests everything the data *could* answer.
 
 **`analyst/engine.py`** — Query engine
 
-`query_data(path, question, session_id)`:
+`query_data(path, question, session_id?)`:
+1. `inspect_file(path)` → `DataCard` (cache hit or compute)
+2. `_needs_clarification(question, card, params)` — checks: metric ambiguity
+   (>1 metric col, none named in question); time ambiguity (time cols present,
+   no period named). Returns `{status: "clarifying", clarifications: […]}` if needed.
+3. `_load_rows(path)` → `list[dict]` (xlsx / csv / json / jsonl; handles sparse xlsx)
+4. `_filter_rows(rows, params)` — time and entity filters
+5. `_build_answer(rows, question, card, params)` — dispatches by keywords:
+   - `"churn"` / `"attrition"` → `_attrition_pivot()` (entity × time pivot table)
+   - `"total"` / `"sum"` → `_aggregate(metric, None)`
+   - `"top"` / `"biggest"` → `_aggregate(metric, entity)` + `_top_n_by()`
+   - `"breakdown"` / `"group"` → `_aggregate(metric, group_col)`
+   - `"summary"` / `"quality"` → DataCard prose summary + warnings
+   - fallback → SUM of first metric column
+6. Returns `{status: "answered", answer, reasoning, suggested_followups, session_id}`
 
-1. Calls `inspect_file()` to get or retrieve the cached `DataCard`.
-2. Calls `_needs_clarification()` — checks for metric ambiguity and unknown
-   time ranges; returns clarifying questions if any params are missing.
-3. Loads the file into `list[dict]` using `_load_rows()` (supports xlsx, csv,
-   json/jsonl; handles sparse-row xlsx encoding).
-4. Applies time and entity filters, then calls `_build_answer()`.
-5. `_build_answer()` dispatches to the right computation branch based on
-   keywords in the question: attrition pivot, total/sum, top-N ranking,
-   group-by breakdown, or summary/data quality.
-6. Returns a structured dict: `{status, session_id, answer, reasoning, suggested_followups}`.
+`refine_query(session_id, feedback)` parses free-text feedback into param updates:
+- `FY2025` / `Q1` / `2026` → `sess.params["time_range"]`
+- `"top 20"` → `sess.params["top_n"]`
+- pending clarification answer → matched against choices, stored in params
+Then re-runs `query_data(file_path, original_question, session_id)`.
 
-`refine_query(session_id, feedback)` parses free-text feedback, updates
-`sess.params` (time range, metric column, top_n, pending clarification
-answers), then re-runs `query_data()` against the same file and original
-question.
+**`analyst/session.py`** — Analyst session state (separate from `memory.py`)
 
-**`analyst/session.py`** — Analyst session state
+`AnalystSession` dataclass: `session_id`, `file_path`, `data_card`, `original_question`,
+`params`, `pending_clarifications`, `last_answer`, `last_reasoning`, `turns` (20-turn window).
 
-Separate from `memory.py`. Stores file path, DataCard, original question,
-collected params, pending clarifications, last answer/reasoning, and a rolling
-20-turn conversation window. Persisted as JSON under
-`{KB_ROOT}/.kb_index/analyst_sessions/<session_id>.json`. Uses the same
-in-memory 5-minute TTL cache pattern as `memory.py`.
+Storage: `{KB_ROOT}/.kb_index/analyst_sessions/<session_id>.json`.
+Same 5-min in-process TTL cache pattern as `memory.py`.
+Expiry: `KB_SESSION_TIMEOUT_HOURS` (shared env var).
+
+---
 
 ### `context_budget.py`
-Central registry of all character budgets (read from `cfg`). Provides:
-- `trim(text, key)` — hard-trim with newline-aware cut point.
-- `compact_index_block(block)` — strips boilerplate headings, normalises
-  multi-column tables to two columns (File | Summary), collapses repeated-
-  version file groups, truncates per-row summaries.
-- `build_context(pre_index, index_block)` — assembles the compacted README
-  context for simple questions.
-- `COLLAPSE_RULES` — extensible via `KB_COLLAPSE_PATTERNS` env var.
+Central registry of all character budgets (read from `cfg` at module load).
+
+Budget keys and values:
+
+| Key | Default (chars) | Description |
+|---|---|---|
+| `total` | 24 000 | Hard ceiling — any context sent to any LLM |
+| `index` | 8 000 | README AUTO-INDEX block (simple questions) |
+| `full_readme` | 24 000 | Full README (complex questions) |
+| `pre_index` | 2 000 | Hand-written README intro |
+| `rag_file` | 4 000 | Max chars per file in RAG fallback + gate scan |
+| `history` | 4 | Conversation turns (not chars) included in each LLM call |
+| `summary` | 500 | Per-file summary line in AUTO-INDEX table |
+| `embed_chars` | 3 500 | Max chars of text sent to embedding endpoint |
+| `min_readme` | 200 | README below this is treated as absent |
+| `num_ctx` | 32 768 | Ollama `num_ctx` option |
+
+Public API:
+- `get(key) → int` — return budget value; raises `KeyError` if unknown
+- `tokens(key) → int` — `get(key) // 4` (rough token estimate)
+- `trim(text, budget_key) → str` — hard-trim at newline boundary
+- `trim_summary(summary, filename) → str` — inline trim for index table rows
+- `compact_index_block(block) → str` — strips headings, normalises tables to
+  `File | Summary`, collapses repeated-version groups, truncates per-row summaries
+- `compact_pre_index(text) → str` — trims intro section to `pre_index` budget
+- `build_context(pre_index, index_block) → str` — assembles compacted README context
+- `COLLAPSE_RULES` — extensible via `KB_COLLAPSE_PATTERNS` env var (comma-separated)
 
 ---
 
 ## Module responsibilities (CLI)
 
 ### `cli/main.py`
-Unified entry point (`kb-agent`). Parses the first positional argument as a
-subcommand and delegates to the appropriate CLI module in-process (no subprocess
-fork). Registered subcommands: `init`, `setup`, `generate`, `serve`, `watch`,
-`doctor`, `status`.
+Unified entry point (`kb-agent`). Reads `sys.argv[1]` as the subcommand,
+patches `sys.argv`, and imports + calls the subcommand's `main()` in-process
+(no subprocess fork). Registered subcommands:
 
-`kb-agent init` is the recommended first-time path: it calls `run_setup()`,
-`run_generate()`, and `run_doctor()` in sequence within a single process, giving
-the user a guided setup → index-build → health-check flow in one command.
+| Subcommand | Module | Description |
+|---|---|---|
+| `setup` | `cli.setup` | Interactive setup wizard |
+| `generate` | `cli.generate` | Build/rebuild ChromaDB indexes |
+| `serve` | `server` | Start MCP server |
+| `watch` | `cli.watch` | Filesystem watcher |
+| `doctor` | `cli.doctor` | Health checks with auto-fix |
+| `status` | `cli.status` | Per-domain status table |
+| `init` | _(inline)_ | `setup` → `generate` → `doctor` in sequence |
+
+`kb-agent init` is the recommended first-time path — runs all three steps in one command.
+
+---
 
 ### `cli/setup.py`
-The canonical interactive setup wizard (`kb-agent-setup`). Guides a new user through:
-Python check → build-tools pre-flight → venv recommendation → KB_ROOT selection →
-LLM configuration (two-question design: Q&A mode + optional API key for generate) →
-`.env` write → `kb-agent-generate` invocation → interactive keyword editor for domains
-that received minimal YAML (no LLM available during generate).
+The canonical interactive setup wizard (`kb-agent-setup`). Setup steps:
 
-`scripts/setup.py` at the repo root is a **thin shim** (~12 lines) that delegates
-entirely to this module via `python -m kb_agent_mcp.cli.setup`. It exists only for
+```
+Python ≥ 3.10 check
+Build tools pre-flight (xcode-select / gcc)
+venv recommendation (warns if system Python)
+KB_ROOT selection (CWD / existing path / new path)
+LLM configuration
+  Q1: Q&A mode  → passthrough / ollama / openai / anthropic / custom
+  Q2: API key available? (passthrough path only — for generate + fallback)
+  _test_api_key() — live HTTP verification (optional)
+write_env() → writes KB_ROOT + LLM vars to .env
+run_generate() → kb-agent-generate (discovers, indexes, writes skill)
+interactive_keyword_editor() (offered when domains got minimal YAML)
+```
+
+Flags: `--yes` (non-interactive, passthrough default), `--kb-root <path>`.
+
+`scripts/setup.py` is a 12-line shim → `kb_agent_mcp.cli.setup`. Exists for
 backward compatibility with cloned-repo users and the `knowledgebase-install` skill.
 
+---
+
 ### `cli/generate.py`
-Index builder and domain YAML generator (`kb-agent-generate`). Discovers top-level
-knowledge folders, upserts changed files into ChromaDB (hash-delta incremental), calls
-the configured LLM to generate `domain_config.yaml`, validates the output, and installs
-the Bob skill. Flags: `--force`, `--no-llm`, `--domain <name>`, `--yes`.
+Index builder and domain YAML generator (`kb-agent-generate`).
+
+```
+_ensure_embedding_model()        download all-MiniLM-L6-v2 if not cached
+_get_client()                    probe ChromaDB; offer auto-rebuild on schema mismatch
+_discover_folders()              top-level non-ignored folders under KB_ROOT
+for each folder:
+  build_collection(domain, folder_path)
+    for each file (hash-delta — skips unchanged):
+      snippet(file_path) → _embed_sync() → col.upsert(id, embedding, metadata)
+    set_domain_metadata(domain, {indexed_at, indexed_at_iso, …})
+  _generate_yaml_for_folder()    LLM → domain_config.yaml  (or _minimal_yaml() if no LLM)
+  _validate_yaml()               required-key check; falls back to minimal on failure
+  write domain_config.yaml
+_install_bob_skill()             writes ~/.bob/skills/knowledgebase-agent/SKILL.md
+```
+
+Flags: `--force` (regenerate all YAML), `--no-llm` (index only), `--domain <name>`, `--yes`.
+
+---
 
 ### `cli/watch.py`
-Filesystem watcher (`kb-agent-watch`). Backed by `watchdog`, debounced at 5 s. Handles:
-file add/modify/delete → upsert/delete from ChromaDB; new top-level folder → trigger
-generate flow; folder deleted → purge collection. `--no-prompt` auto-accepts new domains
-for CI/headless use.
+Filesystem watcher (`kb-agent-watch`). Backed by `watchdog`, debounced at 5 s.
+
+| Event | Action |
+|---|---|
+| File added / modified | `upsert_file(domain, path)` → re-embed into ChromaDB |
+| File deleted | `delete_file(domain, path)` → remove from ChromaDB |
+| File renamed | remove old path + upsert new path |
+| New top-level folder | prompt Accept/Skip → if accepted, run generate flow |
+| Top-level folder deleted | `delete_collection(domain)` — purge ChromaDB collection |
+
+Flags: `--no-prompt` — auto-accepts new folders (CI/headless).
+
+---
 
 ### `cli/doctor.py`
-Health checklist (`kb-agent-doctor`). Runs 9 checks and prints a `✓`/`✗`/`⚠` report.
-Exit code 0 = healthy, 1 = failures remain.
+Health checklist (`kb-agent-doctor`). Runs 9 checks and prints `✓`/`✗`/`⚠`.
+Exit code 0 = all pass, 1 = any failure.
 
-Each check returns a `CheckResult(label, passed, fix_fn)` NamedTuple. When `--fix` is
-passed, the doctor calls `fix_fn()` for every failing check that has one, then re-runs
-all checks to show the final state. Auto-fixable failures:
+The ChromaDB check also detects a schema/version mismatch as a branch within check ⑤ and offers an auto-fix; it is not a separate numbered check.
 
-| Failure | Auto-fix |
-|---|---|
-| KB_ROOT directory missing | `mkdir -p` the path |
-| `domain_config.yaml` missing | `kb-agent-generate --domain <name> --no-llm --yes` |
-| ChromaDB index empty | `kb-agent-generate --domain <name> --no-llm --yes` |
-| ChromaDB version mismatch | prompt → `rm -rf .kb_index/chroma/` + full generate |
-| Embedding model not cached | `_ensure_embedding_model()` (downloads ~80 MB) |
-| Bob skill not installed | `kb-agent-generate --no-llm --yes` |
+| # | Check | Auto-fixable? | Fix |
+|---|---|---|---|
+| ① | Python ≥ 3.10 | ✗ | — |
+| ② | `KB_ROOT` set + exists | ✗ | Hint: set env var |
+| ③ | At least one domain folder | ✗ | Hint: create a folder |
+| ④ | `domain_config.yaml` present per domain | ✓ | `kb-agent-generate --domain <name> --no-llm --yes` |
+| ⑤ | ChromaDB collection non-empty per domain (+ version mismatch branch) | ✓ | `kb-agent-generate --domain <name> --no-llm --yes` / delete index |
+| ⑥ | Embedding model cached | ✓ | `_ensure_embedding_model()` (~80 MB download) |
+| ⑦ | LLM reachable (or passthrough) | ✗ | Hint: start Ollama or set provider |
+| ⑧ | `kb-agent-serve` on PATH | ✗ | Hint: check pip install / PATH |
+| ⑨ | Bob skill installed | ✓ | `kb-agent-generate --no-llm --yes` |
 
-Non-auto-fixable (printed with manual hint): unset `KB_ROOT` env var, LLM server
-unreachable, `kb-agent-serve` not on PATH.
+`--fix` calls `fix_fn()` for each fixable failure, then re-runs all checks.
+`stale_file_count()` uses `STALE_DAYS = 7` constant shared with `status.py`.
+
+---
 
 ### `cli/status.py`
-Read-only status dashboard (`kb-agent-status`). Collects per-domain data from
-ChromaDB and the filesystem and renders a Rich table. Zero side effects — safe to run
-at any time.
+Read-only status dashboard (`kb-agent-status`). Renders a Rich table — zero side effects.
+
+Rich table columns:
 
 | Column | Source |
 |---|---|
 | Domain | `kb_root.iterdir()` filtered by `cfg.is_ignored()` |
-| Files | `rglob` count of indexable extensions |
-| Indexed | `indexed_at_iso` from ChromaDB metadata (falls back to `indexed_at` float for old indexes) |
+| Files | `rglob` count of indexable extensions (via `file_parser.INCLUDE_EXTS`) |
+| Indexed | `indexed_at_iso` from ChromaDB metadata (falls back to `indexed_at` float) |
+| Age | days since `indexed_at` |
 | Docs | `col.count()` — ChromaDB document count |
-| YAML | presence of `domain_config.yaml` |
-| Status | fresh / stale (>7 d) / empty index / DB mismatch |
+| YAML | ✓ / ✗ — presence of `domain_config.yaml` |
+| Status | `fresh` / `stale (>7 d)` / `empty index` / `DB mismatch` |
 
-Footer shows: LLM provider, embedding model (cached/not), absolute `kb-agent-serve`
-path, Bob skill presence.
+Footer shows: LLM provider, embedding model (cached/not), absolute `kb-agent-serve` path,
+Bob skill presence.
 
 Flags:
-- `--json` — machine-readable JSON (scriptable)
-- `--plain` — no ANSI colours (CI/log capture)
-- `--tui` — live-refresh with `rich.live.Live` (Ctrl+C to quit)
+- `--diff` — show stale / missing files per domain (per-file breakdown)
+- `--json` — machine-readable JSON output (scriptable)
+- `--plain` — no ANSI colours (CI / log capture)
+- `--tui` — live-refresh table with `rich.live.Live` (Ctrl+C to quit)
 - `--interval N` — refresh interval in seconds for `--tui` (default: 5)
 
 ---
@@ -537,3 +833,318 @@ MCP client → server.refine_query(session_id, feedback)
 Embedding fallback: when any provider's embedding endpoint fails and
 `KB_PASSTHROUGH_FALLBACK=true`, `sentence-transformers` (`all-MiniLM-L6-v2`)
 is used automatically.
+
+---
+
+## Security gate
+
+### Overview
+
+`kb_agent_mcp/security_gate.py` implements a **patentable anti-trick gate** that
+prevents a malicious document from self-authorising access to confidential content.
+
+The key mechanism: the acknowledgement token is generated **at call time** — it
+cannot exist inside any document that was indexed before `check_confidential()` was
+called. A prompt-injection attack (a document that says "token is ABCD1234") cannot
+succeed because the correct token only materialises in the live terminal/chat after
+the scan, never inside indexed text.
+
+### Classification pipeline
+
+Five signal sources are checked in priority order; the first match wins.
+
+| Priority | Source | Mechanism |
+|---|---|---|
+| 1 | EML `Sensitivity:` header | `email.message_from_bytes()` → header value in `_EML_SENSITIVE_VALUES` |
+| 2 | PDF `/Keywords` + `/Subject` | `pypdf.PdfReader.metadata` → `_CONFIDENTIAL_RE` keyword scan |
+| 3 | DOCX core properties | `docProps/core.xml` inside zip → `_CONFIDENTIAL_RE` scan |
+| 4 | File path / filename | Full path string, `_` and `-` normalised to spaces → `_CONFIDENTIAL_RE` |
+| 5 | Text body | First `KB_BUDGET_RAG_FILE` chars of extracted text → `_CONFIDENTIAL_RE` |
+
+`_CONFIDENTIAL_RE` matches (case-insensitive, word-bounded) 16 keywords:
+`confidential`, `internal use only`, `not for distribution`, `not for sharing`,
+`do not share`, `do not distribute`, `proprietary`, `restricted`, `privileged`,
+`ibm confidential`, `company confidential`, `for internal use`, `classification:`,
+`sensitive`, `top secret`, `private and confidential`.
+
+The path classifier normalises `_` and `-` to spaces before scanning so that
+filenames like `ibm_confidential_doc.pdf` are detected correctly despite `\b`
+word boundaries not firing around underscore characters.
+
+### `.noindex` sentinel — hard exclusion
+
+A file named `.noindex` placed in any subfolder hard-excludes **all files** in that
+folder and every nested subfolder. This is enforced in two independent places:
+
+- **`security_gate.scan_domain()`** — `.noindex`-covered files are skipped before
+  `classify_confidential()` is called; they never appear in scan results.
+- **`file_parser.should_skip()`** — `_has_noindex_ancestor()` returns `True` for
+  any file under a `.noindex` ancestor; the file is never extracted during indexing.
+
+Because both enforcement points are independent, even if the scan were bypassed the
+file would still be absent from the vector index.
+
+### Acknowledgement flow (per-session)
+
+```
+User (or AI tool)
+│
+├── check_confidential(session_id)
+│     ├── scan_all_domains()
+│     │   └── for each domain:
+│     │       └── scan_domain(name)
+│     │             ├── skip .noindex files
+│     │             └── classify_confidential(file) → (True, reason) or (False, "")
+│     │
+│     ├── [no confidential files found]
+│     │     save GateSession(status="clear")
+│     │     return "✅ Security gate: clear."
+│     │
+│     └── [confidential files found]
+│           token = generate_ack_token()   ← secrets.token_hex(4).upper()
+│           save GateSession(status="blocked", ack_token=token, files=[…])
+│           return "⛔ Gate activated.  Token: <TOKEN>"
+│                  ↑ user reads this in the chat — no document can forge it
+│
+├── acknowledge_gate(session_id, token)
+│     ├── load_gate_session(session_id)
+│     ├── validate_ack_token(stored, provided)
+│     │     └── hmac.compare_digest(stored.upper(), provided.upper())
+│     │                             (constant-time — no timing oracle)
+│     ├── [token wrong]  return "❌ Wrong token."
+│     └── [token correct]
+│           save GateSession(status="acknowledged", acknowledged_at=now)
+│           return "✅ Gate cleared."
+│
+└── ask(question, session_id)   ← all subsequent calls
+      ├── is_gate_acknowledged(session_id)
+      │     └── [not acknowledged AND status==blocked]
+      │           return "⛔ Security gate is active…"  (refuses to answer)
+      └── [clear or acknowledged]
+            → normal orchestrator dispatch
+```
+
+### Per-file enforcement in `base_agent.ask()`
+
+When the gate has been acknowledged, `base_agent.ask()` still applies per-file
+access control to every retrieved chunk:
+
+| Gate state | File classified confidential | Behaviour |
+|---|---|---|
+| disabled | — | File content included, no decoration |
+| `blocked` | yes | Answer refused entirely at `server.ask()` |
+| `acknowledged` | yes | Content included; citation prefixed with `🔒` |
+| `clear` | no confidential files exist | Normal answer, no prefix |
+
+### Gate session persistence
+
+Sessions are stored in `{KB_ROOT}/.kb_index/gate_sessions.json` as a flat JSON
+dict keyed by `session_id`. Each entry is a serialised `GateSession` dataclass:
+
+```json
+{
+  "my-session": {
+    "session_id": "my-session",
+    "status": "acknowledged",
+    "ack_token": "B7E2A3F1",
+    "confidential_files": [
+      { "domain": "BizOps", "relative_path": "BizOps/internal_revenue.xlsx",
+        "filename": "internal_revenue.xlsx", "reason": "filename / folder path" }
+    ],
+    "created_at": 1720000000.0,
+    "acknowledged_at": 1720000042.0
+  }
+}
+```
+
+`reindex()` calls `clear_all_gate_sessions()` — every session must re-acknowledge
+against the refreshed file inventory after a full rebuild.
+
+### Key design invariants
+
+1. **Token cannot be pre-planted** — generated after indexing, never stored in a
+   document, surfaces only in the live chat response.
+2. **Constant-time comparison** — `hmac.compare_digest` prevents timing oracle.
+3. **Dual-enforcement** — `.noindex` exclusion at both scan time and index time.
+4. **Reindex invalidation** — gate sessions are wiped on every full reindex.
+5. **Gate bypass when disabled** — `KB_SECURITY_GATE_ENABLED=false` makes
+   `is_gate_acknowledged()` always return `True`; no disk I/O on the hot path.
+
+---
+
+## System boundary map
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  MCP HOST PROCESS  (Claude Desktop / Bob / Cursor / custom client)      │
+│                                                                         │
+│   [AI Model]  ←──── tool responses ────  [MCP Client SDK]              │
+│       │                                           ↑                    │
+│       └──────── tool calls (JSON) ────────────────┘                    │
+└──────────────────────────────────┬────────────────────────────────────-┘
+                                   │  stdio (pipe) or HTTP/SSE
+┌──────────────────────────────────▼──────────────────────────────────────┐
+│  kb-agent-serve  (FastMCP server process)                               │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │  server.py  (11 MCP tools)                                      │   │
+│  │  ┌──────────┐ ┌─────────────┐ ┌────────────────┐ ┌──────────┐  │   │
+│  │  │  ask()   │ │list_domains │ │   reindex()    │ │ memory   │  │   │
+│  │  └─────┬────┘ └──────┬──────┘ └───────┬────────┘ └──────────┘  │   │
+│  │        │             │                │                          │   │
+│  │  ┌─────▼─────────────▼────────────────▼──────────────────────┐  │   │
+│  │  │  check_confidential()    acknowledge_gate()                │  │   │
+│  │  │  (Security Gate tools)                                     │  │   │
+│  │  └─────────────────────────────────────────────────────────-─┘  │   │
+│  │                                                                  │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │  Data Analyst tools                                        │  │   │
+│  │  │  analyze_file  suggest_questions  query_data  refine_query │  │   │
+│  │  └───────────────────────┬────────────────────────────────────┘  │   │
+│  └──────────────────────────┼────────────────────────────────────-──┘   │
+│                             │                                            │
+│  ┌──────────────────────────▼──────────────────────────────────────┐   │
+│  │  orchestrator.py                                                │   │
+│  │  keyword_confidence → LLM classify → asyncio.gather(agents)     │   │
+│  └────────────┬──────────────────────────────┬─────────────────────┘   │
+│               │                              │                          │
+│  ┌────────────▼──────────┐      ┌────────────▼──────────┐             │
+│  │  domain_agent.py (×N) │ ···  │  domain_agent.py (×N) │             │
+│  │  DomainAgent.run()    │      │  DomainAgent.run()    │             │
+│  └────────────┬──────────┘      └────────────┬──────────┘             │
+│               │                              │                          │
+│  ┌────────────▼──────────────────────────────▼─────────────────────┐   │
+│  │  base_agent.py                                                   │   │
+│  │  README-first → RAG fallback → LLM call / passthrough block     │   │
+│  └────────┬───────────────────────────────────────┬────────────────┘   │
+│           │                                       │                     │
+│  ┌────────▼──────────┐              ┌─────────────▼─────────────────┐  │
+│  │  vector_store.py  │              │  file_parser.py               │  │
+│  │  ChromaDB client  │              │  multi-format text extractor  │  │
+│  └────────┬──────────┘              └───────────────────────────────┘  │
+│           │                                                              │
+│  ┌────────▼──────────┐   ┌────────────────┐   ┌──────────────────────┐ │
+│  │  embeddings.py    │   │   memory.py    │   │  security_gate.py    │ │
+│  │  2-tier fallback  │   │  session JSON  │   │  classify / gate     │ │
+│  └────────┬──────────┘   └───────────────-┘   └──────────────────────┘ │
+└───────────┼─────────────────────────────────────────────────────────────┘
+            │
+┌───────────▼────────────────────────────────────────────────────────────┐
+│  FILESYSTEM  (KB_ROOT)                                                 │
+│                                                                        │
+│  {KB_ROOT}/                                                            │
+│    <Domain A>/   PDF DOCX XLSX MD …   domain_config.yaml              │
+│    <Domain B>/   …                    domain_config.yaml              │
+│    .kb_index/                                                          │
+│      chroma/            ChromaDB collections (embeddings + metadata)  │
+│      session_memory/    <session_id>.json                             │
+│      analyst_sessions/  <session_id>.json                             │
+│      gate_sessions.json gate state per session                        │
+└────────────────────────────────────────────────────────────────────────┘
+            │
+┌───────────▼────────────────────────────────────────────────────────────┐
+│  EXTERNAL SERVICES  (optional — zero calls in passthrough/Ollama mode) │
+│                                                                        │
+│  Ollama API   http://localhost:11434   /api/chat  /api/embeddings      │
+│  OpenAI API   https://api.openai.com   /chat/completions  /embeddings  │
+│  Anthropic    https://api.anthropic.com  /v1/messages                 │
+│  Custom       any OpenAI-compatible URL                                │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Inter-module import graph
+
+```
+server.py
+├── config.py  (cfg singleton)
+├── orchestrator.py
+│   ├── config.py
+│   ├── domain_agent.py
+│   │   ├── config.py
+│   │   ├── base_agent.py
+│   │   │   ├── config.py
+│   │   │   ├── vector_store.py  ──→  embeddings.py ──→  config.py
+│   │   │   ├── file_parser.py   ──→  config.py
+│   │   │   ├── memory.py        ──→  config.py
+│   │   │   └── context_budget.py ──→ config.py
+│   │   └── domain_rules.py  ──→  config.py
+│   └── context_budget.py
+├── security_gate.py
+│   ├── config.py
+│   └── file_parser.py  (for _has_noindex_ancestor, _extract_sync)
+└── analyst/
+    ├── inspector.py  ──→  file_parser.py
+    ├── planner.py    (pure logic, no imports except dataclasses)
+    ├── engine.py     ──→  inspector.py, session.py, config.py
+    └── session.py    ──→  config.py
+
+cli/
+├── main.py      ──→  setup.py, generate.py, server.py, watch.py, doctor.py, status.py
+├── setup.py     ──→  generate.py, config.py
+├── generate.py  ──→  vector_store.py, embeddings.py, domain_rules.py, config.py
+├── watch.py     ──→  vector_store.py, generate.py, config.py
+├── doctor.py    ──→  vector_store.py, embeddings.py, config.py
+└── status.py    ──→  vector_store.py, config.py
+```
+
+All modules import `config.cfg` at module load time (frozen dataclass singleton).
+No circular imports — `config.py` has no imports from the package.
+`security_gate.py` imports `file_parser._has_noindex_ancestor` and
+`file_parser._extract_sync`; `file_parser.py` does not import `security_gate.py`.
+
+---
+
+## Environment variable reference
+
+| Variable | Default | Module | Description |
+|---|---|---|---|
+| `KB_ROOT` | CWD | `config.py` | Absolute path to the knowledge base root directory |
+| `KB_IGNORE_FOLDERS` | _(empty)_ | `config.py` | Comma-separated extra folder names to skip during discovery |
+| `KB_LLM_PROVIDER` | `ollama` | `config.py` | LLM provider: `ollama` \| `openai` \| `anthropic` \| `custom` \| `passthrough` |
+| `KB_LLM_BASE_URL` | `http://localhost:11434` | `config.py` | Base URL for the LLM API endpoint |
+| `KB_MODEL` | `qwen3:14b` | `config.py` | Model name used for Q&A and intent classification |
+| `KB_API_KEY` | _(empty)_ | `config.py` | API key for OpenAI / Anthropic / custom providers |
+| `KB_PASSTHROUGH_FALLBACK` | `true` | `config.py` | Auto-switch to passthrough when Ollama is unreachable |
+| `KB_LLM_PROVIDER_GENERATE` | _(empty)_ | `config.py` | Override provider used by `kb-agent-generate` (written by setup wizard) |
+| `KB_EMBED_MODEL` | _(auto)_ | `config.py` | Embedding model; auto-detected from provider if blank |
+| `KB_BUDGET_TOTAL` | `24000` | `context_budget.py` | Hard character ceiling for all LLM context |
+| `KB_BUDGET_INDEX` | `8000` | `context_budget.py` | README index block budget (simple questions) |
+| `KB_BUDGET_FULL_README` | `24000` | `context_budget.py` | Full README budget (complex questions) |
+| `KB_BUDGET_PRE_INDEX` | `2000` | `context_budget.py` | Hand-written README intro budget |
+| `KB_BUDGET_RAG_FILE` | `4000` | `context_budget.py` | Max chars per file in RAG fallback and gate scan |
+| `KB_BUDGET_SUMMARY` | `500` | `context_budget.py` | Per-file summary line budget in AUTO-INDEX table |
+| `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint |
+| `KB_MIN_README_CHARS` | `200` | `base_agent.py` | README below this length is treated as absent |
+| `KB_NUM_CTX` | `32768` | `base_agent.py` | Ollama `num_ctx` parameter |
+| `KB_SESSION_TIMEOUT_HOURS` | `2` | `memory.py` | Session auto-expiry in hours |
+| `KB_SESSION_MAX_TURNS` | `20` | `memory.py` | Max turns retained per session |
+| `KB_SESSION_MAX_ANSWER_CHARS` | `400` | `memory.py` | Answer characters stored in session history |
+| `KB_STALE_CHECK_TTL_SECONDS` | `60` | `server.py` | Seconds between mtime scans in `ask()` (0 = disabled) |
+| `KB_BUDGET_PASSTHROUGH_THRESHOLD` | `0.8` | `orchestrator.py` | Fraction of `KB_BUDGET_TOTAL` that triggers `top_n` reduction in passthrough mode |
+| `KB_FORMAT_DEFAULT` | _(empty)_ | `server.py` | Default output format when none is specified |
+| `KB_SECURITY_GATE_ENABLED` | `true` | `security_gate.py` | Set to `false` to disable the confidentiality gate entirely |
+
+`.env` search order: CWD → `$HOME` → `KB_ROOT` → package root.
+Values already in the environment are never overwritten.
+
+---
+
+## Backward compatibility — `agents/` layer
+
+The original `agents/` directory is retained unchanged alongside `kb_agent_mcp/`.
+Both systems can run independently from the same `KB_ROOT`.
+
+| Component | Path | Status |
+|---|---|---|
+| Legacy CLI | `agents/agent_knowledgebase.py` | Still works; reads same `.kb_index/` |
+| Ingest script | `agents/ingest.py` | Still works; writes JSON context files |
+| Setup shim | `scripts/setup.py` | Thin shim → `kb_agent_mcp.cli.setup` |
+| Bob skill | `agents/SKILL.md` | Active; points at legacy agent |
+| MCP server | `kb_agent_mcp/server.py` | New canonical entry point |
+| Bob skill (MCP) | `~/.bob/skills/knowledgebase-agent/SKILL.md` | Generated by `kb-agent-generate` |
+
+The security gate (`security_gate.py`) is implemented only in `kb_agent_mcp/`.
+Legacy `agents/` queries bypass the gate — this is intentional for backward
+compatibility and does not affect MCP-based deployments.
