@@ -111,7 +111,7 @@ INCLUDE_EXTS  = {".pdf", ".docx", ".pptx", ".xlsx", ".ppt", ".doc",
 # Files whose name contains any of these strings are never indexed or trigger README updates.
 # "readme" catches all README variants; the watcher itself writes READMEs so we must
 # ignore those writes to prevent an infinite update loop.
-SKIP_PATTERNS = {"readme", ".ds_store", ".watch.log", "thumbs.db"}
+SKIP_PATTERNS = {"readme", ".ds_store", ".watch.log", "thumbs.db", "~$"}
 DEBOUNCE_SECS = 5
 
 # README markers
@@ -426,38 +426,95 @@ def _call_llm(prompt: str) -> str:
     r.raise_for_status()
     return r.json()["message"]["content"].strip()
 
-# ── File summary (cached, LLM or fallback) ────────────────────────────────────
+# ── File summary (cached, LLM or heuristic fallback) ─────────────────────────
+#
+# Feature 8 — Hybrid heuristic summaries
+# ──────────────────────────────────────
+# When LLM is unavailable we generate a heuristic summary immediately (offline)
+# and mark the cache entry with needs_llm_upgrade=True.  A background upgrade
+# queue (max 5 per dispatch cycle) attempts the LLM call later; on success the
+# cache entry is updated and the README re-written.
 
-def generate_file_summary(file_path: pathlib.Path) -> str:
-    snippet = extract_snippet(file_path)
-    if not snippet or snippet.startswith("["):
-        return f"{file_path.suffix.upper().lstrip('.')} file"
+_LLM_UPGRADE_QUEUE: list[tuple[pathlib.Path, str]] = []   # (file_path, rel_key)
+_LLM_UPGRADE_MAX_PER_CYCLE = 5
 
-    # For large XLSX files the snippet IS the streaming aggregate — a structured
-    # multi-line breakdown of revenue/data by dimension.  Collapsing it to 20
-    # words would destroy all the numeric detail the agents need.  Return it as-is.
+
+def _heuristic_summary(file_path: pathlib.Path, snippet: str) -> str:
+    """
+    Produce a best-effort offline summary without an LLM.
+
+    Rules (in order):
+    1. Large XLSX → keep the full streaming aggregate (numeric detail matters).
+    2. Multi-line snippet → first meaningful line, stripped and capped.
+    3. Short snippet → return as-is, capped to 200 chars.
+    4. Nothing useful → "<EXT> file".
+    """
     MAX_XLSX_BYTES = 50 * 1024 * 1024
     if (file_path.suffix.lower() in {".xlsx", ".xls"}
             and file_path.stat().st_size > MAX_XLSX_BYTES):
-        return snippet  # keep full structured summary
+        return snippet  # preserve full structured summary
 
-    if not _llm_available():
-        return snippet.replace("\n", " ").strip()[:200] or file_path.name
+    lines = [l.strip() for l in snippet.splitlines() if l.strip()]
+    if not lines:
+        return f"{file_path.suffix.upper().lstrip('.')} file"
+
+    # Skip generic slide/section markers like "[Slide 1]"
+    first = next((l for l in lines if not re.match(r"^\[Slide \d+\]$", l)), lines[0])
+    return trim_summary(first[:200], file_path.name)
+
+
+def _llm_summary(file_path: pathlib.Path, snippet: str) -> str:
+    """Generate a one-sentence LLM summary. Raises on failure."""
     prompt = (
         f"Summarise the following document excerpt in exactly ONE concise sentence "
         f"(max 20 words). Be specific about what the document covers.\n\n"
         f"Filename: {file_path.name}\n\nContent:\n{snippet[:1500]}\n\nOne-sentence summary:"
     )
-    try:
-        summary = _call_llm(prompt)
-        summary = re.sub(
-            r"^(summary|one.sentence summary|here is|this document)[:\s]+",
-            "", summary, flags=re.IGNORECASE
-        ).strip()
-        return trim_summary(summary, file_path.name)
-    except Exception as e:
-        print(f"[KB Watcher] ⚠ Summary LLM failed for {file_path.name}: {e}", flush=True)
-        return trim_summary(snippet[:120].replace("\n", " ").strip(), file_path.name)
+    summary = _call_llm(prompt)
+    summary = re.sub(
+        r"^(summary|one.sentence summary|here is|this document)[:\s]+",
+        "", summary, flags=re.IGNORECASE,
+    ).strip()
+    return trim_summary(summary, file_path.name)
+
+
+def generate_file_summary(
+    file_path: pathlib.Path,
+    *,
+    rel_key: str | None = None,
+    upgrade_queue: list | None = None,
+) -> tuple[str, bool]:
+    """
+    Return (summary, needs_llm_upgrade).
+
+    When LLM is available: calls LLM, returns (summary, False).
+    When LLM is unavailable: returns heuristic summary and (summary, True)
+    so the caller can enqueue this file for a later LLM upgrade.
+
+    *rel_key* and *upgrade_queue* are optional — when both are provided and
+    an upgrade is needed, the (file_path, rel_key) pair is appended to
+    upgrade_queue automatically.
+    """
+    snippet = extract_snippet(file_path)
+    if not snippet or snippet.startswith("["):
+        return f"{file_path.suffix.upper().lstrip('.')} file", False
+
+    if _llm_available():
+        try:
+            return _llm_summary(file_path, snippet), False
+        except Exception as e:
+            print(f"[KB Watcher] ⚠ Summary LLM failed for {file_path.name}: {e}", flush=True)
+            # Fall through to heuristic; mark for later upgrade
+            summary = _heuristic_summary(file_path, snippet)
+            if rel_key is not None and upgrade_queue is not None:
+                upgrade_queue.append((file_path, rel_key))
+            return summary, True
+
+    # LLM unavailable — heuristic now, upgrade later
+    summary = _heuristic_summary(file_path, snippet)
+    if rel_key is not None and upgrade_queue is not None:
+        upgrade_queue.append((file_path, rel_key))
+    return summary, True
 
 
 def get_file_summary(file_path: pathlib.Path, cache: dict, rel_key: str) -> tuple[str, bool]:
@@ -465,9 +522,14 @@ def get_file_summary(file_path: pathlib.Path, cache: dict, rel_key: str) -> tupl
     h      = file_hash(file_path)
     cached = cache.get(rel_key, {})
     if cached.get("hash") == h and cached.get("summary"):
+        # Re-queue for LLM upgrade if previously generated without one
+        if cached.get("needs_llm_upgrade"):
+            _LLM_UPGRADE_QUEUE.append((file_path, rel_key))
         return cached["summary"], False
-    summary = generate_file_summary(file_path)
-    cache[rel_key] = {"hash": h, "summary": summary}
+    summary, needs_upgrade = generate_file_summary(
+        file_path, rel_key=rel_key, upgrade_queue=_LLM_UPGRADE_QUEUE
+    )
+    cache[rel_key] = {"hash": h, "summary": summary, "needs_llm_upgrade": needs_upgrade}
     return summary, True
 
 # ── AUTO-INDEX block builder ──────────────────────────────────────────────────
@@ -908,6 +970,45 @@ class KBHandler(FileSystemEventHandler):
                 print("[KB Watcher] 🕐 Stale file check:", flush=True)
                 for w in stale:
                     print(f"  {w}", flush=True)
+
+        # 7. LLM upgrade queue — attempt to upgrade heuristic summaries to LLM
+        #    quality when the LLM becomes reachable.  Process at most
+        #    _LLM_UPGRADE_MAX_PER_CYCLE entries per dispatch cycle to avoid
+        #    blocking the event loop for too long.
+        if _LLM_UPGRADE_QUEUE and _llm_available():
+            upgraded_folders: set[str] = set()
+            batch = _LLM_UPGRADE_QUEUE[:_LLM_UPGRADE_MAX_PER_CYCLE]
+            del _LLM_UPGRADE_QUEUE[:_LLM_UPGRADE_MAX_PER_CYCLE]
+            for fp, rel_key in batch:
+                if not fp.exists():
+                    continue
+                cached = self._cache.get(rel_key, {})
+                if not cached.get("needs_llm_upgrade"):
+                    continue  # already upgraded by a prior cycle
+                snippet = extract_snippet(fp)
+                if not snippet or snippet.startswith("["):
+                    continue
+                try:
+                    summary = _llm_summary(fp, snippet)
+                    self._cache[rel_key] = {
+                        "hash": cached.get("hash", ""),
+                        "summary": summary,
+                        "needs_llm_upgrade": False,
+                    }
+                    folder_name = fp.relative_to(WATCH_ROOT).parts[0]
+                    upgraded_folders.add(folder_name)
+                    print(f"[KB Watcher] ✨ LLM upgrade: {fp.name}", flush=True)
+                except Exception as e:
+                    print(f"[KB Watcher] ⚠ LLM upgrade failed for {fp.name}: {e}", flush=True)
+                    _LLM_UPGRADE_QUEUE.append((fp, rel_key))  # re-queue for next cycle
+            if upgraded_folders:
+                _save_summary_cache(self._cache)
+                for folder_name in upgraded_folders:
+                    folder = WATCH_ROOT / folder_name
+                    if folder.exists() and is_knowledge_folder(folder):
+                        update_readme(folder, self._cache)
+                        print(f"[KB Watcher] ✓ README refreshed after LLM upgrades: {folder_name}",
+                              flush=True)
 
     # ── watchdog callbacks ────────────────────────────────────────────────────
 

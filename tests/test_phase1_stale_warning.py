@@ -238,11 +238,16 @@ def test_stale_file_count_returns_tuple(tmp_path, monkeypatch):
 
 
 def test_stale_file_count_ignores_non_indexable_files(tmp_path, monkeypatch):
-    """Non-indexable files (images, pyc, etc.) must not inflate the on-disk count."""
+    """Non-indexable files (.py, .pyc, etc.) must not inflate the on-disk count.
+
+    Note: .png/.jpg/.jpeg/.gif/.webp ARE now indexable (Feature 9 image OCR),
+    so they correctly contribute to the on-disk count.  Only truly non-document
+    formats like .py and .pyc are excluded.
+    """
     domain = tmp_path / "TestDomain"
     domain.mkdir()
     (domain / "file.txt").write_text("real doc")
-    (domain / "image.png").write_bytes(b"\x89PNG")     # not indexable
+    (domain / "image.png").write_bytes(b"\x89PNG")     # indexable since Feature 9
     (domain / "script.py").write_text("pass")           # not indexable
     (domain / "domain_config.yaml").write_text(
         "folder_name: TestDomain\nagent_name: TestDomain Agent\n"
@@ -256,5 +261,6 @@ def test_stale_file_count_ignores_non_indexable_files(tmp_path, monkeypatch):
     agent = build_domain_agent("TestDomain")
     on_disk, _ = agent.stale_file_count()
 
-    assert on_disk == 1, \
-        f"Only .txt should count as indexable, got on_disk={on_disk}"
+    # .txt + .png both count (image OCR enabled); .py and .yaml do not
+    assert on_disk == 2, \
+        f"Expected .txt + .png to count as indexable, got on_disk={on_disk}"

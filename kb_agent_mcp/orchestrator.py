@@ -9,7 +9,8 @@ Pipeline per `ask()` call:
   3. LLM classifier (when keyword routing is ambiguous or has 0 hits)
   4. Clarification response (when classifier signals needs_clarification)
   5. Parallel DomainAgent.run() across selected domains
-  6. Merge results → final answer string
+  6. Merge / aggregate results → final answer string
+     (Feature 6: cross-domain aggregation via aggregator.aggregate())
   7. Persist turn in session memory
 
 Thread-safe: all async; DomainAgent.run() calls are gathered concurrently.
@@ -567,7 +568,17 @@ async def ask(
 
     results = await asyncio.gather(*tasks, return_exceptions=False)
 
-    final_answer = _merge_answers(list(results), agents, question=question, budget_status=budget_status)
+    # ── Feature 6: Cross-domain aggregation ──────────────────────────────────
+    # When results come from ≥2 non-passthrough LLM domains, try to produce a
+    # unified synthesised answer (conflict detection + complementary highlights).
+    # Falls back to standard _merge_answers() when aggregation is not applicable
+    # (single domain, passthrough mode, or aggregator returns None).
+    from kb_agent_mcp.aggregator import aggregate as _aggregate
+    _aggregated = _aggregate(list(results), question=question)
+    if _aggregated is not None:
+        final_answer = _aggregated
+    else:
+        final_answer = _merge_answers(list(results), agents, question=question, budget_status=budget_status)
 
     # Stale-index check: appends a warning if >5% new files are unindexed.
     # The check is a lightweight dir-walk + ChromaDB count — no embedding needed.
@@ -575,6 +586,31 @@ async def ask(
 
     # Cat 3b — routing quality notice when domain has minimal keyword config.
     final_answer += _minimal_keyword_notice(domain_names, agents)
+
+    # ── Feature 2: Source citations ───────────────────────────────────────────
+    # Collect every unique source file that contributed to this answer and
+    # append a clean **Sources** block.  Skips passthrough answers (those
+    # already embed their own source labels in the passthrough block) and
+    # answers that carry no sources at all (e.g. "no information found").
+    if not any(r.get("passthrough") for r in results):
+        all_sources: list[dict] = []
+        seen_paths: set[str] = set()
+        for r in results:
+            for s in r.get("sources", []):
+                p = s.get("path", "")
+                if p and p not in seen_paths:
+                    seen_paths.add(p)
+                    all_sources.append(s)
+        # Sort by descending relevance score
+        all_sources.sort(key=lambda s: -s.get("score", 0.0))
+        if all_sources:
+            lines = ["\n\n---\n\n**Sources**"]
+            for s in all_sources:
+                name  = s.get("name", s.get("path", "unknown"))
+                score = s.get("score", 0.0)
+                lock  = " 🔒" if s.get("confidential") else ""
+                lines.append(f"- `{name}`{lock} *(relevance: {score:.2f})*")
+            final_answer += "\n".join(lines)
 
     add_turn_sync(question, final_answer, session_id)
     return final_answer

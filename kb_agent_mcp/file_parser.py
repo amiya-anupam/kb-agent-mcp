@@ -10,9 +10,11 @@ Supported formats
 .txt / .md / .csv       plain read
 .docx                   XML extraction (zipfile)
 .pdf                    pypdf page iteration
-.pptx / .ppt            python-pptx shape text
+.pptx / .ppt            python-pptx shape text + tables + speaker notes
 .xlsx / .xls            smart streaming aggregation (large files) or openpyxl
 .boxnote                JSON tree walk
+.png / .jpg / .jpeg     OCR via pytesseract (optional) or PIL fallback
+.gif / .webp            OCR via pytesseract (optional)
 others                  filename as fallback text
 
 Public API
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 INCLUDE_EXTS: frozenset[str] = frozenset({
     ".pdf", ".docx", ".pptx", ".ppt", ".xlsx", ".xls",
     ".md", ".txt", ".csv", ".boxnote", ".doc",
+    ".png", ".jpg", ".jpeg", ".gif", ".webp",
 })
 
 _SKIP_PATTERNS: frozenset[str] = frozenset({
@@ -146,15 +149,87 @@ def _extract_pdf(path: pathlib.Path, max_chars: int) -> str:
 
 def _extract_pptx(path: pathlib.Path, max_chars: int) -> str:
     from pptx import Presentation
+    from pptx.util import Pt  # noqa: F401 — imported for type hints in callers
     prs = Presentation(str(path))
-    text = ""
-    for slide in prs.slides:
+    parts: list[str] = []
+
+    for slide_idx, slide in enumerate(prs.slides, 1):
+        slide_parts: list[str] = []
+
         for shape in slide.shapes:
-            if hasattr(shape, "text") and shape.text.strip():
-                text += shape.text.strip() + "\n"
-        if len(text) >= max_chars:
+            # ── Text frames ────────────────────────────────────────────────────
+            if shape.has_text_frame:
+                t = shape.text_frame.text.strip()
+                if t:
+                    slide_parts.append(t)
+
+            # ── Tables ─────────────────────────────────────────────────────────
+            if shape.has_table:
+                rows: list[str] = []
+                for row in shape.table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    non_empty = [c for c in cells if c]
+                    if non_empty:
+                        rows.append(" | ".join(non_empty))
+                if rows:
+                    slide_parts.append("\n".join(rows))
+
+        # ── Speaker notes ──────────────────────────────────────────────────────
+        if slide.has_notes_slide:
+            notes_tf = slide.notes_slide.notes_text_frame
+            if notes_tf:
+                notes = notes_tf.text.strip()
+                if notes:
+                    slide_parts.append(f"[Notes: {notes}]")
+
+        if slide_parts:
+            parts.append(f"[Slide {slide_idx}]\n" + "\n".join(slide_parts))
+
+        if sum(len(p) for p in parts) >= max_chars:
             break
-    return text[:max_chars]
+
+    return "\n\n".join(parts)[:max_chars]
+
+
+def _extract_image(path: pathlib.Path, max_chars: int) -> str:
+    """
+    Extract text from an image file.
+
+    Strategy (in priority order):
+    1. pytesseract OCR — if installed and KB_OCR_ENABLED=true (default).
+    2. PIL/Pillow basic metadata fallback — image dimensions + filename.
+    3. Filename-only last resort.
+    """
+    if not cfg.KB_OCR_ENABLED:
+        return f"[Image: {path.name}]"
+
+    # ── Try pytesseract ────────────────────────────────────────────────────────
+    if cfg.KB_OCR_ENGINE in ("tesseract", "auto"):
+        try:
+            import pytesseract
+            from PIL import Image
+            img = Image.open(str(path))
+            text = pytesseract.image_to_string(img).strip()
+            if text:
+                return text[:max_chars]
+        except ImportError:
+            pass  # fall through to PIL-only fallback
+        except Exception as exc:
+            logger.debug("pytesseract failed for %s: %s", path.name, exc)
+
+    # ── PIL metadata fallback ──────────────────────────────────────────────────
+    try:
+        from PIL import Image
+        img = Image.open(str(path))
+        w, h = img.size
+        mode = img.mode
+        return f"[Image: {path.name} | {w}×{h}px | mode={mode}]"[:max_chars]
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.debug("PIL failed for %s: %s", path.name, exc)
+
+    return f"[Image: {path.name}]"
 
 
 def _extract_boxnote(path: pathlib.Path, max_chars: int) -> str:
@@ -463,6 +538,8 @@ def _extract_sync(path: pathlib.Path, max_chars: int) -> str:
             return _extract_xlsx(path, max_chars)
         elif ext == ".boxnote":
             return _extract_boxnote(path, max_chars)
+        elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            return _extract_image(path, max_chars)
         else:
             return f"[Unsupported format: {path.name}]"
     except FileNotFoundError:

@@ -14,9 +14,15 @@ Connect it to Claude Desktop, Bob, Cursor, or any MCP-compatible AI tool — the
 - **Multi-domain routing** — automatically routes questions to the right knowledge domain
 - **README-first RAG** — uses compact AUTO-INDEX blocks for fast answers; falls back to full-document search for complex/data questions
 - **Passthrough mode** — works with *no local LLM*; your AI tool answers using retrieved context
-- **Supports all major document types** — PDF, DOCX, XLSX (with streaming aggregation for large files), PPTX, MD, TXT, CSV, BoxNote
+- **Supports all major document types** — PDF, DOCX, XLSX (with streaming aggregation for large files), PPTX, MD, TXT, CSV, BoxNote, and images (PNG, JPG, GIF, WebP via OCR)
+- **Source citations** — every answer includes inline `[Source: …]` citations linking back to the source file
+- **Cross-domain aggregation** — multi-domain questions produce a single synthesised answer instead of raw concatenation
 - **ChromaDB vector search** — persistent, hash-based change detection (only re-indexes changed files)
 - **Multi-session memory** — per-session conversation history with configurable timeout
+- **Session resume** — resume any prior session without re-querying; retrieve recent history via `resume_session`
+- **Audit log** — every `ask()` call is appended to `.kb_index/audit.jsonl` for traceability
+- **Answer ratings** — rate individual answers 1–5 stars via `rate_answer`; persisted to `.kb_index/feedback.jsonl`
+- **Document write-back** — update or append to documents in your KB directly from the AI tool via `update_document`
 - **Hot-reload** — `kb-agent-watch` keeps indexes in sync as you add/modify files
 - **LLM providers** — Ollama (local), OpenAI, Anthropic, any OpenAI-compatible endpoint
 
@@ -75,7 +81,7 @@ Requires Python 3.10+.
 
 ## MCP Tools
 
-Once the server is running, the following **eleven tools** are available in three groups:
+Once the server is running, the following **fourteen tools** are available in four groups:
 
 ### Knowledge Base tools (5)
 
@@ -114,6 +120,16 @@ These tools run **live computation** over raw files — no vector index required
 | `refine_query(session_id, feedback)` | Re-runs the last query using updated parameters from your feedback |
 
 Supported file formats: `.xlsx` `.xls` `.csv` `.json` `.jsonl` `.pdf` `.docx` `.pptx` `.txt` `.md`
+
+### Session & Feedback tools (5)
+
+| Tool | Description |
+|---|---|
+| `domain_status()` | Returns per-domain indexing status: file counts, stale counts, and last-indexed timestamps |
+| `read_audit(session_id?, limit?)` | Returns recent audit log entries from `.kb_index/audit.jsonl`, optionally filtered by session |
+| `resume_session(session_id)` | Returns the last N turns of a prior session so the AI can continue a conversation without re-querying |
+| `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific answer turn; persisted to `.kb_index/feedback.jsonl` |
+| `update_document(rel_path, content, mode?)` | Writes (overwrite) or appends to a document under `KB_ROOT`. Use `mode="append"` to add content; default is overwrite. |
 
 ### `ask` examples
 
@@ -177,6 +193,17 @@ KB_SESSION_MAX_ANSWER_CHARS=400
 # Set to false for fully air-gapped installs with only trusted documents
 KB_SECURITY_GATE_ENABLED=true
 
+# Session
+KB_DEFAULT_SESSION_ID=default        # session ID used when none is passed (stdio mode)
+
+# Audit log
+KB_AUDIT_ENABLED=true                # set to false to disable audit logging
+KB_AUDIT_MAX_MB=10                   # rotate audit.jsonl when it exceeds this size in MB
+
+# Image OCR (disabled by default — requires tesseract or easyocr)
+KB_OCR_ENABLED=false
+KB_OCR_ENGINE=tesseract              # tesseract | easyocr
+
 # Ignore these top-level folders
 KB_IGNORE_FOLDERS=archive,tmp
 ```
@@ -225,6 +252,8 @@ Each top-level folder under `KB_ROOT` becomes a **knowledge domain**:
     chroma/                  ChromaDB vector index
     session_memory/          per-session conversation history
     analyst_sessions/        per-session analyst state (params, last answer)
+    audit.jsonl              append-only log of every ask() call
+    feedback.jsonl           per-answer ratings from rate_answer()
 ```
 
 Files in nested subfolders are indexed into their parent domain.

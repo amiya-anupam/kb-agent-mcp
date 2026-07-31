@@ -205,6 +205,38 @@ class Config:
         "KB_SECURITY_GATE_ENABLED", True
     ))
 
+    # ── Default session identity ──────────────────────────────────────────────
+    # When set, this name is used as the default session_id instead of
+    # "default".  Set KB_DEFAULT_SESSION_ID to a stable value so conversation
+    # history accumulates under a persistent session that survives server
+    # restarts and reconnects.  Leave blank to keep the original behaviour.
+    KB_DEFAULT_SESSION_ID: str = field(default_factory=lambda: _str(
+        "KB_DEFAULT_SESSION_ID", ""
+    ))
+
+    # ── Audit log ─────────────────────────────────────────────────────────────
+    # Set KB_AUDIT_ENABLED=false to disable audit logging entirely.
+    KB_AUDIT_ENABLED: bool = field(default_factory=lambda: _bool(
+        "KB_AUDIT_ENABLED", True
+    ))
+    # Rotate audit log when it exceeds this size in MB.
+    KB_AUDIT_MAX_MB: int = field(default_factory=lambda: _int(
+        "KB_AUDIT_MAX_MB", 50
+    ))
+
+    # ── Image OCR ─────────────────────────────────────────────────────────────
+    # Set KB_OCR_ENABLED=false to disable image text extraction entirely.
+    # When enabled, the system tries pytesseract first (if installed), then
+    # falls back to PIL metadata (dimensions, mode).
+    KB_OCR_ENABLED: bool = field(default_factory=lambda: _bool(
+        "KB_OCR_ENABLED", True
+    ))
+    # OCR engine to use: "tesseract" (pytesseract only), "auto" (tesseract
+    # then PIL fallback).  "auto" is the default and recommended setting.
+    KB_OCR_ENGINE: str = field(default_factory=lambda: _str(
+        "KB_OCR_ENGINE", "auto"
+    ))
+
     # ── Output format ─────────────────────────────────────────────────────────
     KB_FORMAT_DEFAULT: str = field(default_factory=lambda: _str(
         "KB_FORMAT_DEFAULT", ""

@@ -11,7 +11,7 @@ Every statement here is grounded in the source code — no speculation.
 
 ## System overview
 
-[![Architecture Flow Diagram](architecture_flow_diagram.png)](architecture_flow_diagram.png)
+[![Architecture Flow Diagram](architecture%20flow%20diagram.png)](architecture%20flow%20diagram.png)
 
 The diagram above shows all three pipelines and every major component.
 
@@ -28,15 +28,20 @@ The diagram above shows all three pipelines and every major component.
 ╔══════════════════════════════════════╩═══════════════════════════════════════════════════╗
 ║  kb-agent-serve  (FastMCP server process)                                                ║
 ║                                                                                          ║
-║  ┌─────────────────────────────────  server.py  (11 tools)  ──────────────────────────┐  ║
+║  ┌─────────────────────────────────  server.py  (14 tools)  ──────────────────────────┐  ║
 ║  │                                                                                     │  ║
-║  │  ╔══ KB tools ════════════╗  ╔══ Security Gate ══════════╗  ╔══ Analyst tools ════╗ │  ║
-║  │  ║ ask()                  ║  ║ check_confidential()      ║  ║ analyze_file()      ║ │  ║
-║  │  ║ list_domains()         ║  ║ acknowledge_gate()        ║  ║ suggest_questions() ║ │  ║
-║  │  ║ reindex()              ║  ╚═══════════════╦══════════╝  ║ query_data()        ║ │  ║
-║  │  ║ clear_memory()         ║                  ║             ║ refine_query()      ║ │  ║
-║  │  ║ show_memory()          ║                  ║             ╚══════════╦══════════╝ │  ║
-║  │  ╚══════════╦═════════════╝                  ║                        ║            │  ║
+║  │  ╔══ KB tools ════════════════╗  ╔══ Security Gate ══════════╗  ╔══ Analyst ═════╗ │  ║
+║  │  ║ ask()                      ║  ║ check_confidential()      ║  ║ analyze_file() ║ │  ║
+║  │  ║ list_domains()             ║  ║ acknowledge_gate()        ║  ║ suggest_q()    ║ │  ║
+║  │  ║ reindex()                  ║  ╚═══════════════╦══════════╝  ║ query_data()   ║ │  ║
+║  │  ║ clear_memory()             ║                  ║             ║ refine_query() ║ │  ║
+║  │  ║ show_memory()              ║                  ║             ╚══════╦═════════╝ │  ║
+║  │  ║ domain_status()            ║                  ║                    ║            │  ║
+║  │  ║ read_audit()               ║                  ║                    ║            │  ║
+║  │  ║ resume_session()           ║                  ║                    ║            │  ║
+║  │  ║ rate_answer()              ║                  ║                    ║            │  ║
+║  │  ║ update_document()          ║                  ║                    ║            │  ║
+║  │  ╚══════════╦═════════════════╝                  ║                    ║            │  ║
 ║  └─────────────╫───────────────────────────────╫────────────────────────╫────────────┘  ║
 ║                ║                               ║                        ║                ║
 ║  ┌─────────────╨──────────────────────────┐    ║security_gate.py        ║                ║
@@ -47,8 +52,9 @@ The diagram above shows all three pipelines and every major component.
 ║  │  3. _classify_intent() (LLM) ◄──┘      │    ║ GateSession → disk     ║                ║
 ║  │  4. _adjusted_top_n()                  │    ╚════════════════════════╝                ║
 ║  │  5. asyncio.gather( DomainAgent × N )  │                                              ║
-║  │  6. _merge_answers()                   │    ┌────────────────────────────────────┐    ║
-║  │  7. add_turn_sync() → session file     │    │  analyst/                          │    ║
+║  │  6. aggregate() OR _merge_answers()    │    ┌────────────────────────────────────┐    ║
+║  │     + source citations block           │    │  analyst/                          │    ║
+║  │  7. add_turn_sync() → session file     │    │                                    │    ║
 ║  └────────────┬───────────────────────────┘    │  inspector.py → DataCard           │    ║
 ║               │                               │  planner.py   → QuestionMenu       │    ║
 ║       ┌───────┴──────────────────────┐         │  engine.py    → answer+reasoning   │    ║
@@ -104,6 +110,8 @@ The diagram above shows all three pipelines and every major component.
 ║  │    session_memory/          <session_id>.json  {messages, last_active}          │  ║
 ║  │    analyst_sessions/        <session_id>.json  {file_path, params, answer, …}   │  ║
 ║  │    gate_sessions.json       {session_id: GateSession, …}                        │  ║
+║  │    audit.jsonl              append-only Q&A audit log (auto-rotates at 50 MB)   │  ║
+║  │    feedback.jsonl           per-answer 1–5 star ratings + comments              │  ║
 ║  └─────────────────────────────────────────────────────────────────────────────────┘  ║
 ╚════════════════════════════════════════════════════════════════════════════════════════╝
 ```
@@ -130,18 +138,22 @@ There are three independent processing pipelines:
 ```
 kb_agent_mcp/
 ├── __init__.py          Package metadata (__version__ from importlib.metadata)
-├── server.py            FastMCP server — 11 MCP tools; startup validation; stale-index TTL cache
-├── orchestrator.py      Query pipeline: format detection → keyword route → LLM classify → dispatch → merge
+├── server.py            FastMCP server — 14 MCP tools; startup validation; stale-index TTL cache
+├── orchestrator.py      Query pipeline: format detection → keyword route → LLM classify → dispatch → aggregate → merge
 ├── domain_agent.py      DomainAgent wrapper — per-domain config, pre-rank, stale_file_count
 ├── base_agent.py        README-first RAG pipeline + all LLM call implementations + question classifiers
 ├── vector_store.py      ChromaDB client — upsert, search, collection metadata, 128-entry embed LRU cache
 ├── embeddings.py        2-tier embedding backend with sentence-transformers fallback
-├── file_parser.py       Multi-format text extractor — sync + async; .noindex sentinel enforcement
+├── file_parser.py       Multi-format text extractor — sync + async; image OCR; .noindex sentinel enforcement
 ├── domain_rules.py      domain_config.yaml loader + DomainConfig dataclass + pin/boost rules
 ├── memory.py            Per-session conversation memory — disk-persisted JSON, 5-min in-process cache
 ├── context_budget.py    Character budget registry + compaction engine (trim, compact, build_context)
 ├── config.py            Frozen Config dataclass — reads all env vars + .env; module-level cfg singleton
 ├── security_gate.py     Anti-trick confidentiality gate — classify, scan, token, GateSession persistence
+├── aggregator.py        Cross-domain answer synthesis — merges multi-agent results into a single coherent answer
+├── audit.py             Append-only JSONL audit log — log_turn(), read_log(); size-capped rotation
+├── feedback.py          Per-answer 1–5 star ratings — record(), read_feedback(); persisted to feedback.jsonl
+├── writeback.py         Safe document write-back — write_document(rel_path, content, mode) → WriteResult
 ├── analyst/
 │   ├── __init__.py      Re-exports: inspect_file, DataCard, suggest_questions, query_data, refine_query
 │   ├── inspector.py     Schema profiler → DataCard (columns, types, grain, themes); (path, mtime) cache
@@ -189,7 +201,7 @@ A module-level singleton `cfg = Config()` is imported by every other module.
 ---
 
 ### `server.py`
-The FastMCP application. Registers **eleven MCP tools** in three groups:
+The FastMCP application. Registers **fourteen MCP tools** in four groups:
 
 **Knowledge Base tools:**
 
@@ -217,6 +229,16 @@ The FastMCP application. Registers **eleven MCP tools** in three groups:
 | `query_data` | `query_data(path, question, session_id?)` | `engine.query_data()` → answer or clarifications |
 | `refine_query` | `refine_query(session_id, feedback)` | `engine.refine_query()` → updated answer |
 
+**Session & Feedback tools:**
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `domain_status` | `domain_status()` | Returns per-domain indexing status: file counts, stale counts, last-indexed timestamps |
+| `read_audit` | `read_audit(session_id?, limit?)` | Returns recent audit log entries from `audit.jsonl` (filtered by session when provided) |
+| `resume_session` | `resume_session(session_id)` | Returns the last N turns of a prior session so the AI can continue without re-querying |
+| `rate_answer` | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific turn; persists to `feedback.jsonl` |
+| `update_document` | `update_document(rel_path, content, mode?)` | Writes (overwrite) or appends to a document under `KB_ROOT` via `writeback.write_document()` |
+
 **Module-level state:**
 - `_stale_cache: dict` — `{stale, details, checked_at}`; TTL-guarded mtime scan
 - `_transport_mode: str` — `"stdio"` (default) or `"http"` (set by `main()`)
@@ -239,10 +261,15 @@ Coordinates the full query pipeline for every `ask()` call:
    `n_domains × top_n × max_chars` vs `KB_BUDGET_PASSTHROUGH_THRESHOLD × KB_BUDGET_TOTAL`.
    Reduces `top_n` if overflow; emits a warning.
 5. **Parallel dispatch** — `asyncio.gather(DomainAgent.run() × N)` across selected domains.
-6. **Answer merge** — single domain → answer returned directly. Multiple → joined
-   with `---` separators. Passthrough blocks are unwrapped into clean markdown.
+6. **Answer merge / aggregation** — single domain → answer returned directly.
+   Multiple domains → `aggregator.aggregate(results, question)` is called first; if the
+   aggregator produces a coherent synthesis it is returned as-is, otherwise answers are
+   joined with `---` separators. Each cited source is tagged with a `[Source: …]`
+   inline citation. Passthrough blocks are unwrapped into clean markdown.
 7. **Memory persistence** — `add_turn_sync(session_id, question, answer)` appends
    to the session file (sync disk write at the end of the pipeline).
+8. **Audit logging** — `audit.log_turn(session_id, question, answer)` appends one
+   JSONL record to `.kb_index/audit.jsonl` after every successful `ask()`.
 
 `_agents` is a module-level dict loaded lazily on first `ask()` call (double-checked
 locking via `asyncio.Lock`). `refresh_agents()` rebuilds it after `reindex()`.
@@ -378,17 +405,19 @@ Multi-format text extractor. All extractors are synchronous and are called via
 `asyncio.to_thread()` from the async pipeline.
 
 **`INCLUDE_EXTS`** (the set of indexed extensions):
-`.pdf`, `.docx`, `.pptx`, `.ppt`, `.xlsx`, `.xls`, `.md`, `.txt`, `.csv`, `.boxnote`, `.doc`
+`.pdf`, `.docx`, `.pptx`, `.ppt`, `.xlsx`, `.xls`, `.md`, `.txt`, `.csv`, `.boxnote`, `.doc`,
+`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`
 
 | Format | Extractor |
 |---|---|
 | `.txt` `.md` `.csv` | UTF-8 read with `errors="ignore"` |
 | `.docx` `.doc` | XML extraction from zip (`word/document.xml`) |
 | `.pdf` | `pypdf` page iteration |
-| `.pptx` `.ppt` | `python-pptx` shape text |
+| `.pptx` `.ppt` | `python-pptx` shape text + table cells + speaker notes + slide labels |
 | `.xlsx` `.xls` < 50 MB | `openpyxl` with smart aggregation for sheets > 200 rows |
 | `.xlsx` `.xls` ≥ 50 MB | Streaming XML `iterparse` — never loads full workbook |
 | `.boxnote` | Recursive JSON tree walk |
+| `.png` `.jpg` `.jpeg` `.gif` `.webp` | Image OCR via configured engine (`KB_OCR_ENGINE`); returns extracted text or filename fallback when OCR is disabled |
 | other extensions | Filename returned as fallback text |
 
 **Large XLSX streaming strategy:** the sheet is walked once with `iterparse`,
@@ -987,7 +1016,7 @@ against the refreshed file inventory after a full rebuild.
 │  kb-agent-serve  (FastMCP server process)                               │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  server.py  (11 MCP tools)                                      │   │
+│  │  server.py  (14 MCP tools)                                      │   │
 │  │  ┌──────────┐ ┌─────────────┐ ┌────────────────┐ ┌──────────┐  │   │
 │  │  │  ask()   │ │list_domains │ │   reindex()    │ │ memory   │  │   │
 │  │  └─────┬────┘ └──────┬──────┘ └───────┬────────┘ └──────────┘  │   │
@@ -1000,6 +1029,12 @@ against the refreshed file inventory after a full rebuild.
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
 │  │  │  Data Analyst tools                                        │  │   │
 │  │  │  analyze_file  suggest_questions  query_data  refine_query │  │   │
+│  │  └───────────────────────┬────────────────────────────────────┘  │   │
+│  │                                                                  │   │
+│  │  ┌────────────────────────────────────────────────────────────┐  │   │
+│  │  │  Session & Feedback tools                                  │  │   │
+│  │  │  domain_status  read_audit  resume_session                 │  │   │
+│  │  │  rate_answer    update_document                            │  │   │
 │  │  └───────────────────────┬────────────────────────────────────┘  │   │
 │  └──────────────────────────┼────────────────────────────────────-──┘   │
 │                             │                                            │
@@ -1070,10 +1105,14 @@ server.py
 │   │   │   ├── memory.py        ──→  config.py
 │   │   │   └── context_budget.py ──→ config.py
 │   │   └── domain_rules.py  ──→  config.py
+│   ├── aggregator.py  ──→  config.py
 │   └── context_budget.py
 ├── security_gate.py
 │   ├── config.py
 │   └── file_parser.py  (for _has_noindex_ancestor, _extract_sync)
+├── audit.py     ──→  config.py
+├── feedback.py  ──→  config.py
+├── writeback.py ──→  config.py
 └── analyst/
     ├── inspector.py  ──→  file_parser.py
     ├── planner.py    (pure logic, no imports except dataclasses)
@@ -1125,6 +1164,11 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_BUDGET_PASSTHROUGH_THRESHOLD` | `0.8` | `orchestrator.py` | Fraction of `KB_BUDGET_TOTAL` that triggers `top_n` reduction in passthrough mode |
 | `KB_FORMAT_DEFAULT` | _(empty)_ | `server.py` | Default output format when none is specified |
 | `KB_SECURITY_GATE_ENABLED` | `true` | `security_gate.py` | Set to `false` to disable the confidentiality gate entirely |
+| `KB_DEFAULT_SESSION_ID` | `"default"` | `server.py` | Session ID used when no `session_id` is passed in stdio transport mode |
+| `KB_AUDIT_ENABLED` | `true` | `audit.py` | Set to `false` to disable audit logging entirely |
+| `KB_AUDIT_MAX_MB` | `10` | `audit.py` | Maximum size of `audit.jsonl` in MB before rotation |
+| `KB_OCR_ENABLED` | `false` | `file_parser.py` | Set to `true` to enable image text extraction via OCR |
+| `KB_OCR_ENGINE` | `"tesseract"` | `file_parser.py` | OCR engine to use: `tesseract` \| `easyocr` |
 
 `.env` search order: CWD → `$HOME` → `KB_ROOT` → package root.
 Values already in the environment are never overwritten.
