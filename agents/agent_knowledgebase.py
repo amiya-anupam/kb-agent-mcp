@@ -44,6 +44,74 @@ _load_env()
 
 AGENT_NAME   = "KnowledgeBase Agent"
 META_PATH    = pathlib.Path(__file__).parent / "vector_store" / "domain_meta.json"
+AUDIT_PATH   = pathlib.Path(__file__).parent.parent / ".kb_index" / "audit.jsonl"
+
+
+# ── Startup drift check ───────────────────────────────────────────────────────
+
+def _warn_if_drift() -> None:
+    """
+    Compare live file mtimes against the last audit.jsonl entry.
+    Prints a one-line warning (stderr) when files were modified after the
+    last index run. Silent when the index appears current or audit is absent.
+    Non-fatal — never blocks the agent from answering.
+    """
+    try:
+        import datetime as _dt
+
+        if not AUDIT_PATH.exists() or AUDIT_PATH.stat().st_size == 0:
+            return  # no audit yet — generate.py hasn't been run, agent will warn separately
+
+        lines = [l for l in AUDIT_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if not lines:
+            return
+        last = json.loads(lines[-1])
+        indexed_ts = last.get("ts", "")
+        if not indexed_ts:
+            return
+
+        audit_dt = _dt.datetime.fromisoformat(indexed_ts)
+        audit_ts = audit_dt.timestamp()
+
+        _BLOCKLIST = {
+            "agents", ".git", "__pycache__", ".ds_store", "node_modules",
+            ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
+            ".kb_index", "kb_agent_mcp", "kb_agent_mcp.egg-info", "scripts", "tests",
+        }
+        _EXTS = {".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
+                 ".csv", ".boxnote", ".ppt", ".doc", ".png", ".jpg", ".jpeg"}
+        _SKIP = {"readme", ".ds_store", "~$"}
+
+        kb_root   = AUDIT_PATH.parent.parent
+        recent: list[str] = []
+        for folder in sorted(kb_root.iterdir()):
+            if not folder.is_dir() or folder.name.lower() in _BLOCKLIST:
+                continue
+            for f in folder.rglob("*"):
+                if not f.is_file() or f.suffix.lower() not in _EXTS:
+                    continue
+                if any(p in f.name.lower() for p in _SKIP):
+                    continue
+                try:
+                    if f.stat().st_mtime > audit_ts:
+                        recent.append(f.name)
+                except OSError:
+                    continue
+
+        if recent:
+            n = len(recent)
+            shown = ", ".join(recent[:3])
+            ellipsis = f" + {n - 3} more" if n > 3 else ""
+            print(
+                f"[{AGENT_NAME}] ⚠  {n} file(s) modified since last index "
+                f"({shown}{ellipsis}). "
+                f"Run `python3 scripts/generate.py` or check drift with "
+                f"`python3 scripts/ask.py --check-drift`.",
+                file=sys.stderr,
+                flush=True,
+            )
+    except Exception:
+        pass  # drift check is best-effort — never crash the agent
 
 # ── Domain meta loader ────────────────────────────────────────────────────────
 
@@ -73,7 +141,10 @@ def load_domain_meta() -> dict[str, dict]:
 def get_domains() -> list[dict]:
     """Return list of domain dicts from domain_meta.json."""
     meta = load_domain_meta()
-    return list(meta.values())
+    domains = list(meta.values())
+    if domains:
+        _warn_if_drift()
+    return domains
 
 
 # ── Format intent detection ───────────────────────────────────────────────────

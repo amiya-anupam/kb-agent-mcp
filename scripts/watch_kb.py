@@ -94,6 +94,15 @@ except ValueError:
 # How often (seconds) to re-run the staleness check while the watcher is live.
 _STALE_CHECK_INTERVAL = 3600  # 1 hour
 
+# How often (seconds) to force a full generate.py resync regardless of events.
+# Guarantees eventual consistency even if individual file events were missed.
+# Configurable via KB_RESYNC_HOURS (default 24 hours). Set to 0 to disable.
+_raw_resync = os.environ.get("KB_RESYNC_HOURS", "24")
+try:
+    _RESYNC_INTERVAL = int(_raw_resync) * 3600
+except ValueError:
+    _RESYNC_INTERVAL = 24 * 3600
+
 _DEFAULT_BLOCKLIST = {
     "agents", ".git", "__pycache__", ".ds_store", "node_modules",
     ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
@@ -122,6 +131,7 @@ MARKER_END   = "<!-- KB:AUTO-INDEX:END -->"
 SUMMARY_CACHE_PATH = SCRIPT_DIR / "agents" / "vector_store" / "file_summaries.json"
 DOMAIN_META_PATH   = SCRIPT_DIR / "agents" / "vector_store" / "domain_meta.json"
 AGENTS_DIR         = SCRIPT_DIR / "agents"
+AUDIT_LOG_PATH     = SCRIPT_DIR / ".kb_index" / "audit.jsonl"
 
 SUMMARY_EXTRACT_CHARS = 3000
 
@@ -776,6 +786,24 @@ def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
     return warnings
 
 
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def _write_audit(event: str, detail: dict | None = None):
+    """Append a JSON entry to .kb_index/audit.jsonl."""
+    try:
+        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts":    datetime.datetime.now().isoformat(timespec="seconds"),
+            "event": event,
+        }
+        if detail:
+            entry.update(detail)
+        with AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"[KB Watcher] ⚠ Could not write audit log: {e}", flush=True)
+
+
 # ── generate.py trigger ───────────────────────────────────────────────────────
 
 # Configurable via KB_GENERATE_TIMEOUT (seconds). Default 900s (15 min) to
@@ -799,6 +827,10 @@ def run_generate(reason: str):
         f"timeout={_GENERATE_TIMEOUT}s)...",
         flush=True,
     )
+
+    # Record start time so we can catch files that arrived during the generate window.
+    start_time = time.time()
+
     try:
         # Forward KB_ROOT explicitly so the subprocess always knows which root
         # to scan — even if the parent process set it via a .env file that the
@@ -814,6 +846,18 @@ def run_generate(reason: str):
         )
         if result.returncode == 0:
             print(f"[KB Watcher] ✓ generate.py completed", flush=True)
+            # Write audit entry so drift-check CLI can compare against folder state.
+            folders = discover_knowledge_folders()
+            total_files = sum(len(gather_files(f)) for f in folders)
+            _write_audit("generate_complete", {
+                "reason":  reason,
+                "domains": [f.name for f in folders],
+                "files":   total_files,
+            })
+            # Re-scan for any files that arrived or changed during the generate window.
+            # This closes the race condition where a user drops files while generate.py
+            # is running and those files are not in generate.py's snapshot.
+            _rescan_since(start_time)
         else:
             print(f"[KB Watcher] ✗ generate.py exited {result.returncode}", flush=True)
     except subprocess.TimeoutExpired:
@@ -824,6 +868,34 @@ def run_generate(reason: str):
         )
     except Exception as e:
         print(f"[KB Watcher] ✗ generate.py failed: {e}", flush=True)
+
+
+def _rescan_since(since: float):
+    """
+    Walk all knowledge folders and re-index any file whose mtime is newer than
+    `since` (a Unix timestamp captured just before generate.py was invoked).
+
+    This closes the race window: files added or replaced while generate.py was
+    running are caught here and embedded into the vector store immediately.
+    """
+    caught = 0
+    for folder in discover_knowledge_folders():
+        folder_name = folder.name
+        for f in gather_files(folder):
+            try:
+                if f.stat().st_mtime >= since:
+                    print(
+                        f"[KB Watcher] 🔁 Post-generate rescan: {f.name} in {folder_name}",
+                        flush=True,
+                    )
+                    _update_index(folder_name, f)
+                    caught += 1
+            except OSError:
+                continue
+    if caught:
+        print(f"[KB Watcher] ✓ Post-generate rescan caught {caught} file(s)", flush=True)
+    else:
+        print(f"[KB Watcher] ✓ Post-generate rescan: nothing missed", flush=True)
 
 # ── Embeddings helper (lazy import) ───────────────────────────────────────────
 
@@ -875,6 +947,9 @@ class KBHandler(FileSystemEventHandler):
         }
         self._cache:                    dict         = _load_summary_cache()
         self._next_stale_check:         float        = time.time() + _STALE_CHECK_INTERVAL
+        self._next_resync:              float        = (
+            time.time() + _RESYNC_INTERVAL if _RESYNC_INTERVAL > 0 else float("inf")
+        )
 
     # ── Schedulers ────────────────────────────────────────────────────────────
 
@@ -960,7 +1035,15 @@ class KBHandler(FileSystemEventHandler):
             run_generate(reason)
             self._known_folders = {p.name for p in discover_knowledge_folders()}
 
-        # 6. Hourly stale-file check
+        # 6. Periodic force-resync (default every 24 hours)
+        #    Guarantees eventual consistency even if individual file events were dropped.
+        if _RESYNC_INTERVAL > 0 and now >= self._next_resync:
+            self._next_resync = now + _RESYNC_INTERVAL
+            print(f"[KB Watcher] 🔄 Scheduled 24h resync — running generate.py", flush=True)
+            run_generate("scheduled resync")
+            self._known_folders = {p.name for p in discover_knowledge_folders()}
+
+        # 7. Hourly stale-file check
         if STALE_DAYS > 0 and now >= self._next_stale_check:
             self._next_stale_check = now + _STALE_CHECK_INTERVAL
             folders = [WATCH_ROOT / fn for fn in self._known_folders
@@ -971,7 +1054,7 @@ class KBHandler(FileSystemEventHandler):
                 for w in stale:
                     print(f"  {w}", flush=True)
 
-        # 7. LLM upgrade queue — attempt to upgrade heuristic summaries to LLM
+        # 8. LLM upgrade queue — attempt to upgrade heuristic summaries to LLM
         #    quality when the LLM becomes reachable.  Process at most
         #    _LLM_UPGRADE_MAX_PER_CYCLE entries per dispatch cycle to avoid
         #    blocking the event loop for too long.

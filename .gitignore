@@ -75,3 +75,9 @@ agents/agent_*_egg_info.py
 # ── ChromaDB vector index (local, rebuilt by kb-agent-generate) ──
 .kb_index/
 
+
+# ── VSCode workspace file (personal / local) ─────────────────────
+*.code-workspace
+
+# ── skills/ auto-generated config ────────────────────────────────
+skills/*.yaml

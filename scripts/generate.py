@@ -30,6 +30,7 @@ import shutil
 import pathlib
 import textwrap
 import argparse
+import datetime
 
 # ── Environment loader ────────────────────────────────────────────────────────
 
@@ -858,19 +859,34 @@ python3 {gen_rel}
 # ── requirements.txt generator ────────────────────────────────────────────────
 
 def generate_requirements(out_path: pathlib.Path):
+    # If requirements.txt already exists, never overwrite it.
+    # The canonical version is maintained by hand in the repo and includes
+    # fastmcp, chromadb, rich, pyyaml, python-docx, and other packages that
+    # this minimal stub does not list. Overwriting it strips those entries
+    # and breaks tests / installs.
+    if out_path.exists():
+        return
+
     content = """\
 # KnowledgeBase Agent — Python dependencies
 # Install with: pip install -r requirements.txt
 
 # ── Core (required) ───────────────────────────────────────────
+fastmcp>=2.0.0        # MCP server framework
 httpx>=0.27.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
 watchdog>=4.0.0
+rich>=13.0.0          # terminal formatting / progress output
+pyyaml>=6.0.0         # YAML config support
+
+# ── Vector store ─────────────────────────────────────────────
+chromadb>=0.5.0       # persistent vector index
 
 # ── File format support (required for full document coverage) ─
 pypdf>=4.0.0          # PDF reading
 python-pptx>=1.0.0    # PPTX/PPT reading
+python-docx>=1.1.0    # DOCX reading
 openpyxl>=3.1.0       # XLSX/XLS reading
 
 # ── Offline embedding fallback (optional but recommended) ─────
@@ -1269,8 +1285,9 @@ def main():
 
     # ── Step 8: generate requirements.txt ────────────────────────────────────
     req_path = SCRIPT_DIR / "requirements.txt"
+    existed  = req_path.exists()
     generate_requirements(req_path)
-    print(f"✓ requirements.txt written\n")
+    print(f"✓ requirements.txt {'preserved (already exists)' if existed else 'written'}\n")
 
     # ── Step 9: generate SKILL.md ─────────────────────────────────────────────
     # NOTE: README.md is intentionally NOT regenerated here.
@@ -1288,6 +1305,24 @@ def main():
     elapsed = _time.monotonic() - _t_start
     mins, secs = divmod(int(elapsed), 60)
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+
+    # Write audit entry so drift-check can compare against live folder state.
+    try:
+        audit_path = kb_root / ".kb_index" / "audit.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        total_files = sum(d.get("file_count", 0) for d in domains_list)
+        entry = {
+            "ts":      datetime.datetime.now().isoformat(timespec="seconds"),
+            "event":   "generate_complete",
+            "reason":  "manual" if not os.environ.get("KB_WATCHER_RUN") else "watcher",
+            "domains": [d["folder_name"] for d in domains_list],
+            "files":   total_files,
+        }
+        with audit_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # audit failure never blocks the main run
+
     print(f"{'='*60}")
     print(f"  ✓ Done in {elapsed_str}")
     print(f"  {len(domains_list)} domain(s): {', '.join(d['folder_name'] for d in domains_list)}")

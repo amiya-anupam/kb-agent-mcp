@@ -695,6 +695,127 @@ def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: b
     info("Run kb-agent-generate --force later to regenerate with an LLM if needed.")
 
 
+# ── Step 7: Auto-start watcher via launchd (macOS) ────────────────────────────
+
+def _watch_script_path(kb_root: Path) -> str | None:
+    """Return the absolute path to scripts/watch_kb.py, or None if not found."""
+    # Installed package path: kb_agent_mcp/cli/setup.py → repo root is two levels up
+    candidates = [
+        Path(__file__).parent.parent.parent / "scripts" / "watch_kb.py",
+        kb_root / "scripts" / "watch_kb.py",
+        Path.cwd() / "scripts" / "watch_kb.py",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c.resolve())
+    return None
+
+
+def _launchd_plist(kb_root: Path, watch_script: str) -> tuple[Path, str]:
+    """Return (plist_path, plist_xml) for the watcher launchd agent."""
+    label      = "com.knowledgebase.watcher"
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    log_path   = kb_root / ".watch.log"
+    python     = sys.executable
+
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{python}</string>
+        <string>{watch_script}</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>KB_ROOT</key>
+        <string>{kb_root}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
+
+    <key>WorkingDirectory</key>
+    <string>{kb_root}</string>
+</dict>
+</plist>
+"""
+    return plist_path, xml
+
+
+def setup_launchd_watcher(kb_root: Path, yes: bool) -> None:
+    """
+    Register the KB watcher as a macOS launchd agent so it starts automatically
+    on login and restarts if it crashes.
+
+    Skipped silently on non-macOS platforms.
+    """
+    if sys.platform != "darwin":
+        return
+
+    watch_script = _watch_script_path(kb_root)
+    if not watch_script:
+        warn("watch_kb.py not found — skipping auto-start setup.")
+        warn("Start the watcher manually:  python3 scripts/watch_kb.py")
+        return
+
+    hdr("⑦ Auto-start watcher on login (launchd)")
+    print()
+
+    plist_path, plist_xml = _launchd_plist(kb_root, watch_script)
+
+    if not yes:
+        print("  The KB watcher can be registered as a macOS login item so it")
+        print("  starts automatically and re-indexes your files in real time.")
+        print()
+        if not _confirm("Register watcher to start automatically on login?", default=True):
+            info("Skipped. Start manually: python3 scripts/watch_kb.py")
+            return
+
+    try:
+        plist_path.parent.mkdir(parents=True, exist_ok=True)
+        plist_path.write_text(plist_xml, encoding="utf-8")
+        ok(f"Plist written: {plist_path}")
+    except (PermissionError, OSError) as exc:
+        err(f"Could not write plist: {exc}")
+        return
+
+    # Unload any existing registration first (ignore errors — may not exist)
+    subprocess.run(
+        ["launchctl", "unload", str(plist_path)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    load_result = subprocess.run(
+        ["launchctl", "load", "-w", str(plist_path)],
+        capture_output=True, text=True,
+    )
+    if load_result.returncode == 0:
+        ok("Watcher registered with launchd — starts on every login automatically.")
+        ok(f"Log file: {kb_root / '.watch.log'}")
+        info("To stop:    launchctl unload -w " + str(plist_path))
+        info("To restart: launchctl load -w "   + str(plist_path))
+    else:
+        warn(f"launchctl load failed: {load_result.stderr.strip()}")
+        warn("Plist was written but not loaded. Load it manually:")
+        info(f"  launchctl load -w {plist_path}")
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -732,6 +853,7 @@ def main() -> None:
 
     minimal_domains = run_generate(args.yes)
     interactive_keyword_editor(minimal_domains, kb_root, args.yes)  # Risk 4
+    setup_launchd_watcher(kb_root, args.yes)
 
     # Risk 3 / Risk 5 — absolute path to kb-agent-serve is the FIRST thing
     # shown in the completion block, not buried at the bottom.
