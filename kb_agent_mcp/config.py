@@ -237,6 +237,23 @@ class Config:
         "KB_OCR_ENGINE", "auto"
     ))
 
+    # ── Re-ranker ─────────────────────────────────────────────────────────────
+    # Set KB_RERANKER_ENABLED=false to skip the cross-encoder re-ranking pass.
+    # Useful when sentence-transformers is absent or for latency-critical use.
+    KB_RERANKER_ENABLED: bool = field(default_factory=lambda: _bool(
+        "KB_RERANKER_ENABLED", True
+    ))
+    # Cross-encoder model name (must be loadable by sentence-transformers).
+    # Defaults to the compact MiniLM model (~80 MB, CPU-friendly).
+    KB_RERANKER_MODEL: str = field(default_factory=lambda: _str(
+        "KB_RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    ))
+    # Candidate pool size fed to the re-ranker.  Defaults to 20; actual fetch is
+    # max(top_n * 4, KB_RERANKER_CANDIDATES) so small top_n always get enough candidates.
+    KB_RERANKER_CANDIDATES: int = field(default_factory=lambda: _int(
+        "KB_RERANKER_CANDIDATES", 20
+    ))
+
     # ── Output format ─────────────────────────────────────────────────────────
     KB_FORMAT_DEFAULT: str = field(default_factory=lambda: _str(
         "KB_FORMAT_DEFAULT", ""

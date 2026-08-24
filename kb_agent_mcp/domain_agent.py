@@ -24,6 +24,7 @@ from kb_agent_mcp.domain_rules import (
     load_domain_config,
     apply_pin_rules,
 )
+from kb_agent_mcp.reranker import rerank as _rerank, is_available as _reranker_available
 
 if TYPE_CHECKING:
     pass
@@ -158,13 +159,33 @@ class DomainAgent:
 
     async def _pre_rank(self, question: str, top_n: int | None = None) -> list[dict]:
         """
-        Run vector search then apply domain pin/boost rules.
-        Returns the re-ordered results list.
+        Run vector/BM25 hybrid search, optionally re-rank with a cross-encoder,
+        then apply domain pin/boost rules.  Returns the re-ordered results list.
+
+        Pipeline:
+          1. Fetch a *candidate pool* (larger than top_n when re-ranker is on).
+          2. Re-rank the pool with the cross-encoder (if available/enabled).
+          3. Apply domain pin/boost rules so forced-pin files always surface first.
         """
         from kb_agent_mcp.vector_store import search as _vs_search
 
         effective_top_n = top_n if top_n is not None else self.config.top_n
-        results = await _vs_search(self.folder_name, question, top_n=effective_top_n)
+
+        # When the re-ranker is active, fetch a larger candidate pool so the
+        # cross-encoder has enough material to work with.
+        if _reranker_available():
+            candidate_n = max(effective_top_n * 4, cfg.KB_RERANKER_CANDIDATES)
+        else:
+            candidate_n = effective_top_n
+
+        results = await _vs_search(self.folder_name, question, top_n=candidate_n)
+
+        # Re-rank the candidate pool (CPU work → thread pool).
+        if _reranker_available() and results:
+            results = await asyncio.to_thread(_rerank, question, results, effective_top_n)
+
+        # Apply domain pin/boost rules *after* re-ranking so explicit pins
+        # always land at rank 0 regardless of re-ranker scores.
         if self.config.pin_files or self.config.boost_keywords:
             results = await asyncio.to_thread(
                 apply_pin_rules, results, self.folder_name, self.config
