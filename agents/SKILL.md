@@ -7,7 +7,7 @@ description: >
 
   Current domains (4):
   - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related documentation.
+  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
   - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
   - **skills**: This folder contains information and notes related to skills and their application in various contexts.
 
@@ -35,7 +35,7 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 
 ## Current Domains
 - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related documentation.
+- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
 - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
 - **skills**: This folder contains information and notes related to skills and their application in various contexts.
 

@@ -1119,6 +1119,12 @@ class KBHandler(FileSystemEventHandler):
               flush=True)
         self._schedule_index(folder_name, path)
 
+        # File created inside a sub-folder — domain_meta keywords were generated
+        # from a file sample at generate.py time and never reflect new sub-folder
+        # content.  Schedule a generate.py run to refresh descriptions + keywords.
+        if path.parent != WATCH_ROOT / folder_name:
+            self._schedule_generate(f"sub-folder content added: {folder_name}")
+
     def on_deleted(self, event):
         path = pathlib.Path(event.src_path)
 
@@ -1145,6 +1151,11 @@ class KBHandler(FileSystemEventHandler):
         print(f"[KB Watcher] ✕ {path.name} deleted from {folder_name} → scheduling deindex + README",
               flush=True)
         self._schedule_deindex(folder_name, path)
+
+        # File deleted from a sub-folder — refresh domain_meta keywords so
+        # removed content no longer influences routing.
+        if path.parent != WATCH_ROOT / folder_name:
+            self._schedule_generate(f"sub-folder content removed: {folder_name}")
 
     def on_moved(self, event):
         src  = pathlib.Path(event.src_path)
@@ -1204,6 +1215,10 @@ class KBHandler(FileSystemEventHandler):
         print(f"[KB Watcher] ✎ {path.name} modified in {folder_name} → scheduling re-index + README",
               flush=True)
         self._schedule_index(folder_name, path)
+
+        # File modified inside a sub-folder — schedule domain_meta refresh.
+        if path.parent != WATCH_ROOT / folder_name:
+            self._schedule_generate(f"sub-folder content changed: {folder_name}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
