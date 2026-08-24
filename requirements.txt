@@ -12,6 +12,7 @@ pyyaml>=6.0.0         # YAML config support
 
 # ── Vector store ─────────────────────────────────────────────
 chromadb>=0.5.0       # persistent vector index
+rank-bm25>=0.2.2      # in-process BM25 index for hybrid search
 
 # ── File format support (required for full document coverage) ─
 pypdf>=4.0.0          # PDF reading

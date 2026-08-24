@@ -1,11 +1,17 @@
 """
 kb_agent_mcp/vector_store.py
 ─────────────────────────────
-ChromaDB-backed persistent vector store.
+ChromaDB-backed persistent vector store with hybrid BM25 + vector search
+and sliding-window chunked indexing.
 
-Each knowledge domain gets its own ChromaDB collection.
-Domain metadata (description, keywords, system_prompt, etc.) is stored as
-ChromaDB collection metadata so no separate domain_meta.json is needed.
+Each knowledge domain gets its own ChromaDB collection and an in-process
+BM25 index (rank_bm25).  Every search fuses both ranked lists using
+Reciprocal Rank Fusion (RRF), which improves recall for exact-term queries
+("FY2025", "ACE 11.3", "ELA status") where cosine similarity alone can miss.
+
+Files are split into overlapping chunks so answers that straddle a boundary
+are never silently lost.  Each chunk is stored as a separate ChromaDB entry;
+search results are deduplicated back to file level before being returned.
 
 Storage location: {KB_ROOT}/.kb_index/chroma/
 
@@ -36,8 +42,9 @@ import asyncio
 import hashlib
 import logging
 import pathlib
+import re
 from collections import OrderedDict
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -45,6 +52,71 @@ from sklearn.metrics.pairwise import cosine_similarity
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.embeddings import embed as _async_embed, _embed_sync
 from kb_agent_mcp.file_parser import INCLUDE_EXTS, should_skip, snippet as _snippet
+
+# ── Chunking parameters ───────────────────────────────────────────────────────
+# Documents are split into overlapping windows so answers near chunk boundaries
+# are never silently dropped.
+#
+# CHUNK_SIZE  — characters per chunk (~875 tokens at 4 chars/token; fits
+#               comfortably within any embedding model's context window).
+# CHUNK_OVERLAP — characters shared between consecutive chunks (~50 tokens).
+#               This is the sliding-window margin that recovers boundary answers.
+#
+# These defaults can be overridden via KB_CHUNK_SIZE / KB_CHUNK_OVERLAP env vars
+# (read once at module import so hot-reload is not needed for tests).
+import os as _os
+
+_CHUNK_SIZE    = int(_os.environ.get("KB_CHUNK_SIZE",    "3500"))
+_CHUNK_OVERLAP = int(_os.environ.get("KB_CHUNK_OVERLAP", "200"))
+
+# Separator used in ChromaDB document IDs to attach the chunk index.
+# Must not appear in normal file paths.
+_CHUNK_SEP = "::chunk_"
+
+
+def chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
+    """
+    Split *text* into overlapping character-level windows.
+
+    Args:
+        text:    Full document text to split.
+        size:    Maximum characters per chunk.
+        overlap: Characters shared between consecutive chunks (sliding window).
+
+    Returns:
+        A list of non-empty chunk strings.  If the text fits in a single chunk
+        the list contains exactly one element (no splitting overhead).
+
+    Notes:
+        • The last chunk may be shorter than *size*.
+        • overlap must be < size; if not, it is clamped to size // 2.
+    """
+    if not text:
+        return []
+    overlap = min(overlap, size // 2)   # guard against misconfiguration
+    if len(text) <= size:
+        return [text]
+
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start + size
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start = end - overlap           # slide back by *overlap* characters
+    return chunks
+
+
+def _chunk_id(file_id: str, idx: int) -> str:
+    """Build the ChromaDB document ID for chunk *idx* of *file_id*."""
+    return f"{file_id}{_CHUNK_SEP}{idx}"
+
+
+def _file_id_from_chunk(chunk_id: str) -> str:
+    """Strip the ``::chunk_N`` suffix to recover the canonical file path."""
+    sep_pos = chunk_id.find(_CHUNK_SEP)
+    return chunk_id[:sep_pos] if sep_pos != -1 else chunk_id
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +148,130 @@ class SearchResult(TypedDict):
     name: str         # filename
     folder: str       # domain folder name
     summary: str      # text snippet used for embedding
-    score: float      # cosine similarity 0.0–1.0
+    score: float      # RRF-fused relevance score (0.0–1.0 range)
+
+
+# ── BM25 index (one per domain, lazily built) ─────────────────────────────────
+# Stored as: {domain: _BM25Entry} — invalidated on every upsert/delete so the
+# next search transparently rebuilds it.  Building is O(N) over the corpus
+# (N = number of indexed documents), which is fast enough in-process for the
+# typical KB sizes we target (hundreds to low-thousands of documents).
+
+_BM25_CACHE: dict[str, "_BM25Entry"] = {}  # domain → entry
+
+
+class _BM25Entry(NamedTuple):
+    index: object          # BM25Okapi instance
+    ids: list[str]         # parallel list of doc IDs
+
+
+def _tokenise(text: str) -> list[str]:
+    """
+    Simple whitespace + punctuation tokeniser that preserves alphanumeric tokens.
+    Lowercases so 'ACE' and 'ace' match; keeps numbers so 'FY2025' is a token.
+    """
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _build_bm25_for_domain(domain: str) -> "_BM25Entry | None":
+    """
+    Fetch all documents from the ChromaDB collection and build a BM25Okapi index.
+    Returns None if the collection is empty or rank_bm25 is not installed.
+    """
+    try:
+        from rank_bm25 import BM25Okapi
+    except ImportError:
+        logger.debug("rank_bm25 not installed; BM25 disabled for domain %r", domain)
+        return None
+
+    col = get_or_create_collection(domain)
+    try:
+        all_docs = col.get(include=["documents", "metadatas"])
+    except Exception as exc:
+        logger.warning("BM25 build: col.get() failed for domain %r (%s)", domain, exc)
+        return None
+
+    ids       = all_docs.get("ids") or []
+    documents = all_docs.get("documents") or []
+    metadatas = all_docs.get("metadatas") or []
+
+    if not ids:
+        return None
+
+    corpus: list[list[str]] = []
+    doc_ids: list[str] = []
+    for doc_id, doc, meta in zip(ids, documents, metadatas):
+        # Prepend the filename so exact-name matches score higher
+        name = (meta or {}).get("name", "")
+        combined = f"{name} {doc or ''}"
+        corpus.append(_tokenise(combined))
+        doc_ids.append(doc_id)
+
+    return _BM25Entry(index=BM25Okapi(corpus), ids=doc_ids)
+
+
+def _get_bm25(domain: str) -> "_BM25Entry | None":
+    """Return (or lazily build) the BM25 index for a domain."""
+    if domain not in _BM25_CACHE:
+        entry = _build_bm25_for_domain(domain)
+        if entry is None:
+            return None
+        _BM25_CACHE[domain] = entry
+    return _BM25_CACHE[domain]
+
+
+def _invalidate_bm25(domain: str) -> None:
+    """Drop the cached BM25 index for a domain (called on upsert/delete)."""
+    _BM25_CACHE.pop(domain, None)
+
+
+# ── Reciprocal Rank Fusion ────────────────────────────────────────────────────
+# Standard RRF formula: score(d) = Σ 1 / (k + rank(d))
+# k=60 is the canonical value from Cormack et al. 2009 and works well in
+# practise without tuning.
+
+_RRF_K = 60
+
+
+def _rrf_fuse(
+    vector_results: list[SearchResult],
+    bm25_results:   list[SearchResult],
+    top_n: int,
+) -> list[SearchResult]:
+    """
+    Merge two ranked lists using Reciprocal Rank Fusion.
+
+    Both lists are ranked 1-based (rank 1 = most relevant).
+    Returns up to *top_n* results re-sorted by fused RRF score, descending.
+    The final `score` field on each result is normalised to [0, 1] so callers
+    (confidence footer etc.) remain compatible.
+    """
+    # Build path → result mapping (path is the stable document ID)
+    all_by_path: dict[str, SearchResult] = {}
+    for r in vector_results + bm25_results:
+        all_by_path.setdefault(r["path"], r)
+
+    rrf_scores: dict[str, float] = {}
+
+    for rank, r in enumerate(vector_results, start=1):
+        rrf_scores[r["path"]] = rrf_scores.get(r["path"], 0.0) + 1.0 / (_RRF_K + rank)
+
+    for rank, r in enumerate(bm25_results, start=1):
+        rrf_scores[r["path"]] = rrf_scores.get(r["path"], 0.0) + 1.0 / (_RRF_K + rank)
+
+    if not rrf_scores:
+        return []
+
+    # Normalise to [0, 1]: max possible RRF score when a doc ranks first in both lists
+    max_possible = 2.0 / (_RRF_K + 1)
+    sorted_paths = sorted(rrf_scores, key=lambda p: rrf_scores[p], reverse=True)[:top_n]
+
+    fused: list[SearchResult] = []
+    for path in sorted_paths:
+        r = dict(all_by_path[path])
+        r["score"] = min(1.0, rrf_scores[path] / max_possible)
+        fused.append(SearchResult(**r))  # type: ignore[misc]
+    return fused
 
 
 # ── ChromaDB client singleton ─────────────────────────────────────────────────
@@ -255,8 +450,16 @@ def delete_collection(domain: str) -> None:
 
 def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
     """
-    Index or re-index a single file.
-    Returns True if the file was (re-)indexed, False if it was skipped (unchanged).
+    Index or re-index a single file using overlapping chunk windows.
+
+    Each document is split into chunks of ~_CHUNK_SIZE characters with
+    _CHUNK_OVERLAP characters of overlap.  Every chunk is stored as a
+    separate ChromaDB entry so answers near chunk boundaries are not lost.
+
+    Change detection: the file hash is stored on chunk_0's metadata.  If the
+    hash matches the stored value the file is skipped (no re-embedding needed).
+
+    Returns True if the file was (re-)indexed, False if it was skipped.
     """
     if should_skip(file_path):
         return False
@@ -264,42 +467,69 @@ def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
         return False
 
     col = get_or_create_collection(domain)
-    doc_id = _file_id(file_path)
+    doc_id       = _file_id(file_path)
     current_hash = _file_hash(file_path)
 
-    # Check if file is unchanged
+    # Change-detection: check hash stored on the first chunk (chunk_0).
+    # If the hash matches, the file content is unchanged — skip re-indexing.
+    chunk0_id = _chunk_id(doc_id, 0)
     try:
-        existing = col.get(ids=[doc_id], include=["metadatas"])
+        existing = col.get(ids=[chunk0_id], include=["metadatas"])
         if existing["metadatas"] and existing["metadatas"][0].get("hash") == current_hash:
             return False  # unchanged
     except Exception as exc:
         logger.warning("Hash-check for %s failed (%s); will re-index", doc_id, exc)
 
-    # Extract snippet and embed
-    text = _snippet(file_path, max_chars=2000)
-    embed_input = f"{file_path.name}\n{text}"
-    vector = _embed_sync(embed_input)
+    # Extract the full document text (up to KB_BUDGET_EMBED_CHARS) and chunk it.
+    full_text = _snippet(file_path, max_chars=cfg.KB_BUDGET_EMBED_CHARS)
+    chunks    = chunk_text(full_text)
 
-    col.upsert(
-        ids=[doc_id],
-        embeddings=[vector],
-        documents=[text],
-        metadatas=[{
-            "path": doc_id,
-            "name": file_path.name,
-            "folder": domain,
-            "hash": current_hash,
-        }],
-    )
+    # Delete any previously stored chunks for this file before re-indexing.
+    # We use a metadata filter so stale chunks from a previously larger file
+    # are also removed (e.g. if _CHUNK_SIZE shrank between runs).
+    try:
+        col.delete(where={"path": doc_id})
+    except Exception as exc:
+        logger.debug("Pre-delete of old chunks for %s failed (%s); continuing", doc_id, exc)
+
+    # Embed and upsert each chunk.
+    ids:        list[str]        = []
+    embeddings: list[list[float]] = []
+    documents:  list[str]        = []
+    metadatas:  list[dict]       = []
+
+    for idx, chunk in enumerate(chunks):
+        # Prepend the filename to every chunk so keyword/semantic search for the
+        # file name always scores highly, regardless of which chunk matches.
+        embed_input = f"{file_path.name}\n{chunk}"
+        vector = _embed_sync(embed_input)
+
+        ids.append(_chunk_id(doc_id, idx))
+        embeddings.append(vector)
+        documents.append(chunk)
+        metadatas.append({
+            "path":        doc_id,          # canonical file path (no ::chunk_N suffix)
+            "name":        file_path.name,
+            "folder":      domain,
+            "chunk_index": idx,
+            "chunk_total": len(chunks),
+            # hash only stored on chunk 0 — sufficient for change detection
+            "hash": current_hash if idx == 0 else "",
+        })
+
+    col.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+    _invalidate_bm25(domain)   # corpus changed — next search rebuilds the index
     return True
 
 
 def _delete_file_sync(domain: str, file_path: pathlib.Path) -> None:
-    """Remove a file from the domain's vector index."""
-    col = get_or_create_collection(domain)
+    """Remove all chunks of a file from the domain's vector index."""
+    col    = get_or_create_collection(domain)
     doc_id = _file_id(file_path)
     try:
-        col.delete(ids=[doc_id])
+        # Delete every chunk that carries this file's canonical path in metadata.
+        col.delete(where={"path": doc_id})
+        _invalidate_bm25(domain)   # corpus changed — next search rebuilds the index
     except Exception as exc:
         logger.warning(
             "Failed to delete file %s from domain %r index (%s)",
@@ -309,18 +539,199 @@ def _delete_file_sync(domain: str, file_path: pathlib.Path) -> None:
 
 # ── Sync search (used by base_agent via thread pool) ─────────────────────────
 
+def _dedup_to_file_level(results: list[SearchResult]) -> list[SearchResult]:
+    """
+    Deduplicate a list of chunk-level SearchResults to file level.
+
+    When a document is split into multiple chunks, several results may share
+    the same ``path`` (the canonical file path stored in metadata).  Keep
+    only the highest-scoring chunk per file, preserving the original rank
+    order of the winner.
+
+    If a result carries a chunk ``summary``, it is the most relevant excerpt
+    for this file — callers (passthrough block, confidence footer) already
+    display the summary verbatim, so the best-matching chunk is exactly what
+    we want.
+    """
+    seen:    dict[str, float]        = {}   # path → best score so far
+    winners: dict[str, SearchResult] = {}   # path → winning SearchResult
+
+    for r in results:
+        path = r["path"]
+        if path not in seen or r["score"] > seen[path]:
+            seen[path]    = r["score"]
+            winners[path] = r
+
+    # Preserve input rank order (first occurrence wins for tie-breaking)
+    deduped: list[SearchResult] = []
+    seen_paths: set[str] = set()
+    for r in results:
+        path = r["path"]
+        if path not in seen_paths:
+            seen_paths.add(path)
+            deduped.append(winners[path])
+    return deduped
+
+
+def _vector_search_sync(
+    domain: str, query: str, top_n: int, col, count: int, query_vec: list[float]
+) -> list[SearchResult]:
+    """
+    Run ChromaDB ANN vector search and return up to *top_n* file-level results.
+    Falls back to full-scan cosine or keyword on any failure.
+
+    ChromaDB is queried for more candidates than top_n so that after
+    chunk-to-file deduplication we still have enough distinct files.
+    """
+    # Over-fetch to account for multiple chunks per file; cap at collection size.
+    fetch_n = min(top_n * 4, count)
+    try:
+        res = col.query(
+            query_embeddings=[query_vec],
+            n_results=fetch_n,
+            include=["documents", "metadatas", "distances"],
+        )
+        ids       = res["ids"][0]
+        metas     = res["metadatas"][0]
+        docs      = res["documents"][0]
+        distances = res["distances"][0]
+
+        raw: list[SearchResult] = []
+        for doc_id, meta, doc, dist in zip(ids, metas, docs, distances):
+            meta = meta or {}
+            # ChromaDB returns L2 distance; convert to a 0–1 similarity score
+            score = max(0.0, 1.0 - float(dist))
+            raw.append(SearchResult(
+                path=meta.get("path", _file_id_from_chunk(doc_id)),
+                name=meta.get("name", pathlib.Path(_file_id_from_chunk(doc_id)).name),
+                folder=meta.get("folder", domain),
+                summary=doc or "",
+                score=score,
+            ))
+        return _dedup_to_file_level(raw)[:top_n]
+
+    except Exception as exc:
+        logger.warning(
+            "ChromaDB query() failed for domain %r query %r (%s); falling back to full scan",
+            domain, query, exc,
+        )
+        # Last-resort: full scan fallback (original behaviour)
+        try:
+            all_docs = col.get(include=["embeddings", "documents", "metadatas"])
+        except Exception as exc2:
+            logger.warning(
+                "ChromaDB get() also failed for domain %r (%s); returning empty results",
+                domain, exc2,
+            )
+            return []
+        embeddings = all_docs.get("embeddings")
+        if not embeddings:
+            return _keyword_fallback(domain, query, top_n, all_docs)
+        try:
+            query_arr    = np.array([query_vec])
+            doc_arr      = np.array(embeddings)
+            q_dim        = query_arr.shape[1]
+            mask         = [i for i, e in enumerate(embeddings) if len(e) == q_dim]
+            if not mask:
+                return _keyword_fallback(domain, query, top_n, all_docs)
+            filtered_arr = doc_arr[mask]
+            scores       = cosine_similarity(query_arr, filtered_arr)[0]
+            # Over-fetch before dedup — same logic as the ANN path
+            top_indices  = np.argsort(scores)[::-1][:top_n * 4]
+            raw_fallback: list[SearchResult] = []
+            for rank_idx in top_indices:
+                orig_idx  = mask[rank_idx]
+                raw_id    = all_docs["ids"][orig_idx]
+                meta      = all_docs["metadatas"][orig_idx] or {}
+                file_path = meta.get("path", _file_id_from_chunk(raw_id))
+                raw_fallback.append(SearchResult(
+                    path=file_path,
+                    name=meta.get("name", pathlib.Path(file_path).name),
+                    folder=meta.get("folder", domain),
+                    summary=all_docs["documents"][orig_idx] or "",
+                    score=float(scores[rank_idx]),
+                ))
+            return _dedup_to_file_level(raw_fallback)[:top_n]
+        except Exception as exc3:
+            logger.warning("Full-scan fallback also failed (%s); using keyword fallback", exc3)
+            return _keyword_fallback(domain, query, top_n, all_docs)
+
+
+def _bm25_search_sync(
+    domain: str, query: str, top_n: int, col
+) -> list[SearchResult]:
+    """
+    Run BM25 search over the domain corpus and return up to *top_n* file-level results.
+
+    The BM25 index contains one entry per chunk.  We over-fetch (top_n × 4) and
+    deduplicate to file level so the caller always receives distinct files.
+
+    Returns an empty list when rank_bm25 is unavailable or no chunk matches.
+    """
+    entry = _get_bm25(domain)
+    if entry is None:
+        return []
+
+    query_tokens = _tokenise(query)
+    if not query_tokens:
+        return []
+
+    raw_scores: list[float] = entry.index.get_scores(query_tokens)
+    if not any(raw_scores):
+        return []
+
+    max_score = max(raw_scores)
+
+    # Over-fetch chunk candidates to survive deduplication back to file level.
+    fetch_n     = top_n * 4
+    top_indices = sorted(range(len(raw_scores)), key=lambda i: raw_scores[i], reverse=True)[:fetch_n]
+    top_ids     = [entry.ids[i] for i in top_indices]
+
+    try:
+        fetched = col.get(ids=top_ids, include=["documents", "metadatas"])
+    except Exception as exc:
+        logger.warning("BM25 meta fetch failed for domain %r (%s)", domain, exc)
+        return []
+
+    # Build chunk_id → (doc, meta) map for O(1) lookup
+    id_to_doc  = dict(zip(fetched["ids"], fetched["documents"] or []))
+    id_to_meta = dict(zip(fetched["ids"], fetched["metadatas"] or []))
+
+    raw: list[SearchResult] = []
+    for idx in top_indices:
+        chunk_id  = entry.ids[idx]
+        score_raw = raw_scores[idx]
+        if score_raw <= 0:
+            continue
+        meta      = id_to_meta.get(chunk_id) or {}
+        file_path = meta.get("path", _file_id_from_chunk(chunk_id))
+        raw.append(SearchResult(
+            path=file_path,
+            name=meta.get("name", pathlib.Path(file_path).name),
+            folder=meta.get("folder", domain),
+            summary=id_to_doc.get(chunk_id) or "",
+            score=score_raw / max_score,   # normalise to [0, 1]; overwritten by RRF anyway
+        ))
+    return _dedup_to_file_level(raw)[:top_n]
+
+
 def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
     """
-    Semantic search within a domain's collection.
-    Returns up to *top_n* results sorted by cosine similarity (descending).
-    Falls back to keyword matching if no compatible embeddings exist.
+    Hybrid search: BM25 + vector (ChromaDB ANN), fused with Reciprocal Rank Fusion.
 
     Strategy:
-    1. Embed the query once.
-    2. Use ChromaDB's native .query() (ANN index) to fetch only the top-N
-       candidates — avoids pulling the full collection into memory.
-    3. If the collection is empty or embeddings are absent, fall back to
-       keyword matching (which requires the full doc set — fetched lazily).
+    1. Embed the query once (cached per query text).
+    2. Run ChromaDB ANN vector search over chunk-level entries; deduplicate to
+       file level and return up to fetch_n file results.
+    3. Run BM25 keyword search over the same chunk-level corpus; deduplicate
+       to file level.
+    4. Fuse both file-level ranked lists with RRF and return the top-N results.
+    5. If rank_bm25 is unavailable, falls back to pure vector search.
+    6. If ChromaDB is unreachable, falls back to keyword matching.
+
+    Documents are stored as overlapping chunks (see chunk_text()).  The
+    deduplicate step in each search leg ensures callers always see distinct
+    files — the best-matching chunk's text is surfaced as the result summary.
     """
     col = get_or_create_collection(domain)
 
@@ -346,74 +757,19 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
         )
         return []
 
-    # Use ChromaDB's native ANN query — only top_n rows transferred
-    try:
-        res = col.query(
-            query_embeddings=[query_vec],
-            n_results=min(top_n, count),
-            include=["documents", "metadatas", "distances"],
-        )
-        ids       = res["ids"][0]
-        metas     = res["metadatas"][0]
-        docs      = res["documents"][0]
-        distances = res["distances"][0]
+    # Pass fetch_n file-level results to each search leg.  Each leg
+    # internally over-fetches chunks (×4) and deduplicates back to files,
+    # so the total ChromaDB/BM25 candidate pool is fetch_n×4 chunks per leg.
+    fetch_n = min(max(top_n * 2, 10), count)
 
-        results: list[SearchResult] = []
-        for doc_id, meta, doc, dist in zip(ids, metas, docs, distances):
-            meta = meta or {}
-            # ChromaDB returns L2 distance; convert to a 0–1 similarity score
-            score = max(0.0, 1.0 - float(dist))
-            results.append(SearchResult(
-                path=meta.get("path", doc_id),
-                name=meta.get("name", pathlib.Path(doc_id).name),
-                folder=meta.get("folder", domain),
-                summary=doc or "",
-                score=score,
-            ))
-        return results
+    vector_results = _vector_search_sync(domain, query, fetch_n, col, count, query_vec)
+    bm25_results   = _bm25_search_sync(domain, query, fetch_n, col)
 
-    except Exception as exc:
-        logger.warning(
-            "ChromaDB query() failed for domain %r query %r (%s); falling back to full scan",
-            domain, query, exc,
-        )
-        # Last-resort: full scan fallback (original behaviour)
-        try:
-            all_docs = col.get(include=["embeddings", "documents", "metadatas"])
-        except Exception as exc2:
-            logger.warning(
-                "ChromaDB get() also failed for domain %r (%s); returning empty results",
-                domain, exc2,
-            )
-            return []
-        embeddings = all_docs.get("embeddings")
-        if not embeddings:
-            return _keyword_fallback(domain, query, top_n, all_docs)
-        try:
-            query_arr   = np.array([query_vec])
-            doc_arr     = np.array(embeddings)
-            q_dim       = query_arr.shape[1]
-            mask        = [i for i, e in enumerate(embeddings) if len(e) == q_dim]
-            if not mask:
-                return _keyword_fallback(domain, query, top_n, all_docs)
-            filtered_arr = doc_arr[mask]
-            scores       = cosine_similarity(query_arr, filtered_arr)[0]
-            top_indices  = np.argsort(scores)[::-1][:top_n]
-            fallback: list[SearchResult] = []
-            for rank_idx in top_indices:
-                orig_idx = mask[rank_idx]
-                meta = all_docs["metadatas"][orig_idx] or {}
-                fallback.append(SearchResult(
-                    path=meta.get("path", all_docs["ids"][orig_idx]),
-                    name=meta.get("name", pathlib.Path(all_docs["ids"][orig_idx]).name),
-                    folder=meta.get("folder", domain),
-                    summary=all_docs["documents"][orig_idx] or "",
-                    score=float(scores[rank_idx]),
-                ))
-            return fallback
-        except Exception as exc3:
-            logger.warning("Full-scan fallback also failed (%s); using keyword fallback", exc3)
-            return _keyword_fallback(domain, query, top_n, all_docs)
+    if not bm25_results:
+        # rank_bm25 unavailable or corpus empty — pure vector result (already top_n sized)
+        return vector_results[:top_n]
+
+    return _rrf_fuse(vector_results, bm25_results, top_n)
 
 
 def _keyword_fallback(
@@ -432,17 +788,19 @@ def _keyword_fallback(
             scored.append((hits / len(query_words), i))
 
     scored.sort(key=lambda x: -x[0])
-    results: list[SearchResult] = []
-    for score, i in scored[:top_n]:
-        meta = (all_docs["metadatas"] or [{}])[i] or {}
-        results.append(SearchResult(
-            path=meta.get("path", all_docs["ids"][i]),
+    raw: list[SearchResult] = []
+    for score, i in scored[:top_n * 4]:
+        raw_id    = all_docs["ids"][i]
+        meta      = (all_docs["metadatas"] or [{}])[i] or {}
+        file_path = meta.get("path", _file_id_from_chunk(raw_id))
+        raw.append(SearchResult(
+            path=file_path,
             name=meta.get("name", ""),
             folder=meta.get("folder", domain),
             summary=(all_docs["documents"] or [""])[i] or "",
             score=score,
         ))
-    return results
+    return _dedup_to_file_level(raw)[:top_n]
 
 
 # ── Async public API ──────────────────────────────────────────────────────────
