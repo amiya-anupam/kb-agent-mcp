@@ -80,6 +80,27 @@ INCLUDE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
 
 SKIP_PATTERNS = {"readme", ".ds_store", "watch_kb", "__pycache__"}
 
+
+# ── .noindex sentinel check ───────────────────────────────────────────────────
+
+def _has_noindex_ancestor(path: pathlib.Path) -> bool:
+    """
+    Return True if any ancestor directory of *path* (up to KB_ROOT) contains
+    a `.noindex` sentinel file.
+
+    Mirrors the canonical implementation in kb_agent_mcp/file_parser so the
+    indexer respects the same exclusion rules as the MCP query layer.
+    """
+    try:
+        for parent in path.parents:
+            if (parent / ".noindex").exists():
+                return True
+            if parent == KB_ROOT:
+                break
+    except Exception:
+        pass
+    return False
+
 # Chars of text used as embedding input per file
 SUMMARY_CHARS = 2000
 
@@ -126,8 +147,16 @@ def discover_folders() -> list[str]:
 # ── Skip helper ───────────────────────────────────────────────────────────────
 
 def should_skip(path: pathlib.Path) -> bool:
+    """Return True if this file should be excluded from indexing.
+
+    Skips:
+    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
+    • any file whose ancestor folder contains a `.noindex` sentinel file
+    """
     name = path.name.lower()
-    return any(p in name for p in SKIP_PATTERNS)
+    if any(p in name for p in SKIP_PATTERNS):
+        return True
+    return _has_noindex_ancestor(path)
 
 
 # ── Embedding backends ────────────────────────────────────────────────────────

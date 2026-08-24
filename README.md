@@ -242,9 +242,15 @@ a malicious document pre-plants an acknowledgement token — the token is genera
 
 **`.noindex` sentinel — hard exclusion:**
 Place an empty file named `.noindex` inside any subfolder to hard-exclude **all**
-files in that folder and every nested subfolder. Files under a `.noindex` ancestor
-are excluded at both scan time (never appear in `check_confidential` results) and
-at index time (never added to the vector database):
+files in that folder and every nested subfolder. The exclusion is enforced across
+all layers — both the MCP server and the legacy agents-layer:
+
+| Layer | Where enforced |
+|---|---|
+| MCP (`kb_agent_mcp/`) | `file_parser.should_skip()` — never indexed; `security_gate.scan_domain()` — never scanned |
+| Agents (`agents/`) | `agent_base.extract_full_text()` — never read; `embeddings.should_skip()` — never indexed |
+| Watcher (`scripts/`) | `watch_kb.should_skip()` — never re-embedded on file change |
+
 ```
 ~/KnowledgeBase/
   secrets/

@@ -63,6 +63,35 @@ def _kb_root() -> pathlib.Path:
 KB_ROOT      = _kb_root()
 VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 
+
+# ── .noindex sentinel check ───────────────────────────────────────────────────
+
+def _has_noindex_ancestor(path: pathlib.Path) -> bool:
+    """
+    Return True if any ancestor directory of *path* (up to KB_ROOT) contains
+    a `.noindex` sentinel file.
+
+    A `.noindex` file placed in a folder (or any of its parents) permanently
+    excludes all files beneath it from being read, indexed, or returned in
+    RAG context.  This is the agents-layer equivalent of the canonical
+    implementation in kb_agent_mcp/file_parser._has_noindex_ancestor().
+
+    The check walks upward from the file's immediate parent and stops once it
+    reaches KB_ROOT itself, so it never escapes the knowledge-base boundary.
+    It is best-effort — any I/O error is silently swallowed so the guard
+    never crashes a query in progress.
+    """
+    try:
+        for parent in path.parents:
+            if (parent / ".noindex").exists():
+                return True
+            # Stop after checking KB_ROOT itself — don't walk the whole filesystem
+            if parent == KB_ROOT:
+                break
+    except Exception:
+        pass
+    return False
+
 def folder_to_safe_name(name: str) -> str:
     """Convert a folder name to a safe snake_case identifier (e.g. 'ACE Docs' → 'ace_docs')."""
     n = name.lower()
@@ -544,9 +573,18 @@ def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> st
 # ── Full text extractor ───────────────────────────────────────────────────────
 
 def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> str:
+    """Extract as much useful text as possible from a file."""
     if max_chars is None:
         max_chars = _cb.get("rag_file")
-    """Extract as much useful text as possible from a file."""
+
+    # ── Security: honour .noindex sentinels ──────────────────────────────────
+    # Any file whose ancestor folder contains a `.noindex` file is hard-excluded.
+    # This mirrors the enforcement in kb_agent_mcp/file_parser.should_skip() and
+    # kb_agent_mcp/security_gate so the agents-layer cannot be used as a bypass
+    # path to read protected content.
+    if _has_noindex_ancestor(file_path):
+        return f"[Excluded: {file_path.name} is in a .noindex protected folder]"
+
     ext = file_path.suffix.lower()
     try:
         if ext in {".txt", ".md", ".csv"}:

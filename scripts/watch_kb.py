@@ -268,8 +268,35 @@ def ensure_readme(folder: pathlib.Path) -> pathlib.Path:
     print(f"[KB Watcher] Created README: {readme.name}", flush=True)
     return readme
 
+def _has_noindex_ancestor(path: pathlib.Path) -> bool:
+    """
+    Return True if any ancestor directory of *path* (up to WATCH_ROOT) contains
+    a `.noindex` sentinel file.
+
+    Mirrors the canonical implementation in kb_agent_mcp/file_parser and the
+    agents-layer so all three layers enforce the same exclusion rule.
+    """
+    try:
+        for parent in path.parents:
+            if (parent / ".noindex").exists():
+                return True
+            if parent == WATCH_ROOT:
+                break
+    except Exception:
+        pass
+    return False
+
+
 def should_skip(path: pathlib.Path) -> bool:
-    return any(p in path.name.lower() for p in SKIP_PATTERNS)
+    """Return True if this file should be excluded from watcher processing.
+
+    Skips:
+    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
+    • any file whose ancestor folder contains a `.noindex` sentinel file
+    """
+    if any(p in path.name.lower() for p in SKIP_PATTERNS):
+        return True
+    return _has_noindex_ancestor(path)
 
 def is_readme(path: pathlib.Path) -> bool:
     """Return True if this path is a README file (should not be indexed as a doc)."""
