@@ -196,6 +196,27 @@ def backend_name() -> str:
     return f"ollama ({cfg.KB_EMBED_MODEL or 'nomic-embed-text'})"
 
 
+def effective_model_name() -> str:
+    """
+    Return the canonical embedding model identifier for the current configuration.
+
+    This is a stable, machine-comparable string (not a display label) intended
+    for stamping into ChromaDB collection metadata at index time and comparing
+    against that stamp at query / doctor time.
+
+    Format: "<provider>:<model_name>"
+      passthrough → "st:all-MiniLM-L6-v2"
+      ollama      → "ollama:<KB_EMBED_MODEL or 'nomic-embed-text'>"
+      openai/...  → "openai:<KB_EMBED_MODEL or 'text-embedding-3-small'>"
+    """
+    provider = cfg.KB_LLM_PROVIDER.lower()
+    if provider == "passthrough":
+        return f"st:{_ST_MODEL_NAME}"
+    if provider in ("openai", "anthropic", "custom"):
+        return f"openai:{cfg.KB_EMBED_MODEL or 'text-embedding-3-small'}"
+    return f"ollama:{cfg.KB_EMBED_MODEL or 'nomic-embed-text'}"
+
+
 # ── Public async API ──────────────────────────────────────────────────────────
 
 async def embed(text: str) -> list[float]:

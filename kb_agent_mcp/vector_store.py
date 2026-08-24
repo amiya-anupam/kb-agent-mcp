@@ -885,20 +885,22 @@ async def build_collection(
             if updated:
                 count += 1
 
-        # Risk 11 — stamp the collection with the current time so the stale
-        # TTL cache in server.py can compare file mtimes against this value.
-        # indexed_at  — Unix float, used by server.py for mtime comparison
-        # indexed_at_iso — ISO string, used by status/doctor for display
+        # Stamp the collection with the current time and the active embedding
+        # model so the stale-index TTL cache and the doctor check can detect:
+        #   • files modified since last index  (indexed_at / indexed_at_iso)
+        #   • KB_EMBED_MODEL changed since last index  (embed_model)
         import datetime as _dt
+        from kb_agent_mcp.embeddings import effective_model_name as _eff_model
         _now = _time.time()
         await asyncio.to_thread(
             set_domain_metadata,
             domain,
             {
-                "indexed_at": _now,
+                "indexed_at":     _now,
                 "indexed_at_iso": _dt.datetime.fromtimestamp(
                     _now, tz=_dt.timezone.utc
                 ).isoformat(),
+                "embed_model":    _eff_model(),
             },
         )
         return count

@@ -4,15 +4,16 @@ kb_agent_mcp/cli/doctor.py — kb-agent-doctor diagnostic command
 Runs a self-contained health checklist and prints a pass/fail report.
 
 Checks:
-  1. Python version (≥ 3.10)
-  2. KB_ROOT set and directory exists
-  3. At least one domain folder found under KB_ROOT
-  4. domain_config.yaml present per domain
-  5. ChromaDB collection non-empty per domain
-  6. sentence-transformers model cached
-  7. LLM reachable (or passthrough confirmed)
-  8. kb-agent-serve on PATH (absolute path shown)
-  9. Bob skill installed
+   1. Python version (≥ 3.10)
+   2. KB_ROOT set and directory exists
+   3. At least one domain folder found under KB_ROOT
+   4. domain_config.yaml present per domain
+   5. ChromaDB collection non-empty per domain
+   6. Embedding model mismatch (index-time model vs current KB_EMBED_MODEL)
+   7. sentence-transformers model cached
+   8. LLM reachable (or passthrough confirmed)
+   9. kb-agent-serve on PATH (absolute path shown)
+  10. Bob skill installed
 
 Exit code 0 when all checks pass, 1 when any check fails.
 
@@ -298,6 +299,73 @@ def _check_chroma_collections(domains: list[str]) -> list[CheckResult]:
     return results
 
 
+def _check_embed_model_mismatch(domains: list[str]) -> list[CheckResult]:
+    """
+    Check ⑥ — verify that each indexed domain was built with the same
+    embedding model that is currently configured.
+
+    Strategy:
+      • Read the ``embed_model`` key stamped into each ChromaDB collection's
+        metadata by build_collection() since this fix was applied.
+      • Compare it to embeddings.effective_model_name() (the current config).
+      • Warn (not hard-fail) for domains whose stamp is absent — those were
+        indexed before this feature was added and simply need a re-index.
+      • Hard-fail (not warn) for domains with a *different* stamp — a mismatch
+        is an active retrieval quality issue that the user must resolve.
+
+    Auto-fix: runs kb-agent-generate --domain <name> for mismatched domains.
+    """
+    try:
+        from kb_agent_mcp.vector_store import get_domain_metadata
+        from kb_agent_mcp.embeddings import effective_model_name
+    except ImportError:
+        # Already caught by the ChromaDB import check above — skip silently
+        return []
+
+    current_model = effective_model_name()
+    results: list[CheckResult] = []
+
+    for name in domains:
+        meta = get_domain_metadata(name) or {}
+        stored = meta.get("embed_model", "")
+
+        if not stored:
+            # Domain was indexed before this feature — not a hard failure,
+            # but prompt the user to re-index to populate the stamp.
+            _warn(
+                f"Embed model unknown for {name}/  (indexed before model tracking)",
+                "Run kb-agent-generate to re-index and record the model stamp.",
+            )
+            results.append(CheckResult(f"embed_model_stamp:{name}", True, None))
+            continue
+
+        if stored == current_model:
+            _pass(f"Embed model match: {name}/  ({stored})")
+            results.append(CheckResult(f"embed_model_match:{name}", True, None))
+        else:
+            def _fix_mismatch(n: str = name) -> bool:
+                _fixing(f"re-indexing {n}/ with current model ({current_model})")
+                rc = subprocess.run(
+                    [sys.executable, "-m", "kb_agent_mcp.cli.generate",
+                     "--domain", n, "--no-llm", "--yes"],
+                ).returncode
+                if rc == 0:
+                    _fixed(f"{n}/ re-indexed with {current_model}")
+                    return True
+                print(_c("31", f"  ✗ kb-agent-generate --domain {n} failed"))
+                return False
+
+            _fail(
+                f"Embed model mismatch: {name}/",
+                f"Indexed with '{stored}' but current model is '{current_model}'. "
+                "Retrieval quality is degraded. Run kb-agent-generate --domain "
+                f"{name}  (or --fix) to rebuild.",
+            )
+            results.append(CheckResult(f"embed_model_mismatch:{name}", False, _fix_mismatch))
+
+    return results
+
+
 def _check_embedding_model() -> CheckResult:
     try:
         from kb_agent_mcp.embeddings import _st_model_is_cached, _ST_MODEL_NAME
@@ -462,16 +530,19 @@ def run_doctor(fix: bool = False) -> int:
                 _hdr("⑤ ChromaDB indexes")
                 results.extend(_check_chroma_collections(domains))
 
-        _hdr("⑥ Embedding model")
+                _hdr("⑥ Embedding model mismatch")
+                results.extend(_check_embed_model_mismatch(domains))
+
+        _hdr("⑦ Embedding model")
         results.append(_check_embedding_model())
 
-        _hdr("⑦ LLM")
+        _hdr("⑧ LLM")
         results.append(_check_llm(cfg))
 
-        _hdr("⑧ kb-agent-serve")
+        _hdr("⑨ kb-agent-serve")
         results.append(_check_serve_path())
 
-        _hdr("⑨ Bob skill")
+        _hdr("⑩ Bob skill")
         results.append(_check_bob_skill())
 
         return results
