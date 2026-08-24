@@ -178,6 +178,19 @@ def _growth_questions(card: DataCard) -> list[Question]:
         return []
     questions: list[Question] = [
         {
+            "question": f"Show me the trend of {m[0]} over time — emit a period-by-period table with QoQ deltas.",
+            "theme": "growth",
+            "requires": ["metric", "time"],
+            "clarifications": _metric_clqs(m) + [
+                _clq(
+                    "time_col",
+                    f"Which time column should I use? Options: {', '.join(t)}",
+                    kind="choice",
+                    choices=t,
+                ),
+            ],
+        },
+        {
             "question": f"What is the period-over-period growth rate for {m[0]}?",
             "theme": "growth",
             "requires": ["metric", "time"],

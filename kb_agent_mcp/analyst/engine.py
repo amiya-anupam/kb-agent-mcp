@@ -28,6 +28,21 @@ Returned dict (always)
     "warnings":         list[str],
     "error":            str,           # only when status == "error"
 }
+
+compare_data() return dict
+──────────────────────────
+{
+    "status":           "answered" | "error",
+    "session_id":       str,
+    "question":         str,
+    "answer":           str,           # markdown diff table
+    "reasoning":        str,
+    "suggested_followups": list[str],
+    "warnings":         list[str],
+    "file_a":           str,           # resolved absolute path
+    "file_b":           str,
+    "error":            str,           # only when status == "error"
+}
 """
 
 from __future__ import annotations
@@ -495,12 +510,190 @@ def _attrition_pivot(
     }
 
 
+def _trend_pivot(
+    rows: list[dict],
+    metric_col: str,
+    time_col: str,
+    include_deltas: bool = True,
+) -> dict[str, Any]:
+    """
+    Build a period × metric table and optionally append period-over-period
+    delta columns (absolute and percentage change).
+
+    Returns:
+        {
+            "periods":        list[str]          — sorted period labels
+            "values":         list[float]         — metric total per period
+            "delta_abs":      list[float | None]  — absolute PoP change
+                                                     (None for first period)
+            "delta_pct":      list[float | None]  — percentage PoP change
+                                                     (None for first period or
+                                                      zero base)
+            "period_col":     str                 — time column used
+            "metric_col":     str                 — metric column used
+            "note":           str                 — human-readable note
+        }
+    """
+    # Accumulate totals keyed by period label
+    period_totals: dict[str, float] = defaultdict(float)
+    for row in rows:
+        val = _to_float(row.get(metric_col))
+        if val is None:
+            continue
+        period_key = str(row.get(time_col, "")).strip()
+        if period_key:
+            period_totals[period_key] += val
+
+    if not period_totals:
+        return {
+            "periods": [],
+            "values": [],
+            "delta_abs": [],
+            "delta_pct": [],
+            "period_col": time_col,
+            "metric_col": metric_col,
+            "note": "No data found for trend calculation.",
+        }
+
+    # Sort periods: numeric years first, then quarter labels, then alpha
+    def _period_sort_key(p: str) -> tuple:
+        # Try pure year
+        yr_m = re.fullmatch(r"\d{4}", p.strip())
+        if yr_m:
+            return (0, int(p.strip()), 0, p)
+        # Quarter label: "Q1 2025", "Q3 FY2026"
+        q_m = re.search(r"q([1-4]).*?(\d{4})", p, re.IGNORECASE)
+        if q_m:
+            return (0, int(q_m.group(2)), int(q_m.group(1)), p)
+        # Year first: "2025 Q3"
+        yq_m = re.search(r"(\d{4}).*?q([1-4])", p, re.IGNORECASE)
+        if yq_m:
+            return (0, int(yq_m.group(1)), int(yq_m.group(2)), p)
+        # Half-year: "H1 2025"
+        h_m = re.search(r"h([12]).*?(\d{4})", p, re.IGNORECASE)
+        if h_m:
+            return (0, int(h_m.group(2)), int(h_m.group(1)), p)
+        # Bare number
+        try:
+            return (0, float(p.strip()), 0, p)
+        except ValueError:
+            return (1, 0, 0, p)
+
+    sorted_periods = sorted(period_totals.keys(), key=_period_sort_key)
+    values = [period_totals[p] for p in sorted_periods]
+
+    delta_abs: list[float | None] = [None]
+    delta_pct: list[float | None] = [None]
+
+    if include_deltas:
+        for i in range(1, len(values)):
+            prev = values[i - 1]
+            curr = values[i]
+            d_abs = curr - prev
+            delta_abs.append(d_abs)
+            delta_pct.append((d_abs / prev * 100) if prev != 0 else None)
+    else:
+        delta_abs = [None] * len(values)
+        delta_pct = [None] * len(values)
+
+    return {
+        "periods": sorted_periods,
+        "values": values,
+        "delta_abs": delta_abs,
+        "delta_pct": delta_pct,
+        "period_col": time_col,
+        "metric_col": metric_col,
+        "note": f"{len(sorted_periods)} periods found.",
+    }
+
+
 def _format_number(n: float) -> str:
     if abs(n) >= 1_000_000:
         return f"${n/1_000_000:,.2f}M"
     if abs(n) >= 1_000:
         return f"${n/1_000:,.1f}K"
     return f"${n:,.2f}"
+
+
+# ── Chart-data builder ─────────────────────────────────────────────────────────
+
+def _make_chart_data(
+    chart_type: str,
+    labels: list[str],
+    datasets: list[dict],
+) -> dict[str, Any]:
+    """
+    Produce a host-agnostic chart-data block alongside a CSV attachment and a
+    Mermaid xychart-beta snippet.
+
+    Args:
+        chart_type: "bar" | "line" | "bar_horizontal"
+        labels:     Category / period labels (x-axis for bar/line).
+        datasets:   [{"label": str, "data": [float, …]}, …]
+
+    Returns:
+        {
+            "type":     str,
+            "labels":   list[str],
+            "datasets": list[{"label": str, "data": list[float]}],
+            "csv":      str,       # inline CSV of the same data
+            "mermaid":  str,       # xychart-beta fenced block (omitted when
+                                   # the data exceeds Mermaid's practical limits)
+        }
+
+    The "csv" field uses comma-separated values with a header row so it can be
+    saved directly as a .csv file or passed to a spreadsheet tool.
+
+    The "mermaid" field is best-effort: Mermaid xychart-beta does not support
+    negative values or more than one y-axis, so it is omitted when those
+    conditions arise.  Callers should fall back to the "csv" field in those
+    cases.
+    """
+    import csv as _csv
+
+    # ── CSV ───────────────────────────────────────────────────────────────────
+    buf = io.StringIO()
+    writer = _csv.writer(buf)
+    ds_labels = [ds["label"] for ds in datasets]
+    writer.writerow(["period"] + ds_labels)
+    for i, label in enumerate(labels):
+        row_vals = [ds["data"][i] if i < len(ds["data"]) else "" for ds in datasets]
+        writer.writerow([label] + row_vals)
+    csv_str = buf.getvalue()
+
+    # ── Mermaid xychart-beta ──────────────────────────────────────────────────
+    mermaid_str = ""
+    # xychart-beta only handles a single y-dataset cleanly; skip multi-series
+    # and skip when any value is negative (Mermaid renders those incorrectly).
+    if len(datasets) == 1:
+        data_vals = datasets[0]["data"]
+        if all(v >= 0 for v in data_vals) and labels:
+            # Mermaid x-axis items must be quoted strings; cap at 12 labels for
+            # readability — beyond that the axis text overlaps.
+            trunc = labels[:12]
+            trunc_vals = data_vals[:12]
+            suffix = " (truncated to 12 periods)" if len(labels) > 12 else ""
+            x_items = " ".join(f'"{lbl}"' for lbl in trunc)
+            y_items = " ".join(str(round(v, 2)) for v in trunc_vals)
+            chart_kw = "bar" if chart_type in ("bar", "bar_horizontal") else "line"
+            ds_title = datasets[0]["label"]
+            mermaid_str = (
+                f"```mermaid\n"
+                f"xychart-beta\n"
+                f'  title "{ds_title}{suffix}"\n'
+                f"  x-axis [{x_items}]\n"
+                f'  y-axis "{ds_title}"\n'
+                f"  {chart_kw} [{y_items}]\n"
+                f"```"
+            )
+
+    return {
+        "type": chart_type,
+        "labels": labels,
+        "datasets": datasets,
+        "csv": csv_str,
+        "mermaid": mermaid_str,
+    }
 
 
 # ── Answer builder ─────────────────────────────────────────────────────────────
@@ -510,11 +703,13 @@ def _build_answer(
     rows: list[dict],
     card: DataCard,
     params: dict[str, Any],
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], dict[str, Any] | None]:
     """
     Compute an answer from raw rows + resolved params.
 
-    Returns (answer_text, reasoning_text, suggested_followups).
+    Returns (answer_text, reasoning_text, suggested_followups, chart_data).
+    chart_data is None when the answer type has no meaningful visualisation
+    (scalar totals, summaries, document passthrough, attrition lists).
     """
     q_lower = question.lower()
     metric_col: str = params.get("metric_col") or (card.metric_columns[0] if card.metric_columns else "")
@@ -575,7 +770,90 @@ def _build_answer(
                 f"What was the revenue trend for the top at-risk customers before they churned?",
                 f"How does this compare to the previous period's attrition?",
             ]
-            return answer, "\n".join(reasoning_parts), followups
+            # Attrition: bar chart of at-risk entities, capped at top_n
+            if top_list:
+                chart_data: dict[str, Any] | None = _make_chart_data(
+                    "bar_horizontal",
+                    [e for e, _ in top_list],
+                    [{"label": f"At-risk {metric_col}", "data": [v for _, v in top_list]}],
+                )
+            else:
+                chart_data = None
+            return answer, "\n".join(reasoning_parts), followups, chart_data
+
+    # ── Trend / time-series ───────────────────────────────────────────────────
+    if any(w in q_lower for w in (
+        "trend", "over time", "over q", "quarter by quarter", "quarterly",
+        "year over year", "yoy", "qoq", "period over period", "each quarter",
+        "each year", "by quarter", "by year", "growth rate", "how has",
+        "how did", "compare periods", "compare quarters",
+    )):
+        if metric_col and time_col:
+            pivot = _trend_pivot(filtered, metric_col, time_col, include_deltas=True)
+            periods = pivot["periods"]
+            values = pivot["values"]
+            delta_abs = pivot["delta_abs"]
+            delta_pct = pivot["delta_pct"]
+
+            reasoning_parts += [
+                f"Operation: TREND_PIVOT({metric_col}, {time_col})",
+                f"Periods found: {len(periods)}",
+            ]
+
+            if not periods:
+                return (
+                    f"No data found to build a trend for **{metric_col}** over **{time_col}**{filter_desc}.",
+                    "\n".join(reasoning_parts),
+                    [f"Try a broader time range or check your filters."],
+                    None,
+                )
+
+            # Build the period × metric table with delta columns
+            header = f"{'Period':<18} {'Value':>14}  {'Δ Abs':>14}  {'Δ %':>8}"
+            sep = "─" * len(header)
+            rows_txt_parts = [header, sep]
+            for i, (p, v) in enumerate(zip(periods, values)):
+                d_abs = delta_abs[i]
+                d_pct = delta_pct[i]
+                d_abs_str = _format_number(d_abs) if d_abs is not None else "—"
+                if d_pct is not None:
+                    arrow = "▲" if d_pct >= 0 else "▼"
+                    d_pct_str = f"{arrow} {abs(d_pct):.1f}%"
+                else:
+                    d_pct_str = "—"
+                rows_txt_parts.append(
+                    f"{p:<18} {_format_number(v):>14}  {d_abs_str:>14}  {d_pct_str:>8}"
+                )
+
+            table = "\n".join(rows_txt_parts)
+            overall_change = values[-1] - values[0] if len(values) > 1 else 0.0
+            overall_pct = (overall_change / values[0] * 100) if values[0] != 0 else None
+            pct_summary = (
+                f" ({'+' if overall_change >= 0 else ''}{overall_pct:.1f}% overall)"
+                if overall_pct is not None else ""
+            )
+            answer = (
+                f"**Trend: {metric_col} by {time_col}{filter_desc}**\n\n"
+                f"```\n{table}\n```\n\n"
+                f"**{periods[0]} → {periods[-1]}:** "
+                f"{_format_number(values[0])} → {_format_number(values[-1])}"
+                f"{pct_summary}"
+            )
+            followups = [
+                f"Which {entity_col} drove the biggest change?" if entity_col else
+                "Which segment drove the biggest change?",
+                f"Show the trend broken down by {entity_col}." if entity_col else
+                "Can you break this trend down by category?",
+                f"Are there any customers at risk based on this trend?" if entity_col else
+                "What is causing the trend?",
+            ]
+            # Trend: line chart — periods on x, values on y
+            chart_data = _make_chart_data(
+                "line",
+                periods,
+                [{"label": metric_col, "data": values}],
+            )
+            return answer, "\n".join(reasoning_parts), followups, chart_data
 
     # ── Total / sum ───────────────────────────────────────────────────────────
     if any(w in q_lower for w in ("total", "sum", "how much", "overall", "aggregate")):
@@ -591,7 +869,8 @@ def _build_answer(
                 f"Break down by {entity_col}?" if entity_col else "Break this down by category?",
                 f"How has this changed over time?" if time_col else "How does this compare to other periods?",
             ]
-            return answer, "\n".join(reasoning_parts), followups
+            # Scalar total — no chart
+            return answer, "\n".join(reasoning_parts), followups, None
 
     # ── Top N by entity ───────────────────────────────────────────────────────
     if any(w in q_lower for w in ("top", "biggest", "largest", "highest", "ranking", "rank")):
@@ -619,7 +898,13 @@ def _build_answer(
                 f"Show me the year-over-year trend for the top 3.",
                 f"How does {entity_col} concentration compare to last year?",
             ]
-            return answer, "\n".join(reasoning_parts), followups
+            # Top-N: horizontal bar (many labels → better readability)
+            chart_data = _make_chart_data(
+                "bar_horizontal",
+                [e for e, _ in top_list],
+                [{"label": metric_col, "data": [v for _, v in top_list]}],
+            )
+            return answer, "\n".join(reasoning_parts), followups, chart_data
 
     # ── Breakdown / group-by ──────────────────────────────────────────────────
     if any(w in q_lower for w in ("breakdown", "by ", "split", "group", "per ", "each")):
@@ -649,7 +934,14 @@ def _build_answer(
                 f"What is the period-over-period change per {group_col}?",
                 f"Which {group_col} is growing fastest?",
             ]
-            return answer, "\n".join(reasoning_parts), followups
+            # Breakdown: vertical bar for first 25 groups
+            visible = sorted_items[:25]
+            chart_data = _make_chart_data(
+                "bar",
+                [g for g, _ in visible],
+                [{"label": metric_col, "data": [v for _, v in visible]}],
+            )
+            return answer, "\n".join(reasoning_parts), followups, chart_data
 
     # ── Summary / data quality ────────────────────────────────────────────────
     if any(w in q_lower for w in ("summary", "overview", "describe", "what is this", "data quality", "quality")):
@@ -670,7 +962,7 @@ def _build_answer(
             "What are the top customers by revenue?",
             "Are there any data quality issues I should know about?",
         ]
-        return answer, "\n".join(reasoning_parts), followups
+        return answer, "\n".join(reasoning_parts), followups, None
 
     # ── Fallback: total of first metric ──────────────────────────────────────
     if metric_col:
@@ -684,7 +976,7 @@ def _build_answer(
         followups = [
             f"Break this down by {entity_col}?" if entity_col else "Can you break this down further?",
         ]
-        return answer, "\n".join(reasoning_parts), followups
+        return answer, "\n".join(reasoning_parts), followups, None
 
     # ── Pure document fallback ────────────────────────────────────────────────
     reasoning_parts.append("Operation: DOCUMENT PASSTHROUGH (no tabular data)")
@@ -693,6 +985,7 @@ def _build_answer(
         "Try using the main KB search tool to query this document semantically.",
         "\n".join(reasoning_parts),
         [],
+        None,
     )
 
 
@@ -794,7 +1087,7 @@ async def query_data(
 
     # ── Compute ───────────────────────────────────────────────────────────────
     try:
-        answer, reasoning, followups = await asyncio.to_thread(
+        answer, reasoning, followups, chart_data = await asyncio.to_thread(
             _build_answer, question, rows, card, sess.params
         )
     except Exception as exc:
@@ -819,6 +1112,7 @@ async def query_data(
         "reasoning": reasoning,
         "suggested_followups": followups,
         "warnings": warnings,
+        "chart_data": chart_data,
     }
 
 
@@ -898,3 +1192,380 @@ def _apply_clarification_feedback(feedback: str, sess: AnalystSession) -> None:
             else:
                 sess.params[cid] = fb
             sess.pending_clarifications = sess.pending_clarifications[1:]
+
+
+# ── Multi-file comparison ──────────────────────────────────────────────────────
+
+def _resolve_col(
+    preferred: str | None,
+    candidates: list[str],
+    question: str,
+) -> str | None:
+    """
+    Pick a column name from *candidates*.
+
+    Priority:
+      1. *preferred* if it is non-empty (caller-supplied param).
+      2. Any candidate whose name appears verbatim in *question*.
+      3. First candidate.
+    """
+    if preferred:
+        return preferred
+    q = question.lower()
+    for col in candidates:
+        if col.lower() in q:
+            return col
+    return candidates[0] if candidates else None
+
+
+def _compare_files(
+    path_a: Path,
+    path_b: Path,
+    card_a: DataCard,
+    card_b: DataCard,
+    question: str,
+    params: dict[str, Any],
+) -> tuple[str, str, list[str]]:
+    """
+    Load both files, aggregate each by time period, and produce a side-by-side
+    diff table with absolute and percentage delta columns (B − A).
+
+    Returns (answer_text, reasoning_text, suggested_followups).
+    """
+    # ── Resolve columns ───────────────────────────────────────────────────────
+    metric_col_a = _resolve_col(
+        params.get("metric_col"), card_a.metric_columns, question
+    )
+    metric_col_b = _resolve_col(
+        params.get("metric_col_b") or params.get("metric_col"),
+        card_b.metric_columns,
+        question,
+    )
+    time_col_a = _resolve_col(
+        params.get("time_col"), card_a.time_columns, question
+    )
+    time_col_b = _resolve_col(
+        params.get("time_col_b") or params.get("time_col"),
+        card_b.time_columns,
+        question,
+    )
+
+    warnings: list[str] = []
+
+    if not metric_col_a:
+        return (
+            f"File A ({path_a.name}) has no numeric metric columns to compare.",
+            f"File A metric columns: {card_a.metric_columns}",
+            [],
+            None,
+        )
+    if not metric_col_b:
+        return (
+            f"File B ({path_b.name}) has no numeric metric columns to compare.",
+            f"File B metric columns: {card_b.metric_columns}",
+            [],
+            None,
+        )
+
+    # ── Load rows ─────────────────────────────────────────────────────────────
+    rows_a = _load_rows(path_a)
+    rows_b = _load_rows(path_b)
+
+    reasoning_parts: list[str] = [
+        f"File A: {path_a.name}  ({len(rows_a):,} rows)",
+        f"File B: {path_b.name}  ({len(rows_b):,} rows)",
+        f"Metric A: {metric_col_a}   Metric B: {metric_col_b}",
+        f"Time A:   {time_col_a or '(none)'}   Time B: {time_col_b or '(none)'}",
+    ]
+
+    # ── Aggregate each file by period ─────────────────────────────────────────
+    def _period_totals(
+        rows: list[dict],
+        metric: str,
+        time_col: str | None,
+        label: str,
+    ) -> dict[str, float]:
+        totals: dict[str, float] = defaultdict(float)
+        for row in rows:
+            val = _to_float(row.get(metric))
+            if val is None:
+                continue
+            if time_col:
+                key = str(row.get(time_col, "")).strip() or f"(no {time_col})"
+            else:
+                key = label            # single bucket when no time column
+            totals[key] += val
+        return dict(totals)
+
+    totals_a = _period_totals(rows_a, metric_col_a, time_col_a, path_a.stem)
+    totals_b = _period_totals(rows_b, metric_col_b, time_col_b, path_b.stem)
+
+    # ── Align periods ─────────────────────────────────────────────────────────
+    def _period_sort_key(p: str) -> tuple:
+        yr_m = re.fullmatch(r"\d{4}", p.strip())
+        if yr_m:
+            return (0, int(p.strip()), 0, p)
+        q_m = re.search(r"q([1-4]).*?(\d{4})", p, re.IGNORECASE)
+        if q_m:
+            return (0, int(q_m.group(2)), int(q_m.group(1)), p)
+        yq_m = re.search(r"(\d{4}).*?q([1-4])", p, re.IGNORECASE)
+        if yq_m:
+            return (0, int(yq_m.group(1)), int(yq_m.group(2)), p)
+        h_m = re.search(r"h([12]).*?(\d{4})", p, re.IGNORECASE)
+        if h_m:
+            return (0, int(h_m.group(2)), int(h_m.group(1)), p)
+        try:
+            return (0, float(p.strip()), 0, p)
+        except ValueError:
+            return (1, 0, 0, p)
+
+    all_periods = sorted(
+        set(totals_a) | set(totals_b),
+        key=_period_sort_key,
+    )
+
+    if not all_periods:
+        return (
+            "No data found in either file for comparison.",
+            "\n".join(reasoning_parts),
+            [],
+        )
+
+    if len(totals_a) == 0:
+        warnings.append(f"File A ({path_a.name}) had no rows with a valid {metric_col_a} value.")
+    if len(totals_b) == 0:
+        warnings.append(f"File B ({path_b.name}) had no rows with a valid {metric_col_b} value.")
+
+    # ── Build diff table ──────────────────────────────────────────────────────
+    col_w = 18
+    val_w = 14
+    header = (
+        f"{'Period':<{col_w}} "
+        f"{'A: ' + path_a.stem:>{val_w}}  "
+        f"{'B: ' + path_b.stem:>{val_w}}  "
+        f"{'Δ Abs':>{val_w}}  "
+        f"{'Δ %':>8}"
+    )
+    sep = "─" * len(header)
+    table_lines = [header, sep]
+
+    grand_a = grand_b = 0.0
+    for period in all_periods:
+        val_a = totals_a.get(period)
+        val_b = totals_b.get(period)
+
+        va_f = val_a if val_a is not None else 0.0
+        vb_f = val_b if val_b is not None else 0.0
+
+        grand_a += va_f
+        grand_b += vb_f
+
+        d_abs = vb_f - va_f
+        d_pct: float | None = (d_abs / va_f * 100) if va_f != 0 else None
+
+        va_str = _format_number(va_f) if val_a is not None else "—"
+        vb_str = _format_number(vb_f) if val_b is not None else "—"
+        d_abs_str = _format_number(d_abs)
+        if d_pct is not None:
+            arrow = "▲" if d_pct >= 0 else "▼"
+            d_pct_str = f"{arrow} {abs(d_pct):.1f}%"
+        else:
+            d_pct_str = "n/a"
+
+        table_lines.append(
+            f"{period:<{col_w}} "
+            f"{va_str:>{val_w}}  "
+            f"{vb_str:>{val_w}}  "
+            f"{d_abs_str:>{val_w}}  "
+            f"{d_pct_str:>8}"
+        )
+
+    # ── Grand total row ───────────────────────────────────────────────────────
+    if len(all_periods) > 1:
+        table_lines.append(sep)
+        gt_d = grand_b - grand_a
+        gt_pct: float | None = (gt_d / grand_a * 100) if grand_a != 0 else None
+        gt_pct_str = (
+            f"{'▲' if gt_pct >= 0 else '▼'} {abs(gt_pct):.1f}%"
+            if gt_pct is not None else "n/a"
+        )
+        table_lines.append(
+            f"{'TOTAL':<{col_w}} "
+            f"{_format_number(grand_a):>{val_w}}  "
+            f"{_format_number(grand_b):>{val_w}}  "
+            f"{_format_number(gt_d):>{val_w}}  "
+            f"{gt_pct_str:>8}"
+        )
+
+    table = "\n".join(table_lines)
+
+    # ── Narrative summary ─────────────────────────────────────────────────────
+    overall_d = grand_b - grand_a
+    overall_pct = (overall_d / grand_a * 100) if grand_a != 0 else None
+    pct_text = (
+        f" ({'+' if overall_d >= 0 else ''}{overall_pct:.1f}%)"
+        if overall_pct is not None else ""
+    )
+
+    label_a = f"{path_a.name}"
+    label_b = f"{path_b.name}"
+    if metric_col_a == metric_col_b:
+        metric_label = metric_col_a
+    else:
+        metric_label = f"{metric_col_a} vs {metric_col_b}"
+
+    answer = (
+        f"**Comparison: {label_a} vs {label_b}**  \n"
+        f"Metric: `{metric_label}` · Periods: {len(all_periods)}\n\n"
+        f"```\n{table}\n```\n\n"
+        f"**Overall:** {_format_number(grand_a)} → {_format_number(grand_b)}{pct_text}"
+    )
+
+    reasoning_parts.append(f"Periods aligned: {len(all_periods)}")
+    if warnings:
+        reasoning_parts += [f"Warning: {w}" for w in warnings]
+
+    followups = [
+        "Which specific customers or entities drove the biggest change between the two files?",
+        f"Show the top movers (entities with the largest Δ) between {path_a.stem} and {path_b.stem}.",
+        "Are there any periods present in one file but missing from the other?",
+    ]
+
+    # ── Chart for comparison: grouped bar — one dataset per file ─────────────
+    # Build per-file value lists aligned to all_periods (0 for absent periods).
+    vals_a = [totals_a.get(p, 0.0) for p in all_periods]
+    vals_b = [totals_b.get(p, 0.0) for p in all_periods]
+    compare_chart = _make_chart_data(
+        "bar",
+        all_periods,
+        [
+            {"label": f"A: {path_a.stem}", "data": vals_a},
+            {"label": f"B: {path_b.stem}", "data": vals_b},
+        ],
+    )
+
+    return answer, "\n".join(reasoning_parts), followups, compare_chart
+
+
+async def compare_data(
+    path_a: str,
+    path_b: str,
+    question: str = "",
+    session_id: str | None = None,
+    metric_col: str = "",
+    time_col: str = "",
+) -> dict[str, Any]:
+    """
+    Compare two tabular files side-by-side.
+
+    Aggregates each file by time period (if a time column exists) or as a
+    single total, then emits a diff table showing absolute and percentage
+    change (B − A) for each period plus a grand-total row.
+
+    Args:
+        path_a:     First file path (absolute or relative to KB_ROOT).
+        path_b:     Second file path (absolute or relative to KB_ROOT).
+        question:   Optional natural-language question to guide column selection.
+        session_id: Optional session ID; auto-created if blank.
+        metric_col: Override metric column (must exist in both files, or use
+                    metric_col_b in params for per-file override).
+        time_col:   Override time column (same rules as metric_col).
+
+    Returns a dict with keys:
+        status, session_id, question, answer, reasoning,
+        suggested_followups, warnings, file_a, file_b, chart_data
+        (plus "error" when status == "error").
+    """
+    sid = session_id or str(uuid.uuid4())
+    warnings: list[str] = []
+
+    def _resolve_path(p: str) -> Path:
+        fp = Path(p)
+        if not fp.is_absolute():
+            from kb_agent_mcp.config import cfg as _cfg
+            fp = _cfg.kb_root_path / p
+        return fp
+
+    file_a = _resolve_path(path_a)
+    file_b = _resolve_path(path_b)
+
+    for label, fp in (("path_a", file_a), ("path_b", file_b)):
+        if not fp.exists():
+            return {
+                "status": "error",
+                "session_id": sid,
+                "question": question,
+                "error": f"File not found ({label}): {fp}",
+                "file_a": str(file_a),
+                "file_b": str(file_b),
+                "warnings": warnings,
+            }
+
+    # Inspect both files (cached)
+    try:
+        card_a, card_b = await asyncio.gather(
+            inspect_file(str(file_a)),
+            inspect_file(str(file_b)),
+        )
+    except Exception as exc:
+        logger.exception("inspect_file failed during compare_data")
+        return {
+            "status": "error",
+            "session_id": sid,
+            "question": question,
+            "error": f"Could not profile files: {exc}",
+            "file_a": str(file_a),
+            "file_b": str(file_b),
+            "warnings": warnings,
+        }
+
+    params: dict[str, Any] = {}
+    if metric_col:
+        params["metric_col"] = metric_col
+    if time_col:
+        params["time_col"] = time_col
+
+    try:
+        answer, reasoning, followups, chart_data = await asyncio.to_thread(
+            _compare_files,
+            file_a, file_b, card_a, card_b,
+            question or f"Compare {file_a.name} vs {file_b.name}",
+            params,
+        )
+    except Exception as exc:
+        logger.exception("_compare_files failed")
+        return {
+            "status": "error",
+            "session_id": sid,
+            "question": question,
+            "error": f"Comparison failed: {exc}",
+            "file_a": str(file_a),
+            "file_b": str(file_b),
+            "warnings": warnings,
+        }
+
+    # Persist in session so refine_query can follow up
+    sess = await load_session(sid)
+    sess.file_path = str(file_a)          # primary file for any follow-up query
+    sess.original_question = question or f"Compare {file_a.name} vs {file_b.name}"
+    sess.params = params
+    sess.last_answer = answer
+    sess.last_reasoning = reasoning
+    sess.suggested_followups = followups
+    if not sess.data_card:
+        sess.data_card = data_card_to_dict(card_a)
+    await add_turn(sess, "user", sess.original_question)
+    await add_turn(sess, "analyst", answer)
+
+    return {
+        "status": "answered",
+        "session_id": sid,
+        "question": sess.original_question,
+        "answer": answer,
+        "reasoning": reasoning,
+        "suggested_followups": followups,
+        "warnings": warnings,
+        "file_a": str(file_a),
+        "file_b": str(file_b),
+        "chart_data": chart_data,
+    }

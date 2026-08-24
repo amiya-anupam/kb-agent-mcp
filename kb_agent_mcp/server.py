@@ -1,7 +1,7 @@
 """
 kb_agent_mcp/server.py
 ──────────────────────
-FastMCP server exposing fourteen tools:
+FastMCP server exposing fifteen tools:
 
   ask(question, format, session_id)
     → Query all relevant knowledge domains and return an answer.
@@ -40,6 +40,9 @@ FastMCP server exposing fourteen tools:
 
   refine_query(session_id, feedback)
     → Re-run the last query with updated parameters from user feedback.
+
+  compare_data(path_a, path_b, question, session_id, metric_col, time_col)
+    → Compare two files side-by-side; emits a period × diff table (B − A).
 
 Transport:
   Default (stdio):  kb-agent-serve
@@ -652,7 +655,11 @@ async def query_data(
 
     Returns:
         JSON string with keys: status, session_id, answer, reasoning,
-        suggested_followups, clarifications (when clarification is needed).
+        suggested_followups, clarifications (when clarification is needed),
+        and chart_data (null or an object with keys: type, labels, datasets,
+        csv, mermaid).  Use chart_data["csv"] to save the data as a file,
+        chart_data["mermaid"] to render a chart inline (single-dataset only),
+        or chart_data["datasets"] to drive a custom visualisation.
     """
     import json as _json
     from kb_agent_mcp.analyst.engine import query_data as _query
@@ -685,6 +692,70 @@ async def refine_query(session_id: str, feedback: str) -> str:
     from kb_agent_mcp.analyst.engine import refine_query as _refine
 
     result = await _refine(session_id=session_id, feedback=feedback)
+    return _json.dumps(result, indent=2, default=str)
+
+
+# ── Tool: compare_data ────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def compare_data(
+    path_a: str,
+    path_b: str,
+    question: str = "",
+    session_id: str = "",
+    metric_col: str = "",
+    time_col: str = "",
+) -> str:
+    """
+    Compare two tabular data files side-by-side.
+
+    Loads both files, aggregates each by time period (quarter, year, etc.),
+    aligns the periods, and returns a diff table showing:
+      • Value in file A for each period
+      • Value in file B for each period
+      • Absolute change (B − A) per period
+      • Percentage change (B − A) / A per period
+      • A grand-total row when multiple periods exist
+
+    Typical use: "compare Q3 vs Q4 renewal trackers",
+                 "how does this year's pipeline compare to last year's?"
+
+    Works with: .xlsx, .xls, .csv, .json, .jsonl
+
+    Args:
+        path_a:     First file  — the baseline  (A).
+                    Absolute path or relative to KB_ROOT.
+        path_b:     Second file — the comparison (B).
+                    Absolute path or relative to KB_ROOT.
+        question:   Optional natural-language description to guide column
+                    selection, e.g. "compare revenue by quarter".
+        session_id: Optional session ID for multi-turn follow-up via
+                    refine_query(). Auto-generated when blank.
+        metric_col: Explicit metric column to use in both files.
+                    Leave blank to auto-detect from the DataCard.
+        time_col:   Explicit time / period column to group by.
+                    Leave blank to auto-detect.
+
+    Returns:
+        JSON string with keys: status, session_id, question, answer,
+        reasoning, suggested_followups, warnings, file_a, file_b,
+        and chart_data (grouped bar — two datasets, one per file).
+        chart_data["csv"] contains both series as a CSV attachment.
+        chart_data["mermaid"] is omitted for multi-dataset comparisons
+        (use chart_data["datasets"] to drive a custom chart instead).
+        (plus "error" when status == "error")
+    """
+    import json as _json
+    from kb_agent_mcp.analyst.engine import compare_data as _compare
+
+    result = await _compare(
+        path_a=path_a,
+        path_b=path_b,
+        question=question,
+        session_id=session_id or None,
+        metric_col=metric_col,
+        time_col=time_col,
+    )
     return _json.dumps(result, indent=2, default=str)
 
 
