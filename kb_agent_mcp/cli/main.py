@@ -45,7 +45,7 @@ _SUBCOMMAND_HELP = {
     "serve":    "start the MCP server",
     "watch":    "watch KB_ROOT for file changes and keep indexes in sync",
     "doctor":   "run health checks; use --fix to auto-repair failures",
-    "status":   "show per-domain health table and system summary",
+    "status":   "show per-domain health table; use --sessions to list named sessions",
     "init":     "first-time setup: runs setup → generate → doctor in sequence",
 }
 

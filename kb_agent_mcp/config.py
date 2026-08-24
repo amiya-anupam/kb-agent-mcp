@@ -179,6 +179,12 @@ class Config:
     KB_SESSION_MAX_ANSWER_CHARS: int = field(default_factory=lambda: _int(
         "KB_SESSION_MAX_ANSWER_CHARS", 400
     ))
+    # When True (default), add_turn_sync() attempts a one-shot LLM summarisation
+    # call before storing a long answer instead of hard-truncating.  Set to False
+    # for fully offline / no-LLM environments (sentence truncation is used instead).
+    KB_MEMORY_COMPRESS: bool = field(default_factory=lambda: _bool(
+        "KB_MEMORY_COMPRESS", True
+    ))
 
     # ── File discovery ────────────────────────────────────────────────────────
     KB_STALE_DAYS: int = field(default_factory=lambda: _int(

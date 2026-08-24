@@ -1,7 +1,7 @@
 """
 kb_agent_mcp/server.py
 ──────────────────────
-FastMCP server exposing fifteen tools:
+FastMCP server exposing sixteen tools:
 
   ask(question, format, session_id)
     → Query all relevant knowledge domains and return an answer.
@@ -20,6 +20,9 @@ FastMCP server exposing fifteen tools:
 
   resume_session(session_id)
     → Show conversation history for a named session (for resuming across restarts).
+
+  list_sessions()
+    → List all named sessions / workspaces with turn count and last-active time.
 
   rate_answer(rating, session_id, comment)
     → Submit a 1–5 star rating for the most recent answer.
@@ -937,6 +940,66 @@ async def resume_session(session_id: str = "default") -> str:
         if msg["role"] == "assistant" and i < len(messages) - 1:
             lines.append("")  # blank line between turns
     return "\n".join(lines)
+
+
+# ── Tool: list_sessions ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def list_sessions() -> str:
+    """
+    List all named sessions / workspaces with their turn count, last-active
+    time, and expiry status.
+
+    Named sessions let you bookmark and resume deep investigations across
+    server restarts without re-querying.  Pass the session name as
+    `session_id` to `ask()`, `resume_session()`, or `clear_memory()`.
+
+    Returns:
+        A Markdown table of sessions sorted newest-first, or a message
+        when no sessions have been created yet.
+    """
+    import asyncio as _asyncio
+    import datetime as _dt
+    from kb_agent_mcp.memory import list_sessions as _list
+
+    sessions = await _list()
+
+    if not sessions:
+        return (
+            "No named sessions found.\n\n"
+            "Create one by passing `session_id='<name>'` to `ask()`, e.g.\n"
+            '`ask("What is ACE?", session_id="ace-renewal-review")`\n\n'
+            "The session persists across server restarts and can be resumed "
+            "at any time with `resume_session(session_id='ace-renewal-review')`."
+        )
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    rows = ["| Session ID | Turns | Last active | Status |"]
+    rows.append("|------------|-------|-------------|--------|")
+
+    for s in sessions:
+        la_ts = s["last_active"]
+        if la_ts:
+            la_dt = _dt.datetime.fromtimestamp(la_ts, tz=_dt.timezone.utc)
+            delta = now - la_dt
+            mins  = int(delta.total_seconds() // 60)
+            if mins < 60:
+                la_str = f"{mins}m ago"
+            elif mins < 1440:
+                la_str = f"{mins // 60}h ago"
+            else:
+                la_str = f"{delta.days}d ago"
+        else:
+            la_str = "unknown"
+
+        status = "⚠ expired" if s["expired"] else "✓ active"
+        rows.append(
+            f"| `{s['session_id']}` | {s['turns']} | {la_str} | {status} |"
+        )
+
+    total = len(sessions)
+    header = f"**{total} session(s)**\n\n"
+    return header + "\n".join(rows)
 
 
 # ── Tool: rate_answer ─────────────────────────────────────────────────────────

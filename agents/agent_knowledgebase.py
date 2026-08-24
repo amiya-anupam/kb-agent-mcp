@@ -12,8 +12,14 @@ only requires running generate.py; no new code is generated.
 Usage (interactive chat):
   python3 agents/agent_knowledgebase.py
 
+Usage (interactive chat with a named session / workspace):
+  python3 agents/agent_knowledgebase.py --session ace-renewal-review
+
 Usage (single question — called by Bob skill or any AI agent):
   python3 agents/agent_knowledgebase.py "your question"
+
+Usage (single question in a named session):
+  python3 agents/agent_knowledgebase.py "your question" --session ace-renewal-review
 
 Usage (single question with explicit format):
   python3 agents/agent_knowledgebase.py "your question" --format table
@@ -26,6 +32,10 @@ Usage (single question with explicit format):
 
 Usage (clear session memory):
   python3 agents/agent_knowledgebase.py --clear
+  python3 agents/agent_knowledgebase.py --clear --session ace-renewal-review
+
+Usage (list all named sessions):
+  python3 agents/agent_knowledgebase.py --sessions
 """
 
 import sys
@@ -35,7 +45,7 @@ import pathlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from memory import get_history, add_turn, clear, summary
+from memory import get_history, add_turn, clear, summary, set_session, list_sessions
 from agent_base import call_llm, _load_env, _PASSTHROUGH, _apply_format_instruction
 
 _load_env()
@@ -576,7 +586,9 @@ def ask_knowledgebase(question: str, format_flag: str | None = None) -> str:
 
 # ── Entry points ───────────────────────────────────────────────────────────────
 
-def run_interactive():
+def run_interactive(session_name: str = "default"):
+    if session_name and session_name != "default":
+        set_session(session_name)
     domains = get_domains()
     print(f"\n{'='*60}")
     print(f"  {AGENT_NAME}")
@@ -622,10 +634,11 @@ def run_interactive():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        # Parse --format flag from CLI args
-        args       = sys.argv[1:]
-        fmt_flag   = None
-        clean_args = []
+        # Parse --format, --session, --clear, --memory, --sessions flags from CLI args
+        args        = sys.argv[1:]
+        fmt_flag    = None
+        session_arg = None
+        clean_args  = []
         i = 0
         while i < len(args):
             if args[i] == "--format" and i + 1 < len(args):
@@ -634,9 +647,19 @@ if __name__ == "__main__":
             elif args[i].startswith("--format="):
                 fmt_flag = args[i].split("=", 1)[1]
                 i += 1
+            elif args[i] == "--session" and i + 1 < len(args):
+                session_arg = args[i + 1]
+                i += 2
+            elif args[i].startswith("--session="):
+                session_arg = args[i].split("=", 1)[1]
+                i += 1
             else:
                 clean_args.append(args[i])
                 i += 1
+
+        # Apply named session before any memory operation
+        if session_arg:
+            set_session(session_arg)
 
         arg = " ".join(clean_args)
 
@@ -646,6 +669,23 @@ if __name__ == "__main__":
         if arg.strip() == "--memory":
             print(summary())
             sys.exit(0)
-        print(ask_knowledgebase(arg, format_flag=fmt_flag))
+        if arg.strip() == "--sessions":
+            rows = list_sessions()
+            if not rows:
+                print("No sessions found.")
+            else:
+                print(f"{'Session':<30}  {'Turns':>5}  {'Last active':>12}  Status")
+                print("-" * 60)
+                for s in rows:
+                    la = int((time.time() - s["last_active"]) // 60)
+                    la_str = f"{la}m ago" if la < 60 else f"{la // 60}h ago"
+                    status = "expired" if s["expired"] else "active"
+                    print(f"{s['session_id']:<30}  {s['turns']:>5}  {la_str:>12}  {status}")
+            sys.exit(0)
+        if not arg.strip():
+            # No question provided — enter interactive mode
+            run_interactive(session_arg or "default")
+        else:
+            print(ask_knowledgebase(arg, format_flag=fmt_flag))
     else:
         run_interactive()

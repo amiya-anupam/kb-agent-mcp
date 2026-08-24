@@ -5,6 +5,7 @@ Prints a per-domain health table and system summary. Read-only, no side effects.
 
 Usage:
   kb-agent-status              # coloured Rich table
+  kb-agent-status --sessions   # list all named sessions / workspaces
   kb-agent-status --diff       # show stale/missing files per domain
   kb-agent-status --json       # machine-readable JSON to stdout
   kb-agent-status --plain      # no ANSI (for CI / log capture)
@@ -405,8 +406,97 @@ def _print_footer(console: Console, sysinfo: dict) -> None:
     console.print(
         "  [dim]Re-index: kb-agent-generate  "
         "│  Health check: kb-agent-doctor  "
-        "│  Watch: kb-agent-watch[/dim]"
+        "│  Watch: kb-agent-watch  "
+        "│  Sessions: kb-agent-status --sessions[/dim]"
     )
+
+
+# ── Sessions view ──────────────────────────────────────────────────────────────
+
+def print_sessions(console: Console, plain: bool = False, quiet: bool = False) -> dict:
+    """Print a table of all named sessions and return the data dict.
+
+    Args:
+        console: Rich console to write to.
+        plain:   When True, suppress ANSI colours (forwarded to Rich).
+        quiet:   When True, skip all console output (used by --json mode).
+
+    Returns the sessions list so callers (JSON mode) can serialise it.
+    """
+    import datetime as _dt
+    from kb_agent_mcp.memory import list_sessions_sync
+
+    sessions = list_sessions_sync()
+
+    if not sessions:
+        if not quiet:
+            console.print()
+            console.print("  [dim]No named sessions found.[/dim]")
+            console.print(
+                "  [dim]Start one with: pass session_id='<name>' in ask().[/dim]"
+            )
+            console.print()
+        return {"sessions": []}
+
+    table = Table(
+        title="[bold]Named sessions / workspaces[/bold]",
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold",
+        expand=False,
+    )
+    table.add_column("Session ID",   style="white", no_wrap=True)
+    table.add_column("Turns",        justify="right", style="cyan")
+    table.add_column("Last active",  no_wrap=True, style="cyan")
+    table.add_column("Status",       no_wrap=True)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    for s in sessions:
+        la_ts  = s["last_active"]
+        if la_ts:
+            la_dt  = _dt.datetime.fromtimestamp(la_ts, tz=_dt.timezone.utc)
+            delta  = now - la_dt
+            mins   = int(delta.total_seconds() // 60)
+            if mins < 60:
+                la_str = f"{mins}m ago"
+            elif mins < 1440:
+                la_str = f"{mins // 60}h ago"
+            else:
+                la_str = f"{delta.days}d ago"
+        else:
+            la_str = "unknown"
+
+        if s["expired"]:
+            status_str = "[yellow]⚠ expired[/yellow]" if not plain else "⚠ expired"
+        else:
+            status_str = "[green]✓ active[/green]" if not plain else "✓ active"
+
+        table.add_row(
+            s["session_id"],
+            str(s["turns"]),
+            la_str,
+            status_str,
+        )
+
+    if not quiet:
+        console.print()
+        console.print(table)
+        console.print()
+        console.print(
+            "  [dim]Resume: ask() with session_id='<name>'  "
+            "│  Clear: clear_memory(session_id='<name>')[/dim]"
+        )
+        console.print()
+
+    return {"sessions": [
+        {
+            "session_id":  s["session_id"],
+            "turns":       s["turns"],
+            "last_active": s["last_active"],
+            "expired":     s["expired"],
+        }
+        for s in sessions
+    ]}
 
 
 # ── JSON output ────────────────────────────────────────────────────────────────
@@ -441,6 +531,10 @@ def main() -> None:
         description="Show per-domain health table and system summary. Read-only.",
     )
     parser.add_argument(
+        "--sessions", action="store_true",
+        help="List all named sessions / workspaces with turn count and last-active time",
+    )
+    parser.add_argument(
         "--diff",   action="store_true",
         help="Show stale/missing files per domain (compares disk vs ChromaDB index)",
     )
@@ -463,6 +557,16 @@ def main() -> None:
     args = parser.parse_args()
 
     from kb_agent_mcp.config import cfg
+
+    # ── Sessions mode ─────────────────────────────────────────────────────────
+    if args.sessions:
+        console = Console(no_color=args.plain)
+        if args.json:
+            data = print_sessions(console, plain=True, quiet=True)
+            print(json.dumps(data, indent=2))
+        else:
+            print_sessions(console, plain=args.plain)
+        return
 
     # ── Diff mode ─────────────────────────────────────────────────────────────
     if args.diff:
