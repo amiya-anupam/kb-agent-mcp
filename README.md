@@ -5,6 +5,23 @@ run one command, and ask questions in natural language — via any AI tool or th
 
 ---
 
+## 🤔 What is `kb-agent-mcp`?
+
+It's all three — depending on which layer you're looking at.
+
+### 🏗️ A Package / Product
+A Python package published to PyPI (`pip install kb-agent-mcp`). It has versioning, a build system, entry-point CLI scripts, optional extras, and a full release lifecycle. From a distribution standpoint, **it is a product**.
+
+### 🤖 An Agent
+The core runtime is a **multi-domain RAG agent**. It routes user queries across knowledge domains, synthesises context from indexed documents, and uses an LLM (local or passthrough) to generate answers. The `agents/` directory and the `kb-agent` CLI are the agent layer — internally, **it is an agent**.
+
+### 🛠️ An MCP Server / Skill
+From the perspective of Bob, Claude, Cursor, or any MCP-capable host, `kb-agent-mcp` surfaces as a **pluggable MCP server** — a tool an AI assistant calls at runtime. The Bob skill (`.bob/skills/knowledgebase-agent/`) is the routing layer that tells the host AI when and how to invoke it. To a host AI, **it is a skill**.
+
+> **One-line definition:** *"A multi-domain knowledge agent packaged as an MCP server."*
+
+---
+
 ## 🚀 Quickest way to get started — pip install
 
 If you just want to use the MCP server (recommended for most users):
