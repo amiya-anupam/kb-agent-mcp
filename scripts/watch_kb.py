@@ -843,6 +843,72 @@ except ValueError:
     _GENERATE_TIMEOUT = 900
 
 
+# ── Per-domain incremental reindex ────────────────────────────────────────────
+
+def run_reindex(domain: str, reason: str):
+    """
+    Re-embed all changed/new files in a single domain without running the full
+    generate.py pipeline.
+
+    Uses agents/embeddings.build_index() directly (hash-skips unchanged files)
+    so only files that actually changed are re-embedded.  A post-rescan then
+    catches any file that arrived while the embedding loop was running.
+
+    Appropriate for file add/modify/delete events inside an *existing* domain.
+    New top-level folders still go through run_generate() so domain_meta.json
+    and SKILL.md are updated.
+    """
+    print(
+        f"[KB Watcher] 🔄 Reindexing domain: {domain} ({reason})",
+        flush=True,
+    )
+    start_time = time.time()
+
+    sys.path.insert(0, str(AGENTS_DIR))
+    try:
+        from embeddings import build_index
+        result = build_index(domain)
+        n = len(result.get("entries", []))
+        print(f"[KB Watcher] ✓ Reindex complete: {domain} ({n} files)", flush=True)
+
+        # Write audit entry so drift-check CLI can compare against folder state.
+        folders = discover_knowledge_folders()
+        _write_audit("reindex_complete", {
+            "reason": reason,
+            "domain": domain,
+            "files":  n,
+        })
+
+        # Catch files that arrived during the embedding loop
+        _rescan_domain_since(domain, start_time)
+    except Exception as e:
+        print(f"[KB Watcher] ✗ Reindex failed for {domain}: {e}", flush=True)
+
+
+def _rescan_domain_since(domain: str, since: float):
+    """
+    Re-index any file in *domain* whose mtime is newer than *since*.
+    Closes the race window between the start of build_index() and its completion.
+    """
+    folder = WATCH_ROOT / domain
+    if not folder.exists():
+        return
+    caught = 0
+    for f in gather_files(folder):
+        try:
+            if f.stat().st_mtime >= since:
+                print(
+                    f"[KB Watcher] 🔁 Post-reindex rescan: {f.name} in {domain}",
+                    flush=True,
+                )
+                _update_index(domain, f)
+                caught += 1
+        except OSError:
+            continue
+    if caught:
+        print(f"[KB Watcher] ✓ Post-reindex rescan caught {caught} file(s) in {domain}", flush=True)
+
+
 def run_generate(reason: str):
     generate_script = SCRIPT_DIR / "scripts" / "generate.py"
     if not generate_script.exists():
@@ -969,6 +1035,7 @@ class KBHandler(FileSystemEventHandler):
         self._pending_deindex:          dict[str, set[pathlib.Path]] = {}  # folder → files to remove
         self._pending_generate:         float | None = None
         self._pending_generate_reason:  str          = ""
+        self._pending_reindex:          dict[str, str] = {}   # domain → reason (debounced per-domain)
         self._known_folders:            set[str]     = {
             p.name for p in discover_knowledge_folders()
         }
@@ -996,6 +1063,19 @@ class KBHandler(FileSystemEventHandler):
             self._pending_generate        = time.time() + DEBOUNCE_SECS
             self._pending_generate_reason = reason
 
+    def _schedule_reindex(self, domain: str, reason: str):
+        """
+        Schedule a per-domain reindex after the debounce window.
+
+        Multiple events for the same domain within DEBOUNCE_SECS are coalesced
+        into a single build_index() call — the last reason wins (descriptive only).
+        The debounce is shared with the README update: the reindex fires after
+        the same 10 s window so embeddings and README stay in sync.
+        """
+        self._pending_reindex[domain] = reason
+        # Re-use the README debounce deadline so both fire together
+        self._schedule_readme(domain)
+
     # ── Dispatch loop (called every second) ──────────────────────────────────
 
     def dispatch_pending(self):
@@ -1021,7 +1101,7 @@ class KBHandler(FileSystemEventHandler):
                     if fp.exists():
                         _update_index(folder_name, fp)
 
-        # 3. Fire overdue README updates
+        # 3. Fire overdue README updates + per-domain reindexes together
         fired = [fn for fn, t in self._pending_readme.items() if now >= t]
         for folder_name in fired:
             del self._pending_readme[folder_name]
@@ -1030,6 +1110,11 @@ class KBHandler(FileSystemEventHandler):
                 dirty = update_readme(folder, self._cache)
                 if dirty:
                     _save_summary_cache(self._cache)
+
+            # Fire any pending per-domain reindex for this folder
+            if folder_name in self._pending_reindex:
+                reason = self._pending_reindex.pop(folder_name)
+                run_reindex(folder_name, reason)
 
         # 4. Poll for folder changes the OS may not have delivered directory events for.
         #    macOS FSEvents sometimes coalesces mkdir/rmdir into just file events.
@@ -1054,6 +1139,7 @@ class KBHandler(FileSystemEventHandler):
             self._pending_readme.pop(fname, None)
             self._pending_index.pop(fname, None)
             self._pending_deindex.pop(fname, None)
+            self._pending_reindex.pop(fname, None)
 
         # 5. Fire overdue generate.py run (new folder only)
         if self._pending_generate is not None and now >= self._pending_generate:
@@ -1146,11 +1232,10 @@ class KBHandler(FileSystemEventHandler):
               flush=True)
         self._schedule_index(folder_name, path)
 
-        # File created inside a sub-folder — domain_meta keywords were generated
-        # from a file sample at generate.py time and never reflect new sub-folder
-        # content.  Schedule a generate.py run to refresh descriptions + keywords.
+        # File created inside a sub-folder — schedule a per-domain reindex so
+        # the new file's embedding is added without a full generate.py run.
         if path.parent != WATCH_ROOT / folder_name:
-            self._schedule_generate(f"sub-folder content added: {folder_name}")
+            self._schedule_reindex(folder_name, f"sub-folder content added: {folder_name}")
 
     def on_deleted(self, event):
         path = pathlib.Path(event.src_path)
@@ -1167,6 +1252,7 @@ class KBHandler(FileSystemEventHandler):
                 self._pending_readme.pop(path.name, None)
                 self._pending_index.pop(path.name, None)
                 self._pending_deindex.pop(path.name, None)
+                self._pending_reindex.pop(path.name, None)
             return
 
         folder_name = top_folder_name(event.src_path)
@@ -1179,10 +1265,10 @@ class KBHandler(FileSystemEventHandler):
               flush=True)
         self._schedule_deindex(folder_name, path)
 
-        # File deleted from a sub-folder — refresh domain_meta keywords so
-        # removed content no longer influences routing.
+        # File deleted from a sub-folder — schedule a per-domain reindex so
+        # the removed file is pruned from the index without a full generate.py run.
         if path.parent != WATCH_ROOT / folder_name:
-            self._schedule_generate(f"sub-folder content removed: {folder_name}")
+            self._schedule_reindex(folder_name, f"sub-folder content removed: {folder_name}")
 
     def on_moved(self, event):
         src  = pathlib.Path(event.src_path)
@@ -1207,7 +1293,8 @@ class KBHandler(FileSystemEventHandler):
                 self._schedule_readme(new_name)
 
                 # Migrate pending work from old name to new name
-                for q in (self._pending_readme, self._pending_index, self._pending_deindex):
+                for q in (self._pending_readme, self._pending_index,
+                          self._pending_deindex, self._pending_reindex):
                     if old_name in q:
                         q[new_name] = q.pop(old_name)
             return
@@ -1243,9 +1330,10 @@ class KBHandler(FileSystemEventHandler):
               flush=True)
         self._schedule_index(folder_name, path)
 
-        # File modified inside a sub-folder — schedule domain_meta refresh.
+        # File modified inside a sub-folder — schedule a per-domain reindex so
+        # the updated embedding is stored without a full generate.py run.
         if path.parent != WATCH_ROOT / folder_name:
-            self._schedule_generate(f"sub-folder content changed: {folder_name}")
+            self._schedule_reindex(folder_name, f"sub-folder content changed: {folder_name}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 

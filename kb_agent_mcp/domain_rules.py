@@ -13,6 +13,8 @@ top_n:        5
 max_chars:    8000
 system_prompt: |
   You are the BizOps Agent …
+# system_prompt_extra: |           # optional — appended after system_prompt
+#   Always cite the contract reference number.
 
 retrieval_rules:
   pin_files:            # glob patterns — matching files always included
@@ -62,6 +64,7 @@ class DomainConfig:
     top_n: int
     max_chars: int
     system_prompt: str
+    system_prompt_extra: str      = field(default="")
 
     # retrieval_rules sub-fields
     pin_files: list[str]          = field(default_factory=list)
@@ -165,6 +168,7 @@ def _build_config(folder_name: str, raw: dict[str, Any]) -> DomainConfig:
     top_n   = int(raw.get("top_n",   4))
     mx      = int(raw.get("max_chars", cfg.KB_BUDGET_RAG_FILE))
     sp      = raw.get("system_prompt", "") or _default_system_prompt(fname, aname, desc)
+    sp_extra = raw.get("system_prompt_extra", "") or ""
 
     rules   = raw.get("retrieval_rules", {}) or {}
     pins    = rules.get("pin_files",       [])
@@ -181,6 +185,7 @@ def _build_config(folder_name: str, raw: dict[str, Any]) -> DomainConfig:
         top_n=top_n,
         max_chars=mx,
         system_prompt=sp.strip(),
+        system_prompt_extra=sp_extra.strip(),
         pin_files=pins if isinstance(pins, list) else [pins],
         boost_keywords=boosts if isinstance(boosts, list) else [boosts],
         data_patterns=d_pats if isinstance(d_pats, list) else [d_pats],

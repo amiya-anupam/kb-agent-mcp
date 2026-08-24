@@ -123,3 +123,156 @@ def test_apply_pin_rules_boost(tmp_path, monkeypatch):
     ordered = dr_mod.apply_pin_rules(results, "Revenue", domain_cfg)
     # Revenue.xlsx should be first because it contains "revenue" keyword
     assert ordered[0]["name"] == "Revenue.xlsx"
+
+
+# ── system_prompt_extra ─────────────────────────────────────────────────────────
+
+def test_system_prompt_extra_parsed_from_yaml():
+    """system_prompt_extra from YAML is stored on DomainConfig."""
+    from kb_agent_mcp.domain_rules import load_domain_config_from_dict
+    raw = {
+        "folder_name": "TestDomain",
+        "agent_name": "TestDomain Agent",
+        "description": "A test domain",
+        "keywords": ["test"],
+        "top_n": 4,
+        "max_chars": 8000,
+        "system_prompt": "You are the TestDomain Agent.",
+        "system_prompt_extra": "Always cite the contract reference number.",
+    }
+    cfg = load_domain_config_from_dict("TestDomain", raw)
+    assert cfg.system_prompt_extra == "Always cite the contract reference number."
+
+
+def test_system_prompt_extra_absent_defaults_empty():
+    """Absent system_prompt_extra field defaults to empty string."""
+    from kb_agent_mcp.domain_rules import load_domain_config_from_dict
+    raw = {
+        "folder_name": "TestDomain",
+        "agent_name": "TestDomain Agent",
+        "description": "A test domain",
+        "keywords": [],
+        "top_n": 4,
+        "max_chars": 8000,
+        "system_prompt": "You are the TestDomain Agent.",
+    }
+    cfg = load_domain_config_from_dict("TestDomain", raw)
+    assert cfg.system_prompt_extra == ""
+
+
+def test_system_prompt_extra_empty_string_stays_empty():
+    """Explicitly set empty system_prompt_extra is normalised to ''."""
+    from kb_agent_mcp.domain_rules import load_domain_config_from_dict
+    raw = {
+        "folder_name": "TestDomain",
+        "agent_name": "TestDomain Agent",
+        "description": "A test domain",
+        "keywords": [],
+        "top_n": 4,
+        "max_chars": 8000,
+        "system_prompt": "You are the TestDomain Agent.",
+        "system_prompt_extra": "",
+    }
+    cfg = load_domain_config_from_dict("TestDomain", raw)
+    assert cfg.system_prompt_extra == ""
+
+
+def test_system_prompt_extra_appended_in_domain_agent(monkeypatch):
+    """DomainAgent.run() appends system_prompt_extra between system_prompt and format directive."""
+    import asyncio
+    from kb_agent_mcp.domain_rules import DomainConfig
+    from kb_agent_mcp.domain_agent import DomainAgent
+
+    captured: dict = {}
+
+    async def _fake_base_ask(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        return {"agent": "test", "answer": "ok", "sources": [], "found": True}
+
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._base_ask", _fake_base_ask)
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._global_data_q", lambda q: False)
+
+    config = DomainConfig(
+        folder_name="TestDomain",
+        agent_name="TestDomain Agent",
+        description="A test domain",
+        keywords=[],
+        top_n=4,
+        max_chars=8000,
+        system_prompt="You are the base agent.",
+        system_prompt_extra="Always cite the contract ref.",
+    )
+    agent = DomainAgent("TestDomain", config=config)
+    asyncio.run(agent.run("Any question?", []))
+
+    prompt = captured["system_prompt"]
+    assert "You are the base agent." in prompt
+    assert "Always cite the contract ref." in prompt
+    # extra comes before any format directive (no format_instruction given)
+    assert prompt.index("You are the base agent.") < prompt.index("Always cite the contract ref.")
+
+
+def test_system_prompt_extra_absent_no_double_newline(monkeypatch):
+    """When system_prompt_extra is empty, no extra newline is injected."""
+    import asyncio
+    from kb_agent_mcp.domain_rules import DomainConfig
+    from kb_agent_mcp.domain_agent import DomainAgent
+
+    captured: dict = {}
+
+    async def _fake_base_ask(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        return {"agent": "test", "answer": "ok", "sources": [], "found": True}
+
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._base_ask", _fake_base_ask)
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._global_data_q", lambda q: False)
+
+    config = DomainConfig(
+        folder_name="TestDomain",
+        agent_name="TestDomain Agent",
+        description="A test domain",
+        keywords=[],
+        top_n=4,
+        max_chars=8000,
+        system_prompt="You are the base agent.",
+        # system_prompt_extra not set — defaults to ""
+    )
+    agent = DomainAgent("TestDomain", config=config)
+    asyncio.run(agent.run("Any question?", []))
+
+    assert captured["system_prompt"] == "You are the base agent."
+
+
+def test_system_prompt_extra_before_format_directive(monkeypatch):
+    """system_prompt_extra appears before the format directive in the final prompt."""
+    import asyncio
+    from kb_agent_mcp.domain_rules import DomainConfig
+    from kb_agent_mcp.domain_agent import DomainAgent
+
+    captured: dict = {}
+
+    async def _fake_base_ask(**kwargs):
+        captured["system_prompt"] = kwargs["system_prompt"]
+        return {"agent": "test", "answer": "ok", "sources": [], "found": True}
+
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._base_ask", _fake_base_ask)
+    monkeypatch.setattr("kb_agent_mcp.domain_agent._global_data_q", lambda q: False)
+
+    config = DomainConfig(
+        folder_name="TestDomain",
+        agent_name="TestDomain Agent",
+        description="A test domain",
+        keywords=[],
+        top_n=4,
+        max_chars=8000,
+        system_prompt="You are the base agent.",
+        system_prompt_extra="Cite all sources.",
+    )
+    agent = DomainAgent("TestDomain", config=config)
+    asyncio.run(agent.run("Any question?", [], format_instruction="Return JSON"))
+
+    prompt = captured["system_prompt"]
+    assert "Cite all sources." in prompt
+    assert "Return JSON" in prompt
+    # ordering: base → extra → format
+    assert prompt.index("Cite all sources.") < prompt.index("Return JSON")

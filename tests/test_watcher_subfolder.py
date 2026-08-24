@@ -161,20 +161,20 @@ class TestShouldSkip:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 4. on_created — sub-folder file schedules generate AND index
+# 4. on_created — sub-folder file schedules reindex AND index
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TestOnCreatedSubFolder:
 
-    def test_subfolder_file_schedules_generate(self, tmp_path):
+    def test_subfolder_file_schedules_reindex(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
         ev = _fake_event(str(tmp_path / "BizOps" / "Renewal Tracking" / "Q1.xlsx"))
 
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_created(ev)
 
-        assert handler._pending_generate is not None, \
-            "generate.py should be scheduled for sub-folder file creation"
+        assert "BizOps" in handler._pending_reindex, \
+            "per-domain reindex should be scheduled for sub-folder file creation"
 
     def test_subfolder_file_schedule_reason_contains_subfolder(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
@@ -183,7 +183,7 @@ class TestOnCreatedSubFolder:
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_created(ev)
 
-        assert "sub-folder" in handler._pending_generate_reason
+        assert "sub-folder" in handler._pending_reindex.get("BizOps", "")
 
     def test_subfolder_file_also_schedules_index(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
@@ -197,19 +197,19 @@ class TestOnCreatedSubFolder:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 5. on_deleted — sub-folder file schedules generate AND deindex
+# 5. on_deleted — sub-folder file schedules reindex AND deindex
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TestOnDeletedSubFolder:
 
-    def test_subfolder_file_deleted_schedules_generate(self, tmp_path):
+    def test_subfolder_file_deleted_schedules_reindex(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
         ev = _fake_event(str(tmp_path / "BizOps" / "CoE" / "report.pdf"))
 
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_deleted(ev)
 
-        assert handler._pending_generate is not None
+        assert "BizOps" in handler._pending_reindex
 
     def test_subfolder_file_deleted_reason(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
@@ -218,7 +218,7 @@ class TestOnDeletedSubFolder:
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_deleted(ev)
 
-        assert "sub-folder" in handler._pending_generate_reason
+        assert "sub-folder" in handler._pending_reindex.get("BizOps", "")
 
     def test_subfolder_file_deleted_schedules_deindex(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
@@ -231,19 +231,19 @@ class TestOnDeletedSubFolder:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# 6. on_modified — sub-folder file schedules generate AND index
+# 6. on_modified — sub-folder file schedules reindex AND index
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TestOnModifiedSubFolder:
 
-    def test_subfolder_file_modified_schedules_generate(self, tmp_path):
+    def test_subfolder_file_modified_schedules_reindex(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"ACE Docs"})
         ev = _fake_event(str(tmp_path / "ACE Docs" / "Migration" / "guide.docx"))
 
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_modified(ev)
 
-        assert handler._pending_generate is not None
+        assert "ACE Docs" in handler._pending_reindex
 
     def test_subfolder_file_modified_reason(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"ACE Docs"})
@@ -252,7 +252,7 @@ class TestOnModifiedSubFolder:
         with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
             handler.on_modified(ev)
 
-        assert "sub-folder" in handler._pending_generate_reason
+        assert "sub-folder" in handler._pending_reindex.get("ACE Docs", "")
 
     def test_subfolder_file_modified_schedules_index(self, tmp_path):
         handler = _make_handler(tmp_path, known_folders={"ACE Docs"})
@@ -404,7 +404,8 @@ class TestScheduleGenerateCoalescing:
         assert handler._pending_generate  == first_deadline
         assert handler._pending_generate_reason == first_reason
 
-    def test_multiple_subfolder_events_one_generate(self, tmp_path):
+    def test_multiple_subfolder_events_one_reindex(self, tmp_path):
+        """Multiple sub-folder file events for one domain produce exactly one pending reindex."""
         handler = _make_handler(tmp_path, known_folders={"BizOps"})
 
         files = [
@@ -415,10 +416,11 @@ class TestScheduleGenerateCoalescing:
             for f in files:
                 handler.on_created(_fake_event(str(f)))
 
-        # Still exactly one pending generate — not five
-        assert handler._pending_generate is not None
-        # Confirm only the first reason was kept
-        assert "sub-folder" in handler._pending_generate_reason
+        # Still exactly one pending reindex for BizOps — not five
+        assert "BizOps" in handler._pending_reindex
+        assert "sub-folder" in handler._pending_reindex["BizOps"]
+        # generate.py should NOT be triggered for sub-folder events
+        assert handler._pending_generate is None
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -479,3 +481,178 @@ class TestDispatchPendingRespectsDebounce:
 
         assert called == [], "generate.py must not fire before debounce expires"
         assert handler._pending_generate is not None  # still pending
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 14. _schedule_reindex — per-domain debounced reindex (replaces sub-folder generate)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestScheduleReindex:
+
+    def test_reindex_is_queued_for_domain(self, tmp_path):
+        """_schedule_reindex stores the reason keyed by domain."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        with patch("time.time", return_value=1_000_000.0):
+            handler._schedule_reindex("BizOps", "test reason")
+        assert "BizOps" in handler._pending_reindex
+        assert handler._pending_reindex["BizOps"] == "test reason"
+
+    def test_multiple_events_coalesced_per_domain(self, tmp_path):
+        """Multiple events for the same domain produce exactly one pending entry."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        with patch("time.time", return_value=1_000_000.0):
+            handler._schedule_reindex("BizOps", "reason A")
+            handler._schedule_reindex("BizOps", "reason B")
+            handler._schedule_reindex("BizOps", "reason C")
+        # Last reason wins (most recent event description), still only one entry
+        assert len([k for k in handler._pending_reindex if k == "BizOps"]) == 1
+        assert handler._pending_reindex["BizOps"] == "reason C"
+
+    def test_different_domains_queued_independently(self, tmp_path):
+        """Events for distinct domains produce independent pending entries."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps", "ACE Docs"})
+        with patch("time.time", return_value=1_000_000.0):
+            handler._schedule_reindex("BizOps", "sub-folder content added: BizOps")
+            handler._schedule_reindex("ACE Docs", "sub-folder content added: ACE Docs")
+        assert set(handler._pending_reindex.keys()) == {"BizOps", "ACE Docs"}
+
+    def test_also_schedules_readme_debounce(self, tmp_path):
+        """_schedule_reindex must share the README debounce deadline."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        with patch("time.time", return_value=1_000_000.0):
+            handler._schedule_reindex("BizOps", "sub-folder content added: BizOps")
+        # README debounce must be set for this domain
+        assert "BizOps" in handler._pending_readme
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 15. Sub-folder events now schedule reindex, NOT generate
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestSubFolderUsesReindex:
+    """
+    Verify that file events inside sub-folders trigger _schedule_reindex
+    and do NOT trigger _schedule_generate (which invokes the full generate.py).
+    """
+
+    def test_created_in_subfolder_schedules_reindex_not_generate(self, tmp_path):
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        f = tmp_path / "BizOps" / "Sub" / "report.pdf"
+        with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
+            handler.on_created(_fake_event(str(f)))
+        assert "BizOps" in handler._pending_reindex
+        assert handler._pending_generate is None
+
+    def test_modified_in_subfolder_schedules_reindex_not_generate(self, tmp_path):
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        f = tmp_path / "BizOps" / "Sub" / "report.pdf"
+        with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
+            handler.on_modified(_fake_event(str(f)))
+        assert "BizOps" in handler._pending_reindex
+        assert handler._pending_generate is None
+
+    def test_deleted_in_subfolder_schedules_reindex_not_generate(self, tmp_path):
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        f = tmp_path / "BizOps" / "Sub" / "report.pdf"
+        with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
+            handler.on_deleted(_fake_event(str(f)))
+        assert "BizOps" in handler._pending_reindex
+        assert handler._pending_generate is None
+
+    def test_root_level_file_does_not_schedule_reindex(self, tmp_path):
+        """Files directly in the domain root (not in sub-folder) must not trigger reindex."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        f = tmp_path / "BizOps" / "report.pdf"
+        with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
+            handler.on_created(_fake_event(str(f)))
+        assert "BizOps" not in handler._pending_reindex
+
+    def test_new_top_level_folder_still_schedules_generate(self, tmp_path):
+        """New top-level folders must still go through generate.py (need domain_meta update)."""
+        handler = _make_handler(tmp_path, known_folders=set())
+        folder = tmp_path / "NewDomain"
+        with patch.object(watch_kb, "WATCH_ROOT", tmp_path):
+            handler.on_created(_fake_event(str(folder), is_directory=True))
+        assert handler._pending_generate is not None
+        assert "NewDomain" not in handler._pending_reindex
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 16. dispatch_pending fires run_reindex when debounce expires
+# ═════════════════════════════════════════════════════════════════════════════
+
+class TestDispatchPendingFiresReindex:
+
+    def test_fires_reindex_after_debounce(self, tmp_path):
+        """dispatch_pending must call run_reindex once the README debounce passes."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        (tmp_path / "BizOps").mkdir(parents=True, exist_ok=True)
+
+        # Plant an expired README deadline and a matching reindex entry
+        handler._pending_readme["BizOps"]  = time.time() - 1.0
+        handler._pending_reindex["BizOps"] = "sub-folder content added: BizOps"
+
+        called: list[tuple[str, str]] = []
+
+        with (
+            patch.object(watch_kb, "WATCH_ROOT", tmp_path),
+            patch.object(watch_kb, "run_reindex",
+                         side_effect=lambda d, r: called.append((d, r))),
+            patch.object(watch_kb, "discover_knowledge_folders", return_value=[]),
+            patch.object(watch_kb, "check_stale_files", return_value=[]),
+            patch.object(watch_kb, "_RESYNC_INTERVAL", 0),
+            patch.object(watch_kb, "is_knowledge_folder", return_value=False),
+            patch.object(watch_kb, "update_readme", return_value=False),
+        ):
+            handler._next_stale_check = time.time() + 9999
+            handler._next_resync      = time.time() + 9999
+            handler.dispatch_pending()
+
+        assert called == [("BizOps", "sub-folder content added: BizOps")]
+        assert "BizOps" not in handler._pending_reindex  # cleared after firing
+
+    def test_reindex_not_fired_before_debounce(self, tmp_path):
+        """dispatch_pending must not call run_reindex before the deadline."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+
+        # Deadline is far in the future
+        handler._pending_readme["BizOps"]  = time.time() + 9999.0
+        handler._pending_reindex["BizOps"] = "sub-folder content added: BizOps"
+
+        called: list = []
+
+        # Return BizOps from the folder poll so it is not treated as deleted
+        import types as _types
+        fake_folder = _types.SimpleNamespace(name="BizOps")
+
+        with (
+            patch.object(watch_kb, "WATCH_ROOT", tmp_path),
+            patch.object(watch_kb, "run_reindex",
+                         side_effect=lambda d, r: called.append((d, r))),
+            patch.object(watch_kb, "discover_knowledge_folders", return_value=[fake_folder]),
+            patch.object(watch_kb, "check_stale_files", return_value=[]),
+            patch.object(watch_kb, "_RESYNC_INTERVAL", 0),
+        ):
+            handler._next_stale_check = time.time() + 9999
+            handler._next_resync      = time.time() + 9999
+            handler.dispatch_pending()
+
+        assert called == [], "run_reindex must not fire before debounce expires"
+        assert "BizOps" in handler._pending_reindex  # still pending
+
+    def test_folder_deletion_cancels_pending_reindex(self, tmp_path):
+        """Deleting a folder must cancel any pending reindex for that domain."""
+        handler = _make_handler(tmp_path, known_folders={"BizOps"})
+        handler._pending_reindex["BizOps"] = "sub-folder content added: BizOps"
+
+        folder = tmp_path / "BizOps"
+        # Simulate folder-deleted event
+        ev = _fake_event(str(folder), is_directory=True)
+        with (
+            patch.object(watch_kb, "WATCH_ROOT", tmp_path),
+            patch.object(watch_kb, "_purge_folder_artifacts", return_value=False),
+            patch.object(watch_kb, "_save_summary_cache"),
+        ):
+            handler.on_deleted(ev)
+
+        assert "BizOps" not in handler._pending_reindex

@@ -62,12 +62,18 @@ AUDIT_PATH   = pathlib.Path(__file__).parent.parent / ".kb_index" / "audit.jsonl
 def _warn_if_drift() -> None:
     """
     Compare live file mtimes against the last audit.jsonl entry.
-    Prints a one-line warning (stderr) when files were modified after the
-    last index run. Silent when the index appears current or audit is absent.
-    Non-fatal — never blocks the agent from answering.
+
+    For each domain where files have changed since the last index run,
+    spawns a background thread that calls embeddings.build_index(domain)
+    so the index is updated automatically without a manual generate.py run.
+
+    Still prints a one-line warning to stderr listing the changed files so
+    the user knows a reindex is in progress.  Silent when the index appears
+    current or audit is absent.  Non-fatal — never blocks the agent.
     """
     try:
         import datetime as _dt
+        import threading
 
         if not AUDIT_PATH.exists() or AUDIT_PATH.stat().st_size == 0:
             return  # no audit yet — generate.py hasn't been run, agent will warn separately
@@ -92,8 +98,9 @@ def _warn_if_drift() -> None:
                  ".csv", ".boxnote", ".ppt", ".doc", ".png", ".jpg", ".jpeg"}
         _SKIP = {"readme", ".ds_store", "~$"}
 
-        kb_root   = AUDIT_PATH.parent.parent
-        recent: list[str] = []
+        kb_root = AUDIT_PATH.parent.parent
+        # Map domain → list of changed file names
+        changed_by_domain: dict[str, list[str]] = {}
         for folder in sorted(kb_root.iterdir()):
             if not folder.is_dir() or folder.name.lower() in _BLOCKLIST:
                 continue
@@ -104,24 +111,80 @@ def _warn_if_drift() -> None:
                     continue
                 try:
                     if f.stat().st_mtime > audit_ts:
-                        recent.append(f.name)
+                        changed_by_domain.setdefault(folder.name, []).append(f.name)
                 except OSError:
                     continue
 
-        if recent:
-            n = len(recent)
-            shown = ", ".join(recent[:3])
-            ellipsis = f" + {n - 3} more" if n > 3 else ""
-            print(
-                f"[{AGENT_NAME}] ⚠  {n} file(s) modified since last index "
-                f"({shown}{ellipsis}). "
-                f"Run `python3 scripts/generate.py` or check drift with "
-                f"`python3 scripts/ask.py --check-drift`.",
-                file=sys.stderr,
-                flush=True,
+        if not changed_by_domain:
+            return
+
+        # Print a summary warning so the user sees what changed
+        total = sum(len(v) for v in changed_by_domain.values())
+        all_names = [name for names in changed_by_domain.values() for name in names]
+        shown = ", ".join(all_names[:3])
+        ellipsis = f" + {total - 3} more" if total > 3 else ""
+        print(
+            f"[{AGENT_NAME}] ⚠  {total} file(s) modified since last index "
+            f"({shown}{ellipsis}). "
+            f"Triggering background reindex for: "
+            f"{', '.join(sorted(changed_by_domain))}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+        # Background reindex — one thread per affected domain so each domain
+        # re-embeds independently and does not block the others.
+        def _reindex_domain(domain: str) -> None:
+            try:
+                agents_dir = pathlib.Path(__file__).parent
+                if str(agents_dir) not in sys.path:
+                    sys.path.insert(0, str(agents_dir))
+                from embeddings import build_index
+                result = build_index(domain)
+                n = len(result.get("entries", []))
+                # Write audit entry so subsequent drift checks see the fresh timestamp
+                _write_drift_audit(domain, n)
+                print(
+                    f"[{AGENT_NAME}] ✓ Background reindex complete: {domain} ({n} files)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[{AGENT_NAME}] ✗ Background reindex failed for {domain}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        for domain in changed_by_domain:
+            t = threading.Thread(
+                target=_reindex_domain,
+                args=(domain,),
+                name=f"kb-reindex-{domain}",
+                daemon=True,
             )
+            t.start()
+
     except Exception:
         pass  # drift check is best-effort — never crash the agent
+
+
+def _write_drift_audit(domain: str, file_count: int) -> None:
+    """Append a reindex_complete entry to audit.jsonl after a background reindex."""
+    import datetime as _dt
+    try:
+        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts":     _dt.datetime.now().isoformat(timespec="seconds"),
+            "event":  "reindex_complete",
+            "domain": domain,
+            "files":  file_count,
+            "source": "auto_drift_check",
+        }
+        with AUDIT_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass  # audit write is best-effort
 
 # ── Domain meta loader ────────────────────────────────────────────────────────
 

@@ -10,6 +10,17 @@ Provides:
   - call_llm(messages)            — provider-agnostic LLM call
   - ask(question, folder, ...)    — README-first RAG pipeline
 
+Supported formats in extract_full_text()
+-----------------------------------------
+.txt / .md / .csv       plain read
+.docx                   XML extraction (zipfile)
+.pdf                    pypdf page iteration
+.pptx / .ppt            python-pptx shape text
+.xlsx / .xls            streaming aggregation or openpyxl
+.boxnote                JSON tree walk
+.png / .jpg / .jpeg     OCR via pytesseract (KB_OCR_ENABLED=true, default)
+.gif / .webp              or PIL metadata fallback, or filename-only
+
 README-first pipeline:
   1. Find the folder's README (must contain <!-- KB:AUTO-INDEX:START --> block)
   2. For normal questions  → pass AUTO-INDEX block only (~500-2000 tokens)
@@ -880,10 +891,69 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
             except Exception as e:
                 return f"[BoxNote read error: {e}]"
 
+        elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+            return _extract_image_text(file_path, max_chars)
+
     except Exception as e:
         return f"[Read error: {e}]"
 
     return f"[Unsupported: {file_path.name}]"
+
+
+# ── Image OCR helper (agents-layer) ──────────────────────────────────────────
+
+def _extract_image_text(path: pathlib.Path, max_chars: int) -> str:
+    """
+    Extract text from an image file.
+
+    Mirrors the logic in kb_agent_mcp/file_parser._extract_image().
+
+    Strategy (in priority order):
+    1. pytesseract OCR  — when KB_OCR_ENABLED != "false" (default: enabled)
+                          and KB_OCR_ENGINE in ("tesseract", "auto") (default).
+    2. PIL/Pillow metadata fallback — image dimensions + filename.
+    3. Filename-only last resort.
+
+    All optional deps (pytesseract, PIL) are imported lazily so the agents
+    layer works without them installed — it just falls back to lower tiers.
+    """
+    ocr_enabled = os.environ.get("KB_OCR_ENABLED", "true").lower() not in ("false", "0", "no")
+    if not ocr_enabled:
+        return f"[Image: {path.name}]"
+
+    ocr_engine = os.environ.get("KB_OCR_ENGINE", "auto").lower()
+
+    # ── Try pytesseract ────────────────────────────────────────────────────────
+    if ocr_engine in ("tesseract", "auto"):
+        try:
+            import pytesseract
+            from PIL import Image as _Image
+            img = _Image.open(str(path))
+            text = pytesseract.image_to_string(img).strip()
+            if text:
+                return text[:max_chars]
+        except ImportError:
+            pass  # pytesseract / PIL not installed — fall through to PIL-only
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "pytesseract failed for %s: %s", path.name, exc
+            )
+
+    # ── PIL metadata fallback ──────────────────────────────────────────────────
+    try:
+        from PIL import Image as _Image
+        img = _Image.open(str(path))
+        w, h = img.size
+        mode = img.mode
+        return f"[Image: {path.name} | {w}×{h}px | mode={mode}]"[:max_chars]
+    except ImportError:
+        pass
+    except Exception as exc:
+        import logging as _logging
+        _logging.getLogger(__name__).debug("PIL failed for %s: %s", path.name, exc)
+
+    return f"[Image: {path.name}]"
 
 
 # ── LLM call (provider-agnostic) ──────────────────────────────────────────────

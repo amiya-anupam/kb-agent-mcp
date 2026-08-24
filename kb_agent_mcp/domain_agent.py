@@ -80,9 +80,10 @@ class DomainAgent:
         Returns the same dict shape as base_agent.ask():
             { agent, answer, sources, found, passthrough, … }
         """
-        system_prompt = _apply_format_instruction(
-            self.config.system_prompt, format_instruction
-        )
+        base_prompt = self.config.system_prompt
+        if self.config.system_prompt_extra:
+            base_prompt = base_prompt + "\n\n" + self.config.system_prompt_extra
+        system_prompt = _apply_format_instruction(base_prompt, format_instruction)
 
         # Resolve effective top_n — orchestrator may reduce it for budget control.
         effective_top_n = top_n_override if top_n_override is not None else self.config.top_n

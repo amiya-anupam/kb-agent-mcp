@@ -207,6 +207,9 @@ system_prompt: |
   Be concise, accurate, and cite which document your answer came from.
   If the answer is not in the provided context, say so clearly.
   Format your answer in clean markdown.
+# system_prompt_extra: |
+#   Uncomment and fill in domain-specific instructions, e.g.:
+#   Always cite the contract reference number.
 retrieval_rules:
   pin_files:
     - <glob pattern for authoritative files, e.g. "*Revenue*.xlsx", or omit if none>
@@ -254,6 +257,9 @@ def _minimal_yaml(folder_name: str) -> str:
           Be concise, accurate, and cite which document your answer came from.
           If the answer is not in the provided context, say so clearly.
           Format your answer in clean markdown.
+        # system_prompt_extra: |
+        #   Add any domain-specific instructions here, e.g.:
+        #   Always cite the contract reference number.
         retrieval_rules:
           pin_files: []
           boost_keywords: []
