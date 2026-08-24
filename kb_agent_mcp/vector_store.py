@@ -717,7 +717,8 @@ def _bm25_search_sync(
 
 def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
     """
-    Hybrid search: BM25 + vector (ChromaDB ANN), fused with Reciprocal Rank Fusion.
+    Hybrid search: BM25 + vector (ChromaDB ANN), fused with Reciprocal Rank Fusion,
+    then optionally reweighted by accumulated user-feedback signals.
 
     Strategy:
     1. Embed the query once (cached per query text).
@@ -726,8 +727,10 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
     3. Run BM25 keyword search over the same chunk-level corpus; deduplicate
        to file level.
     4. Fuse both file-level ranked lists with RRF and return the top-N results.
-    5. If rank_bm25 is unavailable, falls back to pure vector search.
-    6. If ChromaDB is unreachable, falls back to keyword matching.
+    5. Apply feedback-driven score multipliers (boost high-rated files, demote
+       low-rated files) and re-sort.  No-op when no feedback exists yet.
+    6. If rank_bm25 is unavailable, falls back to pure vector search.
+    7. If ChromaDB is unreachable, falls back to keyword matching.
 
     Documents are stored as overlapping chunks (see chunk_text()).  The
     deduplicate step in each search leg ensures callers always see distinct
@@ -767,9 +770,24 @@ def _search_sync(domain: str, query: str, top_n: int = 4) -> list[SearchResult]:
 
     if not bm25_results:
         # rank_bm25 unavailable or corpus empty — pure vector result (already top_n sized)
-        return vector_results[:top_n]
+        fused = vector_results[:top_n]
+    else:
+        fused = _rrf_fuse(vector_results, bm25_results, top_n)
 
-    return _rrf_fuse(vector_results, bm25_results, top_n)
+    # ── Feedback-driven reweighting ───────────────────────────────────────────
+    # Applied after RRF fusion so the semantic/lexical ranking is only nudged
+    # by user signals, not overridden.  The weight table is cached (5 min TTL)
+    # so this adds negligible I/O on the hot path.
+    if cfg.KB_FEEDBACK_REWEIGHT_ENABLED and fused:
+        try:
+            from kb_agent_mcp.feedback import build_file_weights, apply_feedback_weights
+            weights = build_file_weights()
+            fused   = apply_feedback_weights(fused, weights)
+        except Exception as exc:
+            # Never let a feedback failure break retrieval
+            logger.warning("Feedback reweighting failed (%s); using unweighted results", exc)
+
+    return fused
 
 
 def _keyword_fallback(

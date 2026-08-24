@@ -243,6 +243,18 @@ class Config:
         "KB_OCR_ENGINE", "auto"
     ))
 
+    # ── Feedback-driven retrieval reweighting ─────────────────────────────────
+    # Set KB_FEEDBACK_REWEIGHT_ENABLED=false to disable score adjustment based
+    # on user ratings.  Enabled by default.
+    KB_FEEDBACK_REWEIGHT_ENABLED: bool = field(default_factory=lambda: _bool(
+        "KB_FEEDBACK_REWEIGHT_ENABLED", True
+    ))
+    # How many days of feedback history to consider when computing file weights.
+    # Older ratings count less (linear time-decay within the window).
+    KB_FEEDBACK_DECAY_DAYS: int = field(default_factory=lambda: _int(
+        "KB_FEEDBACK_DECAY_DAYS", 90
+    ))
+
     # ── Re-ranker ─────────────────────────────────────────────────────────────
     # Set KB_RERANKER_ENABLED=false to skip the cross-encoder re-ranking pass.
     # Useful when sentence-transformers is absent or for latency-critical use.

@@ -47,6 +47,11 @@ FastMCP server exposing sixteen tools:
   compare_data(path_a, path_b, question, session_id, metric_col, time_col)
     → Compare two files side-by-side; emits a period × diff table (B − A).
 
+  ── Observability ────────────────────────────────────────────────────────────
+
+  audit_summary(days)
+    → Usage analytics: top questions, busiest domains, avg rating, failure rate.
+
 Transport:
   Default (stdio):  kb-agent-serve
   HTTP/SSE:         kb-agent-serve --transport http [--port 8765]
@@ -68,7 +73,11 @@ from fastmcp import FastMCP
 
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp import __version__
-from kb_agent_mcp.audit import log_turn as _audit_log, read_log as _audit_read
+from kb_agent_mcp.audit import (
+    log_turn as _audit_log,
+    read_log as _audit_read,
+    summarise_log as _audit_summarise,
+)
 
 # ── Stale-index TTL cache (Risk 11) ───────────────────────────────────────────
 # _stale_cache holds the last scan result and the monotonic timestamp it was taken.
@@ -896,6 +905,111 @@ async def read_audit(
     if session_id:
         header += f" for session `{session_id}`"
     return header + "\n\n" + "\n".join(rows)
+
+
+# ── Tool: audit_summary ───────────────────────────────────────────────────────
+
+@mcp.tool()
+async def audit_summary(days: int = 30) -> str:
+    """
+    Return a usage analytics summary derived from audit.jsonl and feedback.jsonl.
+
+    Surfaces usage patterns without requiring any external analytics tooling:
+      • Total queries and blocked / failure rate over the requested window
+      • Average response latency
+      • Top 10 most-repeated questions (with repeat counts)
+      • Query volume per domain, highlighting the busiest domain
+      • Average user rating + rating distribution (1–5 stars)
+      • Up to 10 recent low-rated answers (≤ 2 stars) with comments
+
+    Args:
+        days: Look-back window in days (default 30, min 1, max 365).
+
+    Returns:
+        Markdown-formatted analytics report.
+    """
+    import asyncio as _asyncio
+    from kb_agent_mcp.feedback import summarise_feedback as _fb_summarise
+
+    days = max(1, min(365, days))
+
+    audit_stats, fb_stats = await _asyncio.gather(
+        _asyncio.to_thread(_audit_summarise, days),
+        _asyncio.to_thread(_fb_summarise, days),
+    )
+
+    lines: list[str] = [
+        f"## Audit summary — last {days} day(s)\n",
+    ]
+
+    # ── Query stats ──────────────────────────────────────────────────────────
+    if audit_stats["no_data"]:
+        lines.append("_No audit entries found for this period._\n")
+    else:
+        total = audit_stats["total_queries"]
+        blocked = audit_stats["blocked_queries"]
+        fail_pct = audit_stats["failure_rate_pct"]
+        avg_lat = audit_stats["avg_latency_ms"]
+        lines.append(
+            f"**Queries:** {total} total · "
+            f"{blocked} blocked ({fail_pct}% failure rate) · "
+            f"avg latency {avg_lat} ms\n"
+        )
+
+        # Domain breakdown
+        domain_counts = audit_stats["domain_counts"]
+        busiest = audit_stats["busiest_domain"]
+        if domain_counts:
+            lines.append("### Queries by domain\n")
+            lines.append("| Domain | Queries |")
+            lines.append("|--------|---------|")
+            for domain, count in domain_counts.items():
+                star = " ⭐" if domain == busiest else ""
+                lines.append(f"| {domain}{star} | {count} |")
+            lines.append("")
+
+        # Top questions
+        top_q = audit_stats["top_questions"]
+        if top_q:
+            lines.append("### Top questions\n")
+            lines.append("| # | Question | Asked |")
+            lines.append("|---|----------|-------|")
+            for i, item in enumerate(top_q, 1):
+                q = item["question"][:80].replace("|", "\\|")
+                if len(item["question"]) > 80:
+                    q += "…"
+                lines.append(f"| {i} | {q} | {item['count']}× |")
+            lines.append("")
+
+    # ── Feedback / ratings ────────────────────────────────────────────────────
+    lines.append("### Ratings\n")
+    if fb_stats["no_data"]:
+        lines.append("_No feedback entries found for this period._\n")
+    else:
+        avg = fb_stats["avg_rating"]
+        total_r = fb_stats["total_ratings"]
+        dist = fb_stats["rating_dist"]
+        stars_bar = "  ".join(
+            f"{'⭐' * int(k)} {v}" for k, v in dist.items() if v > 0
+        )
+        lines.append(
+            f"**{total_r} rating(s)** · avg {avg}/5"
+            + (f"  —  {stars_bar}" if stars_bar else "")
+            + "\n"
+        )
+
+        low = fb_stats["low_rated"]
+        if low:
+            lines.append("#### Low-rated answers (≤ 2 ⭐)\n")
+            for item in low:
+                q = item["question"][:100].replace("|", "\\|")
+                if len(item["question"]) > 100:
+                    q += "…"
+                comment = f" — _{item['comment']}_" if item["comment"] else ""
+                lines.append(f"- {'⭐' * item['rating']} **{q}**{comment}")
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 # ── Tool: resume_session ──────────────────────────────────────────────────────
