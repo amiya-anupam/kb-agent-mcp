@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>KnowledgeBase Agent — Enhancement Roadmap</title>
+<title>KnowledgeBase Agent — Remaining Work</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -36,9 +36,8 @@
     border-radius: 6px;
     padding: 14px 16px;
   }
-  .card.done   { background: #f0faf4; border-color: #c6e8d1; }
-  .card.partial { background: #fffbf0; border-color: #f0d78c; }
-  .card.pending { background: #f7f8fa; border-color: #e5e7eb; }
+  .card.pending  { background: #f7f8fa; border-color: #e5e7eb; }
+  .card.deferred { background: #f5f3ff; border-color: #d0c9f5; }
 
   .card-header {
     display: flex;
@@ -56,13 +55,10 @@
     border-radius: 20px;
     white-space: nowrap;
   }
-  .badge-high    { background: #fce8e8; color: #c0392b; }
-  .badge-med     { background: #fef3cd; color: #856404; }
-  .badge-low     { background: #e8f5e9; color: #2e7d32; }
-  .badge-arch    { background: #e8eaf6; color: #3949ab; }
-  .badge-done    { background: #d4edda; color: #155724; }
-  .badge-partial { background: #fff3cd; color: #856404; }
-  .badge-pending { background: #f0f0f0; color: #555; }
+  .badge-low      { background: #e8f5e9; color: #2e7d32; }
+  .badge-arch     { background: #e8eaf6; color: #3949ab; }
+  .badge-pending  { background: #f0f0f0; color: #555; }
+  .badge-deferred { background: #ede9fe; color: #5b21b6; }
 
   .anchor {
     font-size: 11px;
@@ -75,50 +71,17 @@
   }
 
   .card p { font-size: 13px; color: #444d56; margin-bottom: 6px; }
-  .card ul { padding-left: 18px; }
-  .card ul li { font-size: 13px; color: #444d56; margin-bottom: 3px; }
-  .card .done-note {
+
+  .card .deferred-note {
     font-size: 12px;
-    color: #1a7a3a;
-    background: #e6f4ea;
-    border-left: 3px solid #34a853;
-    padding: 4px 8px;
-    border-radius: 0 3px 3px 0;
-    margin-top: 6px;
-  }
-  .card .partial-note {
-    font-size: 12px;
-    color: #7a5c00;
-    background: #fff9e6;
-    border-left: 3px solid #f0b429;
+    color: #5b21b6;
+    background: #ede9fe;
+    border-left: 3px solid #7c3aed;
     padding: 4px 8px;
     border-radius: 0 3px 3px 0;
     margin-top: 6px;
   }
 
-  /* Legend */
-  .legend {
-    display: flex;
-    gap: 20px;
-    flex-wrap: wrap;
-    margin-bottom: 28px;
-  }
-  .legend-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: #444d56;
-  }
-  .legend-swatch {
-    width: 12px; height: 12px; border-radius: 3px;
-    border: 1px solid rgba(0,0,0,0.1);
-  }
-  .sw-done    { background: #d4edda; }
-  .sw-partial { background: #fff3cd; }
-  .sw-pending { background: #f0f0f0; }
-
-  /* Summary table */
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
   thead th {
     font-size: 12px;
@@ -136,33 +99,12 @@
     vertical-align: top;
   }
 
-  .status-done    { color: #155724; font-weight: 600; }
-  .status-partial { color: #856404; font-weight: 600; }
-  .status-pending { color: #555;    font-weight: 600; }
+  .status-pending  { color: #555;    font-weight: 600; }
+  .status-deferred { color: #5b21b6; font-weight: 600; }
 
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
-  .dot-done    { background: #27ae60; }
-  .dot-partial { background: #e67e22; }
-  .dot-pending { background: #aaa; }
-
-  .progress-bar-wrap {
-    background: #e5e7eb;
-    border-radius: 20px;
-    height: 8px;
-    width: 100%;
-    margin: 8px 0 20px;
-    overflow: hidden;
-  }
-  .progress-bar-fill {
-    height: 100%;
-    border-radius: 20px;
-    background: linear-gradient(90deg, #27ae60, #3b82d4);
-  }
-  .progress-label {
-    font-size: 12px;
-    color: #57606a;
-    margin-bottom: 4px;
-  }
+  .dot-pending  { background: #aaa; }
+  .dot-deferred { background: #7c3aed; }
 
   footer {
     margin-top: 48px;
@@ -177,208 +119,8 @@
 <body>
 <div class="page">
 
-  <h1>KnowledgeBase Agent — Enhancement Roadmap</h1>
-  <p class="subtitle">Updated status based on code review of kb_agent_mcp/, agents/, and committed changes. 16 of 18 items shipped.</p>
-
-  <p class="progress-label">Overall completion — 16 / 18 enhancements shipped</p>
-  <div class="progress-bar-wrap">
-    <div class="progress-bar-fill" style="width: 88.9%"></div>
-  </div>
-
-  <div class="legend">
-    <div class="legend-item"><div class="legend-swatch sw-done"></div> Shipped</div>
-    <div class="legend-item"><div class="legend-swatch sw-partial"></div> Partially shipped</div>
-    <div class="legend-item"><div class="legend-swatch sw-pending"></div> Pending</div>
-  </div>
-
-
-  <!-- ─────────────────────────────── Retrieval ─────────────────────────────── -->
-  <h2>Retrieval &amp; Context Quality</h2>
-  <div class="card-grid">
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Hybrid search (keyword + vector)</span>
-        <span class="badge badge-high">High impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">vector_store.py</span>
-      </div>
-      <p>BM25 (rank_bm25) runs in-process per domain alongside ChromaDB ANN vector search. Scores are fused with Reciprocal Rank Fusion before returning the top-N results. The BM25 index is lazily built on first search and invalidated on every upsert/delete.</p>
-      <div class="done-note">Implemented in <code>_bm25_search_sync()</code> and <code>_rrf_fuse()</code> · <code>KB_CHUNK_SIZE</code> / <code>KB_CHUNK_OVERLAP</code> env knobs exposed</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Chunk overlap &amp; sliding window indexing</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">vector_store.py</span>
-      </div>
-      <p>Documents are split into overlapping character-level windows (<code>_CHUNK_SIZE=3500</code>, <code>_CHUNK_OVERLAP=200</code>) so answers near chunk boundaries are never silently dropped. Both values are runtime-configurable via env vars.</p>
-      <div class="done-note">Implemented in <code>chunk_text()</code> · each chunk stored as a separate ChromaDB entry · deduplication back to file-level in search</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Re-ranker pass after vector search</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">reranker.py · domain_agent.py</span>
-      </div>
-      <p>A cross-encoder re-ranker (<code>cross-encoder/ms-marco-MiniLM-L-6-v2</code> via sentence-transformers) scores every (query, passage) pair in the candidate pool and re-sorts before the final top-N cut. Gracefully degrades when the model is absent.</p>
-      <div class="done-note">Opt-out via <code>KB_RERANKER_ENABLED=false</code> · candidate pool size via <code>KB_RERANKER_CANDIDATES</code> · fallback to unranked order on any failure</div>
-    </div>
-
-  </div>
-
-
-  <!-- ─────────────────────────────── Analyst ──────────────────────────────── -->
-  <h2>Data Analyst Capability</h2>
-  <div class="card-grid">
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Trend &amp; time-series analysis</span>
-        <span class="badge badge-high">High impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">analyst/engine.py</span>
-      </div>
-      <p>The analyst engine detects trend questions ("trend over Q1–Q4", "YoY", "QoQ") and routes them to <code>_trend_pivot()</code>, which emits a period × metric table with optional delta columns. Consistent with the "growth" theme questions already in the planner.</p>
-      <div class="done-note">QoQ / YoY delta columns included · handled via <code>include_deltas=True</code> flag</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Chart / visualisation output for analyst answers</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">analyst/engine.py · server.py</span>
-      </div>
-      <p>Analyst tool responses include a <code>chart_data</code> object with <code>type</code>, <code>labels</code>, <code>datasets</code>, <code>csv</code> (for file attachment), and <code>mermaid</code> (inline single-dataset rendering). Compare responses emit grouped-bar chart data.</p>
-      <div class="done-note"><code>query_data()</code> and <code>compare_data()</code> both surface chart_data · Mermaid omitted for multi-dataset comparisons</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Multi-file comparison in analyst</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">analyst/engine.py · server.py</span>
-      </div>
-      <p><code>compare_data(path_a, path_b, …)</code> MCP tool loads both files, aggregates each by time period, aligns periods, and returns a diff table (B − A absolute + % change). Supports optional <code>metric_col</code> and <code>time_col</code> overrides.</p>
-      <div class="done-note">Exposed as <code>compare_data()</code> MCP tool · grand-total row when multiple periods exist</div>
-    </div>
-
-  </div>
-
-
-  <!-- ─────────────────────────────── Memory ───────────────────────────────── -->
-  <h2>Memory &amp; Session</h2>
-  <div class="card-grid">
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Named sessions / workspaces</span>
-        <span class="badge badge-high">High impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">memory.py · server.py</span>
-      </div>
-      <p>Sessions are named by the caller via <code>session_id</code> and persist across server restarts. <code>list_sessions()</code> enumerates all sessions with turn count and last-active time. <code>resume_session()</code> replays a full conversation transcript. HTTP transport auto-generates per-connection UUIDs to prevent session bleed.</p>
-      <div class="done-note"><code>list_sessions()</code> and <code>resume_session()</code> MCP tools shipped · <code>KB_DEFAULT_SESSION_ID</code> config for stable personal sessions</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Conversation summarisation before truncation</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">memory.py</span>
-      </div>
-      <p>Before storing a long answer, <code>add_turn_sync()</code> runs a one-shot LLM call (<code>_compress_answer_sync()</code>) to produce a concise summary. Falls back to sentence-boundary truncation when the LLM is unavailable or times out (8 s wall-clock cap).</p>
-      <div class="done-note">Opt-out via <code>KB_MEMORY_COMPRESS=false</code> · automatically skipped in passthrough mode</div>
-    </div>
-
-  </div>
-
-
-  <!-- ──────────────────────────── Domain / Indexing ───────────────────────── -->
-  <h2>Domain Management &amp; Indexing</h2>
-  <div class="card-grid">
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Auto re-index on file change (watcher)</span>
-        <span class="badge badge-high">High impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">cli/watch.py</span>
-      </div>
-      <p>The <code>kb-agent-watch</code> daemon uses watchdog to detect file creates, modifies, and deletes. Modified files call <code>upsert_file(domain, path)</code> directly; deleted files call <code>delete_file()</code>. New top-level folders trigger a full <code>build_collection()</code> and optional <code>domain_config.yaml</code> generation.</p>
-      <div class="done-note">Debounced per-file; only the affected domain is re-indexed · macOS launchd auto-start via <code>kb-agent-setup</code></div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">domain_config.yaml per-domain prompt customisation</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">domain_rules.py · DomainConfig</span>
-      </div>
-      <p><code>DomainConfig</code> exposes a <code>system_prompt_extra</code> field in <code>domain_config.yaml</code>. Domain owners can append custom instructions to the system prompt (e.g. "Always cite the contract reference for BizOps answers") without touching Python.</p>
-      <div class="done-note">Loaded in <code>domain_rules.py:171</code> and appended during system-prompt construction</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Image OCR indexing</span>
-        <span class="badge badge-low">Useful</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">file_parser.py</span>
-      </div>
-      <p>PNG, JPEG, GIF, and WebP files are indexed via pytesseract OCR when installed, falling back to PIL metadata (dimensions, colour mode). Controlled by <code>KB_OCR_ENABLED</code> (default true) and <code>KB_OCR_ENGINE</code>.</p>
-      <div class="done-note">Implemented in <code>file_parser._extract_image()</code> · tesseract → PIL fallback chain</div>
-    </div>
-
-  </div>
-
-
-  <!-- ──────────────────────────── Security / Audit ────────────────────────── -->
-  <h2>Security, Audit &amp; Feedback</h2>
-  <div class="card-grid">
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Feedback-driven retrieval reweighting</span>
-        <span class="badge badge-med">Medium impact</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">feedback.py · vector_store.py · config.py</span>
-      </div>
-      <p>After RRF fusion, <code>_search_sync()</code> applies per-file score multipliers derived from <code>feedback.jsonl</code>. High-rated files (≥4★) are boosted up to 1.5×; low-rated files (≤2★) are demoted to a floor of 0.5×. Signals are time-decayed (linear over <code>KB_FEEDBACK_DECAY_DAYS</code>, default 90) and sqrt(n)-dampened to resist early noise. The weight table is cached for 5 minutes and busted immediately on every <code>rate_answer()</code> call.</p>
-      <div class="done-note">Opt-out via <code>KB_FEEDBACK_REWEIGHT_ENABLED=false</code> · joins feedback.jsonl + audit.jsonl on <code>answer_hash</code> to recover <code>files_cited</code></div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">Audit log analytics endpoint</span>
-        <span class="badge badge-low">Low effort, useful</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">audit.py · server.py</span>
-      </div>
-      <p><code>audit_summary(days)</code> MCP tool returns a Markdown analytics report: total queries, blocked / failure rate, avg latency, top-10 repeated questions, per-domain query volume, avg star rating, rating distribution, and recent low-rated answers with comments. Reads both <code>audit.jsonl</code> and <code>feedback.jsonl</code> in one call.</p>
-      <div class="done-note">Both logs read in parallel via <code>asyncio.gather()</code> · look-back window is configurable (default 30 days, max 365)</div>
-    </div>
-
-    <div class="card done">
-      <div class="card-header">
-        <span class="card-title">.noindex propagation to agents-layer</span>
-        <span class="badge badge-med">Security gap</span>
-        <span class="badge badge-done">✓ Shipped</span>
-        <span class="anchor">agents/agent_base.py · file_parser.py</span>
-      </div>
-      <p>The agents-layer <code>agent_base.py</code> now implements its own <code>_has_noindex_ancestor()</code> that mirrors the MCP-layer logic in <code>file_parser.py</code>. Both check for <code>.noindex</code> sentinel files in ancestor directories, closing the bypass path that existed when only the MCP layer enforced the sentinel.</p>
-      <div class="done-note">Guard confirmed at <code>agents/agent_base.py:80</code> · docstring cross-references MCP-layer implementation</div>
-    </div>
-
-  </div>
+  <h1>KnowledgeBase Agent — Remaining Work</h1>
+  <p class="subtitle">16 of 18 enhancements shipped. 2 pending · 1 deferred.</p>
 
 
   <!-- ──────────────────────────── UX / Developer ──────────────────────────── -->
@@ -387,32 +129,23 @@
 
     <div class="card pending">
       <div class="card-header">
-        <span class="card-title">Interactive question suggestions at session start</span>
-        <span class="badge badge-low">UX improvement</span>
-        <span class="badge badge-pending">Pending</span>
-        <span class="anchor">cli/watch.py · suggest_questions MCP tool</span>
-      </div>
-      <p>The <code>suggest_questions(path)</code> MCP tool exists and is zero-LLM-cost. The interactive CLI still starts with a generic prompt — wiring <code>suggest_questions()</code> to run on a sample file from each domain at CLI startup and display 3–5 example questions would significantly lower blank-page friction for new users.</p>
-    </div>
-
-    <div class="card pending">
-      <div class="card-header">
         <span class="card-title">kb-agent export — snapshot answers to markdown/PDF</span>
         <span class="badge badge-low">Useful for sharing</span>
         <span class="badge badge-pending">Pending</span>
         <span class="anchor">cli/ · audit.jsonl · writeback.py</span>
       </div>
-      <p>Teams doing BizOps / renewal-review investigations want to share findings. A <code>kb-agent export --session &lt;id&gt;</code> command that reads the audit log and renders all Q&amp;A pairs for that session to formatted Markdown (or PDF) is not yet implemented. <code>writeback.write_document()</code> already handles safe writes into KB_ROOT — the export could be placed there automatically.</p>
+      <p>A <code>kb-agent export --session &lt;id&gt;</code> command that reads <code>audit.jsonl</code> and renders all Q&amp;A pairs for a session to formatted Markdown (or PDF). <code>writeback.write_document()</code> already handles safe writes into <code>KB_ROOT</code> — the export output could be placed there automatically so it is immediately searchable.</p>
     </div>
 
-    <div class="card done">
+    <div class="card deferred">
       <div class="card-header">
-        <span class="card-title">Doctor check: embedding model freshness</span>
-        <span class="badge badge-low">Operational</span>
-        <span class="badge badge-done">Shipped</span>
-        <span class="anchor">cli/doctor.py · embeddings.py · vector_store.py</span>
+        <span class="card-title">Interactive question suggestions at session start</span>
+        <span class="badge badge-low">UX improvement</span>
+        <span class="badge badge-deferred">Deferred</span>
+        <span class="anchor">agents/agent_knowledgebase.py · analyst/planner.py</span>
       </div>
-      <p><code>kb-agent doctor</code> now includes <code>_check_embed_model_mismatch()</code> (check ⑥) which reads the <code>embed_model</code> key stamped into each ChromaDB collection's metadata at index time (via <code>effective_model_name()</code> in <code>embeddings.py</code>) and compares it against the currently configured model. A missing stamp is a soft warning; an actual mismatch is a hard error with a re-index hint. Previous checks renumbered ⑦–⑩.</p>
+      <p>The idea: run <code>suggest_questions()</code> on a sample file from each domain at interactive CLI startup and display 3–5 example questions to lower blank-page friction for new users. The planner already exists and is zero-LLM-cost.</p>
+      <div class="deferred-note">Deferred — value only materialises for tabular-heavy KBs. Document-heavy domains (ACE Docs, CP4I Docs) produce three identical generic strings per domain regardless of content, which adds noise rather than signal. Revisit when <code>domain_config.yaml</code> gains a first-class <code>example_questions</code> field so hints are domain-specific and hand-authored.</div>
     </div>
 
   </div>
@@ -429,7 +162,7 @@
         <span class="badge badge-pending">Pending</span>
         <span class="anchor">agents/ vs kb_agent_mcp/</span>
       </div>
-      <p>Two parallel implementations still exist: <code>agents/agent_base.py</code> (scripts layer) and <code>kb_agent_mcp/base_agent.py</code> (MCP package). Both implement <code>extract_full_text()</code>, <code>call_llm()</code>, and <code>ask()</code> independently. New features added to the MCP layer (BM25, re-ranker, chunking, OCR, feedback reweighting) are not available via the scripts layer until migrated. ARCHITECTURE.md documents the intended path: migrate <code>agents/</code> to thin wrappers that import from <code>kb_agent_mcp</code>.</p>
+      <p>Two parallel implementations still exist: <code>agents/agent_base.py</code> (scripts layer) and <code>kb_agent_mcp/base_agent.py</code> (MCP package). Both implement <code>extract_full_text()</code>, <code>call_llm()</code>, and <code>ask()</code> independently. All new features (BM25, re-ranker, chunking, OCR, feedback reweighting) live only in the MCP layer and are unavailable via the scripts layer until migrated. Intended path: make <code>agents/</code> thin wrappers that import from <code>kb_agent_mcp</code>.</p>
     </div>
 
   </div>
@@ -446,24 +179,8 @@
       </tr>
     </thead>
     <tbody>
-      <tr><td>Hybrid search (BM25 + vector + RRF)</td><td>Retrieval</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Chunk overlap / sliding window indexing</td><td>Retrieval</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Cross-encoder re-ranker pass</td><td>Retrieval</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Trend / time-series analysis in analyst</td><td>Analyst</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Chart / Mermaid output for analyst answers</td><td>Analyst</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Multi-file comparison in analyst</td><td>Analyst</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Named sessions / workspaces</td><td>Memory</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Conversation summarisation (not truncation)</td><td>Memory</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Auto re-index on file change (watcher)</td><td>Indexing</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>system_prompt_extra in domain_config.yaml</td><td>Domain mgmt</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Image OCR indexing</td><td>Domain mgmt</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Feedback-driven retrieval reweighting</td><td>Security / Audit</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Audit log analytics endpoint (audit_summary)</td><td>Security / Audit</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>.noindex propagation to agents-layer</td><td>Security</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Async throughout the agents-layer</td><td>Architecture</td><td class="status-done"><span class="dot dot-done"></span>Shipped (MCP layer)</td></tr>
-      <tr><td>Doctor check: embedding model mismatch</td><td>Operations</td><td class="status-done"><span class="dot dot-done"></span>Shipped</td></tr>
-      <tr><td>Question suggestions at CLI startup</td><td>UX</td><td class="status-pending"><span class="dot dot-pending"></span>Pending</td></tr>
       <tr><td>kb-agent export to markdown / PDF</td><td>UX</td><td class="status-pending"><span class="dot dot-pending"></span>Pending</td></tr>
+      <tr><td>Question suggestions at CLI startup</td><td>UX</td><td class="status-deferred"><span class="dot dot-deferred"></span>Deferred</td></tr>
       <tr><td>Unify dual agent stack (agents/ → kb_agent_mcp/)</td><td>Architecture</td><td class="status-pending"><span class="dot dot-pending"></span>Pending</td></tr>
     </tbody>
   </table>
