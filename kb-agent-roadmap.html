@@ -120,22 +120,12 @@
 <div class="page">
 
   <h1>KnowledgeBase Agent — Remaining Work</h1>
-  <p class="subtitle">16 of 18 enhancements shipped. 2 pending · 1 deferred.</p>
+  <p class="subtitle">16 of 18 enhancements shipped. 1 pending · 1 deferred.</p>
 
 
   <!-- ──────────────────────────── UX / Developer ──────────────────────────── -->
   <h2>Developer &amp; User Experience</h2>
   <div class="card-grid">
-
-    <div class="card pending">
-      <div class="card-header">
-        <span class="card-title">kb-agent export — snapshot answers to markdown/PDF</span>
-        <span class="badge badge-low">Useful for sharing</span>
-        <span class="badge badge-pending">Pending</span>
-        <span class="anchor">cli/ · audit.jsonl · writeback.py</span>
-      </div>
-      <p>A <code>kb-agent export --session &lt;id&gt;</code> command that reads <code>audit.jsonl</code> and renders all Q&amp;A pairs for a session to formatted Markdown (or PDF). <code>writeback.write_document()</code> already handles safe writes into <code>KB_ROOT</code> — the export output could be placed there automatically so it is immediately searchable.</p>
-    </div>
 
     <div class="card deferred">
       <div class="card-header">
@@ -179,7 +169,6 @@
       </tr>
     </thead>
     <tbody>
-      <tr><td>kb-agent export to markdown / PDF</td><td>UX</td><td class="status-pending"><span class="dot dot-pending"></span>Pending</td></tr>
       <tr><td>Question suggestions at CLI startup</td><td>UX</td><td class="status-deferred"><span class="dot dot-deferred"></span>Deferred</td></tr>
       <tr><td>Unify dual agent stack (agents/ → kb_agent_mcp/)</td><td>Architecture</td><td class="status-pending"><span class="dot dot-pending"></span>Pending</td></tr>
     </tbody>
