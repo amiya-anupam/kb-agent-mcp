@@ -5,11 +5,8 @@ description: >
   specialist sub-agent automatically based on your knowledge folders.
   Use when asking about any content in your KnowledgeBase.
 
-  Current domains (4):
-  - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: Folder contains IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
-  - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-  - **skills**: This folder contains information and notes related to skills and their application in various contexts.
+  Current domains: auto-discovered from your KnowledgeBase folders.
+  Run `python3 generate.py` after adding or renaming folders to update this list.
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
   App Connect, ACE, migration, ACE, purchasing options, renewal, Cloud Pak for Integration, CP4I, presentation, skills, knowledge, application, what does my KnowledgeBase say, /kb, /agent
@@ -34,10 +31,13 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 **No document content is ever sent to Claude.**
 
 ## Current Domains
-- **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: Folder contains IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
-- **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-- **skills**: This folder contains information and notes related to skills and their application in various contexts.
+
+Domains are auto-discovered from the folders in your KnowledgeBase root.
+After running `python3 generate.py`, this section is updated with your actual folder names and descriptions.
+
+Example after setup:
+- **My Project**: Documents and notes for My Project.
+- **Reference Docs**: Reference materials and guides.
 
 ## Usage
 Just ask naturally — Bob detects the intent and runs the agent:
