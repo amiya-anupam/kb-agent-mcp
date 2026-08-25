@@ -22,24 +22,6 @@ import hashlib
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ── Environment loader ────────────────────────────────────────────────────────
-
-def _load_env():
-    """Load .env file from KB_ROOT or repo root if it exists."""
-    for candidate in [
-        pathlib.Path(os.environ.get("KB_ROOT", "")) / ".env",
-        pathlib.Path(__file__).parent.parent / ".env",
-    ]:
-        if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip())
-            break
-
-_load_env()
-
 # ── Config (all from env) ─────────────────────────────────────────────────────
 
 def _kb_root() -> pathlib.Path:

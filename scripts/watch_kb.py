@@ -57,21 +57,11 @@ from agent_base import _find_readme as find_readme, DEFAULT_BLOCKLIST  # noqa: E
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
-# ── Environment loader ────────────────────────────────────────────────────────
-
-def _load_env(root: pathlib.Path):
-    env_file = root / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
-
 # scripts/ lives one level below the repo root — resolve upward so all
 # relative paths (agents/, .env, etc.) stay correct.
+# NOTE: .env loading is handled by agent_base._load_env() which fires when
+# agent_base is imported above (two-candidate: KB_ROOT/.env + repo-root/.env).
 SCRIPT_DIR = pathlib.Path(__file__).parent.parent.resolve()
-_load_env(SCRIPT_DIR)
 
 # ── Config (from env) ─────────────────────────────────────────────────────────
 

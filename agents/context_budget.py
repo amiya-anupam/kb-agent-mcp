@@ -62,22 +62,13 @@ COLLAPSE_RULES
 import os
 import re
 import pathlib
+import sys as _sys
 
-# ── Load .env if present ──────────────────────────────────────────────────────
+# ── Load .env ─────────────────────────────────────────────────────────────────
+# Delegate to agent_base so there is a single canonical loader.
 
-def _load_env():
-    for candidate in [
-        pathlib.Path(os.environ.get("KB_ROOT", "")) / ".env",
-        pathlib.Path(__file__).parent.parent / ".env",
-    ]:
-        if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip())
-            break
-
+_sys.path.insert(0, str(pathlib.Path(__file__).parent))
+from agent_base import _load_env  # noqa: E402
 _load_env()
 
 # ── Budget registry ───────────────────────────────────────────────────────────
