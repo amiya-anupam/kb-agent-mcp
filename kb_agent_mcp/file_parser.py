@@ -255,172 +255,21 @@ def _extract_boxnote(path: pathlib.Path, max_chars: int) -> str:
         return f"BoxNote: {path.name}"
 
 
+# _stream_xlsx_aggregate: pure algorithm lives in agents/_xlsx_stream.py.
+# This wrapper binds the kb_agent_mcp-layer constants.
+
+import sys as _sys
+import pathlib as _pathlib
+_agents_dir = str(_pathlib.Path(__file__).parent.parent / "agents")
+if _agents_dir not in _sys.path:
+    _sys.path.insert(0, _agents_dir)
+import _xlsx_stream as _xlsx_stream_mod
+
 def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
-    """
-    Stream-aggregate a large XLSX file using raw XML parsing (iterparse).
-    Never loads the full workbook into memory.
-    Returns a markdown summary of totals by detected group-by dimensions.
-    """
-    import xml.etree.ElementTree as ET
-
-    try:
-        with zipfile.ZipFile(str(path), "r") as zf:
-            # ── Resolve sheet names ───────────────────────────────────────────
-            sheet_names: list[tuple[str, str]] = []
-            try:
-                wb_xml = ET.fromstring(zf.read("xl/workbook.xml"))
-                ns = {"w": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-                for s in wb_xml.findall(".//w:sheet", ns):
-                    r_id = s.get(
-                        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", ""
-                    )
-                    sheet_names.append((s.get("name", r_id), r_id))
-            except Exception as exc:
-                logger.debug("Failed to parse xl/workbook.xml (%s); using default sheet name", exc)
-                sheet_names = [("Sheet1", "rId1")]
-
-            rid_to_path: dict[str, str] = {}
-            try:
-                rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
-                for rel in rels:
-                    rid_to_path[rel.get("Id", "")] = "xl/" + rel.get("Target", "").lstrip("/")
-            except Exception as exc:
-                logger.debug("Failed to parse xl/_rels/workbook.xml.rels (%s); sheet paths unavailable", exc)
-
-            # ── Load shared strings ───────────────────────────────────────────
-            shared: list[str] = []
-            try:
-                ss_xml = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-                ns_ss = {"w": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-                for si in ss_xml.findall("w:si", ns_ss):
-                    parts = [t.text or "" for t in si.findall(".//w:t", ns_ss)]
-                    shared.append("".join(parts))
-            except Exception as exc:
-                logger.debug("Failed to parse xl/sharedStrings.xml (%s); string values may be missing", exc)
-
-            def cell_value(cell_el: Any) -> Any:
-                t = cell_el.get("t", "")
-                ns_v = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-                v_el = cell_el.find(f"{{{ns_v}}}v")
-                raw = v_el.text if v_el is not None else None
-                if raw is None:
-                    return None
-                if t == "s":
-                    try:
-                        return shared[int(raw)]
-                    except (IndexError, ValueError):
-                        return raw
-                try:
-                    f = float(raw)
-                    return int(f) if f == int(f) else f
-                except ValueError:
-                    return raw
-
-            text_parts: list[str] = []
-
-            for sheet_name, r_id in sheet_names:
-                zip_path = rid_to_path.get(r_id, "")
-                if not zip_path or zip_path not in zf.namelist():
-                    for cand in [
-                        "xl/worksheets/sheet1.xml",
-                        f"xl/worksheets/{sheet_name}.xml",
-                    ]:
-                        if cand in zf.namelist():
-                            zip_path = cand
-                            break
-                if not zip_path or zip_path not in zf.namelist():
-                    continue
-
-                text_parts.append(f"[Sheet: {sheet_name}]")
-
-                headers: list[str] = []
-                agg: dict[int, dict[str, float]] = {}
-                num_ci: int | None = None
-                group_cols: list[tuple[int, str]] = []
-                row_count = 0
-
-                ns_ws = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-                with zf.open(zip_path) as ws_f:
-                    for event, elem in ET.iterparse(ws_f, events=("end",)):
-                        if elem.tag != f"{{{ns_ws}}}row":
-                            continue
-                        vals = [cell_value(c) for c in list(elem)]
-
-                        if row_count == 0:
-                            headers = [str(v) if v is not None else "" for v in vals]
-                            h_lower = [h.lower().strip() for h in headers]
-
-                            for pref in _PREFERRED_NUM_COLS:
-                                if pref in h_lower:
-                                    ci = h_lower.index(pref)
-                                    num_ci = ci
-                                    break
-
-                            _agg_order = list(_AGG_KEYWORDS.keys())
-                            group_cols = sorted(
-                                [
-                                    (ci, _AGG_KEYWORDS[h])
-                                    for ci, h in enumerate(h_lower)
-                                    if h in _AGG_KEYWORDS
-                                ],
-                                key=lambda x: _agg_order.index(
-                                    next(k for k in _agg_order if _AGG_KEYWORDS[k] == x[1])
-                                ),
-                            )
-                            _seen: set[str] = set()
-                            group_cols = [
-                                (ci, lbl)
-                                for ci, lbl in group_cols
-                                if lbl not in _seen and not _seen.add(lbl)  # type: ignore[func-returns-value]
-                            ]
-                            agg = {g_idx: defaultdict(float) for g_idx, _ in group_cols}
-                            row_count += 1
-                            elem.clear()
-                            continue
-
-                        row_count += 1
-                        num_val: float | None = None
-                        if num_ci is not None and num_ci < len(vals):
-                            v = vals[num_ci]
-                            if isinstance(v, (int, float)):
-                                num_val = float(v)
-                        if num_val is None:
-                            for v in reversed(vals):
-                                if isinstance(v, (int, float)):
-                                    num_val = float(v)
-                                    break
-
-                        if num_val is not None:
-                            for g_idx, _ in group_cols:
-                                gval = (
-                                    str(vals[g_idx])
-                                    if g_idx < len(vals) and vals[g_idx] is not None
-                                    else "(blank)"
-                                )
-                                agg[g_idx][gval] += num_val
-                        elem.clear()
-
-                rev_col = headers[num_ci] if num_ci is not None and num_ci < len(headers) else "numeric"
-                text_parts.append(f"Rows: {row_count - 1}  |  Revenue column: '{rev_col}'")
-
-                if group_cols and agg:
-                    for g_idx, g_label in group_cols:
-                        totals = dict(agg[g_idx])
-                        if not totals:
-                            continue
-                        grand = sum(totals.values())
-                        text_parts.append(f"--- By {g_label} ---")
-                        for k, v in sorted(totals.items(), key=lambda x: -x[1])[:50]:
-                            text_parts.append(f"  {k}: {v:,.2f}")
-                        text_parts.append(f"  TOTAL: {grand:,.2f}\n")
-                else:
-                    text_parts.append(f"Columns: {', '.join(h for h in headers[:20] if h)}")
-                text_parts.append("")
-
-        return "\n".join(text_parts)[:max_chars]
-
-    except Exception as exc:
-        return f"[Large XLSX stream error: {exc}] File: {path.name}"
+    """Stream-aggregate a large XLSX file. Delegates to the shared _xlsx_stream module."""
+    return _xlsx_stream_mod.stream_xlsx_aggregate(
+        path, max_chars, _AGG_KEYWORDS, _PREFERRED_NUM_COLS
+    )
 
 
 def _extract_xlsx(path: pathlib.Path, max_chars: int) -> str:
