@@ -22,24 +22,6 @@ import hashlib
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ── Environment loader ────────────────────────────────────────────────────────
-
-def _load_env():
-    """Load .env file from KB_ROOT or repo root if it exists."""
-    for candidate in [
-        pathlib.Path(os.environ.get("KB_ROOT", "")) / ".env",
-        pathlib.Path(__file__).parent.parent / ".env",
-    ]:
-        if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, _, v = line.partition("=")
-                    os.environ.setdefault(k.strip(), v.strip())
-            break
-
-_load_env()
-
 # ── Config (all from env) ─────────────────────────────────────────────────────
 
 def _kb_root() -> pathlib.Path:
@@ -64,6 +46,7 @@ _cb = _importlib.import_module("context_budget")
 from agent_base import (
     _has_noindex_ancestor,
     folder_to_safe_name,
+    should_skip,
     AGG_KEYWORDS,
     PREFERRED_NUM_COLS,
     DEFAULT_BLOCKLIST,
@@ -113,21 +96,6 @@ def discover_folders() -> list[str]:
         if has_files:
             folders.append(p.name)
     return folders
-
-
-# ── Skip helper ───────────────────────────────────────────────────────────────
-
-def should_skip(path: pathlib.Path) -> bool:
-    """Return True if this file should be excluded from indexing.
-
-    Skips:
-    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
-    • any file whose ancestor folder contains a `.noindex` sentinel file
-    """
-    name = path.name.lower()
-    if any(p in name for p in SKIP_PATTERNS):
-        return True
-    return _has_noindex_ancestor(path)
 
 
 # ── Embedding backends ────────────────────────────────────────────────────────

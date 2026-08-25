@@ -57,7 +57,11 @@ from agent_base import (  # noqa: E402
     DEFAULT_BLOCKLIST,
     INCLUDE_EXTS,
     SKIP_PATTERNS,
+    should_skip,
+    folder_to_safe_name,
+    call_llm_generate,
 )
+from embeddings import extract_text_snippet as _extract_snippet_for_summary  # noqa: E402
 
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
@@ -67,19 +71,6 @@ def get_blocklist() -> set[str]:
     extra = os.environ.get("KB_IGNORE_FOLDERS", "")
     user  = {f.strip().lower() for f in extra.split(",") if f.strip()}
     return DEFAULT_BLOCKLIST | user
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def should_skip(path: pathlib.Path) -> bool:
-    return any(p in path.name.lower() for p in SKIP_PATTERNS)
-
-
-def folder_to_safe_name(name: str) -> str:
-    """ACE Docs → ace_docs  |  My Sales & Revenue → my_sales_revenue"""
-    n = name.lower()
-    n = re.sub(r"[^a-z0-9]+", "_", n)
-    n = n.strip("_")
-    return n
 
 
 def agent_filename(folder_name: str) -> str:
@@ -136,63 +127,7 @@ def llm_available() -> bool:
         return False
 
 
-def call_llm_generate(prompt: str) -> str:
-    """Call the LLM with a plain prompt and return text."""
-    import httpx
-
-    provider  = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
-    base_url  = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
-    model     = os.environ.get("KB_MODEL", "qwen3:14b")
-    api_key   = os.environ.get("KB_API_KEY", "")
-    messages  = [{"role": "user", "content": prompt}]
-
-    if provider == "anthropic":
-        headers = {
-            "x-api-key":         api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type":      "application/json",
-        }
-        r = httpx.post(
-            f"{base_url}/v1/messages",
-            headers=headers,
-            json={"model": model, "max_tokens": 1024,
-                  "temperature": 0.3, "messages": messages},
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
-
-    if provider in ("openai", "custom"):
-        b = base_url.rstrip("/")
-        if "11434" in b and not b.endswith("/v1"):
-            b = f"{b}/v1"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        r = httpx.post(
-            f"{b}/chat/completions",
-            headers=headers,
-            json={"model": model, "messages": messages, "temperature": 0.3},
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
-
-    # Ollama
-    import importlib as _imp
-    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
-    if str(_agents_dir) not in sys.path:
-        sys.path.insert(0, str(_agents_dir))
-    _cb = _imp.import_module("context_budget")
-    r = httpx.post(
-        f"{base_url}/api/chat",
-        json={"model": model, "messages": messages, "stream": False,
-              "options": {"temperature": 0.3, "num_ctx": _cb.get("num_ctx")}, "think": False},
-        timeout=60.0,
-    )
-    r.raise_for_status()
-    return r.json()["message"]["content"].strip()
-
+# call_llm_generate is imported from agent_base above (canonical multi-provider dispatch).
 
 # ── Domain meta generation ────────────────────────────────────────────────────
 
@@ -257,104 +192,7 @@ Rules:
 
 
 # ── Per-file summary generator ────────────────────────────────────────────────
-
-def _extract_snippet_for_summary(file_path: pathlib.Path, max_chars: int = 2000) -> str:
-    """
-    Extract a representative text snippet from a file to feed to the summariser.
-    Reuses the same lightweight extraction logic as embeddings.py.
-    """
-    ext = file_path.suffix.lower()
-    try:
-        if ext in {".txt", ".md", ".csv"}:
-            return file_path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
-
-        elif ext == ".docx":
-            import zipfile
-            with zipfile.ZipFile(file_path) as z:
-                with z.open("word/document.xml") as f:
-                    xml = f.read().decode("utf-8", errors="ignore")
-            text = re.sub(r"<[^>]+>", " ", xml)
-            return " ".join(text.split())[:max_chars]
-
-        elif ext == ".pdf":
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(str(file_path))
-                text = ""
-                for page in reader.pages[:4]:
-                    text += (page.extract_text() or "") + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[PDF: {file_path.name}]"
-
-        elif ext in {".pptx", ".ppt"}:
-            try:
-                from pptx import Presentation
-                prs = Presentation(str(file_path))
-                text = ""
-                for slide in prs.slides[:6]:
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text") and shape.text.strip():
-                            text += shape.text.strip() + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[PPTX: {file_path.name}]"
-
-        elif ext in {".xlsx", ".xls"}:
-            try:
-                # Large XLSX files (>50 MB) must use the streaming aggregator —
-                # openpyxl takes 80+ seconds to load a 160 MB file and only reads
-                # the first 40 rows, producing a generic header dump.  The streaming
-                # aggregator uses raw XML iterparse, reads all rows in one pass, and
-                # returns a structured revenue/data summary with actual totals.
-                MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
-                if file_path.stat().st_size > MAX_XLSX_BYTES:
-                    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
-                    if str(_agents_dir) not in sys.path:
-                        sys.path.insert(0, str(_agents_dir))
-                    from agent_base import _stream_xlsx_aggregate
-                    return _stream_xlsx_aggregate(file_path, max_chars)
-
-                import openpyxl
-                wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-                text = ""
-                for sheet in wb.worksheets[:2]:
-                    text += f"[Sheet: {sheet.title}]\n"
-                    for row in sheet.iter_rows(max_row=40, values_only=True):
-                        row_text = " | ".join(str(c) for c in row if c is not None)
-                        if row_text.strip():
-                            text += row_text + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[XLSX: {file_path.name}]"
-
-        elif ext == ".boxnote":
-            try:
-                data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
-                def walk(node):
-                    if isinstance(node, dict):
-                        if node.get("type") == "text":
-                            yield node.get("text", "")
-                        for v in node.values():
-                            yield from walk(v)
-                    elif isinstance(node, list):
-                        for item in node:
-                            yield from walk(item)
-                return " ".join(walk(data))[:max_chars]
-            except Exception:
-                return f"[BoxNote: {file_path.name}]"
-
-    except Exception as e:
-        return f"[Read error: {e}]"
-
-    return f"[Unsupported: {file_path.name}]"
-
+# _extract_snippet_for_summary delegates to embeddings.extract_text_snippet (canonical copy).
 
 def generate_file_summary(file_name: str, snippet: str) -> str:
     """
