@@ -48,9 +48,11 @@ import hashlib
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# context_budget is in agents/ at the repo root — resolve upward from scripts/
+# agents/ is in the repo root — resolve upward from scripts/ so agent_base
+# and context_budget are importable at module level.
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "agents"))
 from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
+from agent_base import _find_readme as find_readme, DEFAULT_BLOCKLIST  # noqa: E402
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -103,15 +105,10 @@ try:
 except ValueError:
     _RESYNC_INTERVAL = 24 * 3600
 
-_DEFAULT_BLOCKLIST = {
-    "agents", ".git", "__pycache__", ".ds_store", "node_modules",
-    ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
-}
-
 def _get_blocklist() -> set[str]:
     extra = os.environ.get("KB_IGNORE_FOLDERS", "")
     user  = {f.strip().lower() for f in extra.split(",") if f.strip()}
-    return _DEFAULT_BLOCKLIST | user
+    return DEFAULT_BLOCKLIST | user
 
 BLOCKLIST = _get_blocklist()
 
@@ -208,47 +205,9 @@ def is_knowledge_folder(path: pathlib.Path) -> bool:
 def discover_knowledge_folders() -> list[pathlib.Path]:
     return [p for p in sorted(WATCH_ROOT.iterdir()) if is_knowledge_folder(p)]
 
-def find_readme(folder: pathlib.Path) -> pathlib.Path | None:
-    """
-    Locate the README for a knowledge folder using a priority cascade:
-      1. Any .md whose name contains 'readme' (case-insensitive)
-      2. <FolderName>.md  (standard name used by generate.py)
-      3. Any .md file whose first 500 chars contain a Markdown heading (# …)
-      4. The first .md file found (last resort)
-
-    Fully dynamic — works for any user-chosen filename.
-    """
-    try:
-        md_files = [f for f in folder.iterdir()
-                    if f.is_file() and f.suffix.lower() == ".md"]
-    except Exception:
-        return None
-
-    if not md_files:
-        return None
-
-    # Priority 1: name contains "readme"
-    for f in md_files:
-        if "readme" in f.name.lower():
-            return f
-
-    # Priority 2: matches the folder name exactly (e.g. "ACE Docs.md")
-    folder_name_md = folder.name + ".md"
-    for f in md_files:
-        if f.name == folder_name_md:
-            return f
-
-    # Priority 3: first .md whose content starts with a Markdown heading
-    for f in md_files:
-        try:
-            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
-            if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
-                return f
-        except Exception:
-            continue
-
-    # Priority 4: first .md file
-    return md_files[0]
+# ── README finder — imported from agents/agent_base.py ───────────────────────
+# find_readme() is the canonical copy in agent_base._find_readme().
+# Imported at module level above (aliased to find_readme to preserve call sites).
 
 def ensure_readme(folder: pathlib.Path) -> pathlib.Path:
     """

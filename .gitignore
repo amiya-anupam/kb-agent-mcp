@@ -50,6 +50,7 @@ agents/vector_store/*.json
 
 # ── One-off HTML artifacts ────────────────────────────────────
 *.html
+!architecture-flow-diagram-kb-agent-mcp.html
 
 # ── Knowledge folder contents (private / local data) ─────────
 # Knowledge folders contain private documents — never commit them.
@@ -71,6 +72,15 @@ agents/agent_cp4i_docs.py
 agents/agent_skills.py
 agents/agent_d.py
 agents/agent_*_egg_info.py
+
+# ── Test scaffold artefacts (created by E2E test suite) ────────
+# These are written to the working tree by tests that ran before
+# the isolated_kb fixture fully contained writes. Adding them
+# here ensures they can never be accidentally committed if a
+# future test run leaks them again.
+MyDomain/
+no_domain_file.md
+agents/agent_mydomain.py
 
 # ── ChromaDB vector index (local, rebuilt by kb-agent-generate) ──
 .kb_index/

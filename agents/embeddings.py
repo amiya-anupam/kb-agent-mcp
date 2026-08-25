@@ -49,70 +49,41 @@ def _kb_root() -> pathlib.Path:
     # Default: two levels up from this file (agents/embeddings.py → KB root)
     return pathlib.Path(__file__).parent.parent
 
+# !! DO NOT REMOVE KB_ROOT from this module !!
+# test_noindex_guard.py patches it via monkeypatch.setattr(embeddings, "KB_ROOT", tmp_path).
+# _has_noindex_ancestor is imported from agent_base and reads agent_base.KB_ROOT internally,
+# so the patch doesn't affect the boundary check — but removing the name causes AttributeError
+# in those tests.
 KB_ROOT      = _kb_root()
 VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 
-# Import context_budget for embed_chars budget
+# Import shared helpers and XLSX config from agent_base (same agents/ directory)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import importlib as _importlib
 _cb = _importlib.import_module("context_budget")
+from agent_base import (
+    _has_noindex_ancestor,
+    folder_to_safe_name,
+    AGG_KEYWORDS,
+    PREFERRED_NUM_COLS,
+    DEFAULT_BLOCKLIST,
+    INCLUDE_EXTS,
+    SKIP_PATTERNS,
+)
 
 OLLAMA_URL   = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
 EMBED_MODEL  = os.environ.get("KB_EMBED_MODEL", "nomic-embed-text")
 LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 API_KEY      = os.environ.get("KB_API_KEY", "")
 
-# Folders/names to always exclude from domain discovery
-_DEFAULT_BLOCKLIST = {
-    "agents", ".git", "__pycache__", ".ds_store", "node_modules",
-    ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
-}
-
 def _user_blocklist() -> set[str]:
     raw = os.environ.get("KB_IGNORE_FOLDERS", "")
     return {f.strip().lower() for f in raw.split(",") if f.strip()}
 
-BLOCKLIST = _DEFAULT_BLOCKLIST | _user_blocklist()
-
-# File types to index
-INCLUDE_EXTS = {".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
-                ".csv", ".boxnote", ".ppt", ".doc"}
-
-SKIP_PATTERNS = {"readme", ".ds_store", "watch_kb", "__pycache__"}
-
-
-# ── .noindex sentinel check ───────────────────────────────────────────────────
-
-def _has_noindex_ancestor(path: pathlib.Path) -> bool:
-    """
-    Return True if any ancestor directory of *path* (up to KB_ROOT) contains
-    a `.noindex` sentinel file.
-
-    Mirrors the canonical implementation in kb_agent_mcp/file_parser so the
-    indexer respects the same exclusion rules as the MCP query layer.
-    """
-    try:
-        for parent in path.parents:
-            if (parent / ".noindex").exists():
-                return True
-            if parent == KB_ROOT:
-                break
-    except Exception:
-        pass
-    return False
+BLOCKLIST = DEFAULT_BLOCKLIST | _user_blocklist()
 
 # Chars of text used as embedding input per file
 SUMMARY_CHARS = 2000
-
-# ── Folder name → safe filename ───────────────────────────────────────────────
-
-def folder_to_safe_name(folder_name: str) -> str:
-    """Convert a folder name to a safe snake_case identifier."""
-    import re
-    name = folder_name.lower()
-    name = re.sub(r"[^a-z0-9]+", "_", name)
-    name = name.strip("_")
-    return name
 
 
 def index_path_for(folder_name: str) -> pathlib.Path:
@@ -313,45 +284,7 @@ def extract_text_snippet(file_path: pathlib.Path) -> str:
                 # extract_full_text() in agent_base.py will serve this cache
                 # at query time, avoiding the 50-100s open cost on big files.
                 #
-                # Same AGG_KEYWORDS and detection logic as agent_base.py so
-                # the cached summary is always in the expected format.
-                AGG_KEYWORDS = {
-                    # ── Product columns first (most semantically relevant for search) ──
-                    "ut lvl 30 name dynamic": "Product (UT L30)",
-                    "ut l30 name": "Product (UT L30)",
-                    "ut l30": "Product (UT L30)",
-                    "product family name": "Product Family",
-                    "reporting product family": "Reporting Product Family",
-                    "product": "Product",
-                    # ── Time columns ──
-                    "year": "Year", "quarter": "Quarter",
-                    "quarter in year": "Quarter In Year",
-                    # ── Standard finance columns ──
-                    "geography": "Geography",
-                    "geography name": "Geography",
-                    "market": "Market",
-                    "market name": "Market",
-                    "country": "Country",
-                    "finance family": "Finance Family",
-                    "revenue type": "Revenue Type",
-                    "reporting revenue type name": "Revenue Type",
-                    "on-prem or saas": "On-prem/SaaS",
-                    "division": "Division",
-                    # ── CRM deal columns ──
-                    "classification name": "Classification",
-                    "frozen client lifecycle name": "Client Lifecycle",
-                    # ── Renewal / ELA columns ──
-                    "status": "Status",
-                }
-
-                # Preferred numeric column names (checked before falling back
-                # to last-all-numeric heuristic). For CRM exports the relevant
-                # column is "Won", not the last numeric column.
-                PREFERRED_NUM_COLS = [
-                    "won", "total(cy cw won @ pc)", "rev act @ pc",
-                    "amount", "oppty value", "total",
-                ]
-
+                # AGG_KEYWORDS and PREFERRED_NUM_COLS imported from agent_base (module level).
                 wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
                 text_parts = []
 

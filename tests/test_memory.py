@@ -14,6 +14,7 @@ pytestmark = pytest.mark.asyncio
 def isolated_memory(tmp_path, monkeypatch):
     """Point session_memory_path at a temp dir so tests don't pollute the real store."""
     monkeypatch.setenv("KB_ROOT", str(tmp_path))
+    monkeypatch.setenv("KB_LLM_PROVIDER", "passthrough")
     import importlib
     import kb_agent_mcp.config as cfg_mod
     importlib.reload(cfg_mod)

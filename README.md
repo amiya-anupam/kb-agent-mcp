@@ -282,6 +282,7 @@ After running `scripts/setup.py`, your `.env` file is created automatically. Edi
 | `KB_STALE_DAYS` | `90` | Days before a file is flagged as stale by `watch_kb.py` (0 = disabled) |
 | `KB_GENERATE_TIMEOUT` | `900` | Timeout in seconds for the `generate.py` subprocess in `watch_kb.py` (increase for large folders) |
 | `KB_PASSTHROUGH_FALLBACK` | `true` | Auto-switch to passthrough when Ollama unreachable (`false` = disable) |
+| `KB_MEMORY_COMPRESS` | `true` | Set to `false` to disable LLM summarisation of long answers in session memory (uses sentence truncation instead) |
 
 ### Token budget variables (`agents/context_budget.py`)
 

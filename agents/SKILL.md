@@ -5,11 +5,14 @@ description: >
   specialist sub-agent automatically based on your knowledge folders.
   Use when asking about any content in your KnowledgeBase.
 
-  Current domains: auto-discovered from your KnowledgeBase folders.
-  Run `python3 generate.py` after adding or renaming folders to update this list.
+  Current domains (4):
+  - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
+  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewals, and related documentation.
+  - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
+  - **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  App Connect, ACE, migration, ACE, purchasing options, renewal, Cloud Pak for Integration, CP4I, presentation, skills, knowledge, application, what does my KnowledgeBase say, /kb, /agent
+  App Connect, ACE, migration, ACE, purchasing options, renewals, Cloud Pak for Integration, CP4I, presentation, skills, knowledge domain, notes, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -31,13 +34,10 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 **No document content is ever sent to Claude.**
 
 ## Current Domains
-
-Domains are auto-discovered from the folders in your KnowledgeBase root.
-After running `python3 generate.py`, this section is updated with your actual folder names and descriptions.
-
-Example after setup:
-- **My Project**: Documents and notes for My Project.
-- **Reference Docs**: Reference materials and guides.
+- **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
+- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewals, and related documentation.
+- **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
+- **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
 
 ## Usage
 Just ask naturally — Bob detects the intent and runs the agent:

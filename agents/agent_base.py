@@ -74,6 +74,71 @@ def _kb_root() -> pathlib.Path:
 KB_ROOT      = _kb_root()
 VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 
+# ── XLSX aggregation config ───────────────────────────────────────────────────
+# Single source of truth for both _stream_xlsx_aggregate() (>50 MB path) and
+# extract_full_text() (<50 MB path).  embeddings.py imports these directly.
+# kb_agent_mcp/file_parser.py keeps its own copy (_AGG_KEYWORDS) — intentional
+# package-boundary isolation; do not remove that copy.
+
+AGG_KEYWORDS: dict[str, str] = {
+    # ── Product columns first (most semantically relevant for search) ──
+    "ut lvl 30 name dynamic": "Product (UT L30)",
+    "ut l30 name":            "Product (UT L30)",
+    "ut l30":                 "Product (UT L30)",
+    "product family name":    "Product Family",
+    "reporting product family": "Reporting Product Family",
+    "product":                "Product",
+    # ── Time columns ──
+    "year": "Year", "quarter": "Quarter",
+    "quarter in year": "Quarter In Year",
+    # ── Standard finance columns ──
+    "geography":                    "Geography",
+    "geography name":               "Geography",
+    "market":                       "Market",
+    "market name":                  "Market",
+    "country":                      "Country",
+    "finance family":               "Finance Family",
+    "revenue type":                 "Revenue Type",
+    "reporting revenue type name":  "Revenue Type",
+    "on-prem or saas":              "On-prem/SaaS",
+    "division":                     "Division",
+    # ── CRM deal columns ──
+    "classification name":          "Classification",
+    "frozen client lifecycle name": "Client Lifecycle",
+    # ── Renewal / ELA columns ──
+    "status": "Status",
+}
+
+# Preferred numeric column names — checked in order; first match wins.
+# CRM exports use "Won"; revenue reports use "Rev Act @ PC".
+PREFERRED_NUM_COLS: list[str] = [
+    "won", "total(cy cw won @ pc)", "rev act @ pc",
+    "amount", "oppty value", "total",
+]
+
+
+# ── File discovery constants ──────────────────────────────────────────────────
+# Single source of truth for domain-discovery in embeddings.py, generate.py,
+# and watch_kb.py.  watch_kb.py intentionally *extends* INCLUDE_EXTS with
+# image types and uses a different SKIP_PATTERNS (must exclude .watch.log,
+# thumbs.db, ~$ temp files) — it imports DEFAULT_BLOCKLIST only.
+# ask.py and agent_knowledgebase.py have larger blocklists (they add infra
+# folders like scripts/, tests/, .kb_index/) and keep their own local copies.
+
+DEFAULT_BLOCKLIST: frozenset[str] = frozenset({
+    "agents", ".git", "__pycache__", ".ds_store", "node_modules",
+    ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
+})
+
+INCLUDE_EXTS: frozenset[str] = frozenset({
+    ".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
+    ".csv", ".boxnote", ".ppt", ".doc",
+})
+
+SKIP_PATTERNS: frozenset[str] = frozenset({
+    "readme", ".ds_store", "watch_kb", "__pycache__",
+})
+
 
 # ── .noindex sentinel check ───────────────────────────────────────────────────
 
@@ -385,40 +450,6 @@ def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> st
     import xml.etree.ElementTree as ET
     from collections import defaultdict
 
-    AGG_KEYWORDS = {
-        # ── Product columns first (most semantically relevant for search) ──
-        "ut lvl 30 name dynamic": "Product (UT L30)",
-        "ut l30 name": "Product (UT L30)",
-        "ut l30": "Product (UT L30)",
-        "product family name": "Product Family",
-        "reporting product family": "Reporting Product Family",
-        "product": "Product",
-        # ── Time columns ──
-        "year": "Year", "quarter": "Quarter",
-        "quarter in year": "Quarter In Year",
-        # ── Standard finance columns ──
-        "geography": "Geography",
-        "geography name": "Geography",
-        "market": "Market",
-        "market name": "Market",
-        "country": "Country",
-        "finance family": "Finance Family",
-        "revenue type": "Revenue Type",
-        "reporting revenue type name": "Revenue Type",
-        "on-prem or saas": "On-prem/SaaS",
-        "division": "Division",
-        # ── CRM deal columns ──
-        "classification name": "Classification",
-        "frozen client lifecycle name": "Client Lifecycle",
-        # ── Renewal / ELA columns ──
-        "status": "Status",
-    }
-
-    PREFERRED_NUM_COLS = [
-        "won", "total(cy cw won @ pc)", "rev act @ pc",
-        "amount", "oppty value", "total",
-    ]
-
     try:
         with zipfile.ZipFile(str(file_path), "r") as zf:
             # Find worksheets
@@ -681,43 +712,6 @@ def extract_full_text(file_path: pathlib.Path, max_chars: int | None = None) -> 
                 #      per-group totals on the fly.
                 #   3. Emit aggregated summary.  Falls back to first-200-rows dump
                 #      when no aggregatable structure is found.
-
-                AGG_KEYWORDS = {
-                    # ── Product columns first (most semantically relevant for search) ──
-                    "ut lvl 30 name dynamic": "Product (UT L30)",
-                    "ut l30 name": "Product (UT L30)",
-                    "ut l30": "Product (UT L30)",
-                    "product family name": "Product Family",
-                    "reporting product family": "Reporting Product Family",
-                    "product": "Product",
-                    # ── Time columns ──
-                    "year": "Year", "quarter": "Quarter",
-                    "quarter in year": "Quarter In Year",
-                    # ── Standard finance columns ──
-                    "geography": "Geography",
-                    "geography name": "Geography",
-                    "market": "Market",
-                    "market name": "Market",
-                    "country": "Country",
-                    "finance family": "Finance Family",
-                    "revenue type": "Revenue Type",
-                    "reporting revenue type name": "Revenue Type",
-                    "on-prem or saas": "On-prem/SaaS",
-                    "division": "Division",
-                    # ── CRM deal columns ──
-                    "classification name": "Classification",
-                    "frozen client lifecycle name": "Client Lifecycle",
-                    # ── Renewal / ELA columns ──
-                    "status": "Status",
-                }
-
-                # Preferred numeric column names (checked before falling back
-                # to last-all-numeric heuristic).  For CRM exports the relevant
-                # column is "Won", not the last numeric column.
-                PREFERRED_NUM_COLS = [
-                    "won", "total(cy cw won @ pc)", "rev act @ pc",
-                    "amount", "oppty value", "total",
-                ]
 
                 text_parts = []
                 wb = openpyxl.load_workbook(

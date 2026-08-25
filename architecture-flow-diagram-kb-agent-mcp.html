@@ -1,0 +1,399 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>kb-agent-mcp · Architecture Flow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d0d0d;
+    font-family: -apple-system, "Segoe UI", system-ui, monospace, sans-serif;
+    color: #ccc;
+    padding: 24px;
+    min-width: 980px;
+  }
+  .diagram {
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    padding: 20px 24px 16px;
+    max-width: 1260px;
+    margin: 0 auto;
+    position: relative;
+  }
+  .title-bar {
+    font-size: 11px;
+    color: #555;
+    margin-bottom: 18px;
+    letter-spacing: 0.03em;
+  }
+
+  /* ── layout grid ── */
+  .flow-grid {
+    display: grid;
+    grid-template-columns: 1fr 30px 1fr;
+    grid-template-rows: auto;
+    gap: 0;
+  }
+  .left  { grid-column: 1; }
+  .right { grid-column: 3; }
+  .full  { grid-column: 1 / 4; }
+  .arrow-col { grid-column: 2; display: flex; align-items: center; justify-content: center; }
+
+  /* ── nodes ── */
+  .node {
+    border: 1px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 9px 13px;
+    background: #1a1a1a;
+    margin: 4px 0;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .node .label { font-size: 13px; font-weight: 600; color: #ddd; }
+  .node .sub   { font-size: 10.5px; color: #777; margin-top: 2px; }
+
+  .node-user    { background: #1c1c1c; border-color: #444; }
+  .node-gate    { background: #1f1a00; border-color: #c8960a; }
+  .node-gate .label { color: #f0b429; }
+  .node-blocked { background: #2a0a0a; border-color: #7a2020; border-style: dashed; font-size: 11px; color: #cc4444; padding: 5px 10px; display: inline-block; border-radius: 16px; margin: 4px 0 6px 16px; }
+  .node-orch    { background: #1a1a1a; border-color: #555; }
+  .node-domain  { background: #1a1a1a; border-color: #555; }
+  .node-agg     { background: #1e1a3a; border-color: #5555cc; }
+  .node-agg .label { color: #8888ff; }
+  .node-answer  { background: #1a1a1a; border-color: #555; }
+  .node-analyst { background: #1a1a1a; border-color: #555; }
+  .node-schema  { background: #1a1a1a; border-color: #444; }
+  .node-engine  { background: #1a1a1a; border-color: #444; }
+  .node-vector  { background: #0d1f0d; border-color: #2d6e2d; border-radius: 50% / 12px; text-align: center; padding: 14px 10px; }
+  .node-vector .label { color: #5fb85f; }
+  .node-rawfiles { background: #1a1000; border-color: #7a5500; border-radius: 50% / 10px; padding: 10px 13px; }
+  .node-rawfiles .label { color: #cc9922; }
+
+  /* ── bottom boxes ── */
+  .bottom-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr;
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .sink {
+    border: 1.5px dashed #2a4a7a;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #101820;
+    font-size: 11px;
+    color: #6ab0e8;
+    line-height: 1.5;
+  }
+  .sink .label { font-size: 12px; font-weight: 600; }
+  .sink .sub   { color: #4a7090; font-size: 10px; margin-top: 2px; }
+
+  /* ── arrows ── */
+  .arrow-down { text-align: center; color: #666; font-size: 18px; line-height: 1; margin: 2px 0; }
+  .arrow-right { color: #666; font-size: 14px; }
+  .arrow-allowed { color: #4caf50; font-size: 11px; display: flex; align-items: center; gap: 4px; }
+  .arrow-allowed::before { content: "✅"; }
+
+  /* ── section labels ── */
+  .route-label {
+    text-align: center;
+    font-size: 10.5px;
+    color: #555;
+    padding: 2px 0 4px;
+    letter-spacing: 0.04em;
+  }
+
+  /* ── tool tags ── */
+  .tool-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .tool-tag {
+    background: #1a2a1a;
+    border: 1px solid #2d4d2d;
+    border-radius: 3px;
+    font-size: 10px;
+    color: #7ab87a;
+    padding: 1px 5px;
+    font-family: monospace;
+  }
+  .tool-tag.sec { background: #1a1a00; border-color: #4a4a00; color: #b0a020; }
+  .tool-tag.ana { background: #001a2a; border-color: #004060; color: #4ab0e0; }
+  .tool-tag.ses { background: #1a001a; border-color: #4a004a; color: #c080c0; }
+
+  /* ── two-column inner ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 40px 1fr;
+    align-items: start;
+    gap: 0;
+    margin-top: 6px;
+  }
+  .col-center { display: flex; align-items: center; justify-content: center; font-size: 18px; color: #555; padding-top: 30px; }
+
+  /* ── legend ── */
+  .legend {
+    margin-top: 18px;
+    border-top: 1px solid #222;
+    padding-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    font-size: 10.5px;
+    color: #555;
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .leg-line { width: 28px; height: 2px; background: #888; }
+  .leg-dash { width: 28px; height: 2px; border-top: 2px dashed #c8960a; }
+  .leg-blue { width: 28px; height: 2px; border-top: 2px dashed #2a6aaa; }
+  .leg-sq-gate  { width: 12px; height: 12px; border: 1.5px solid #c8960a; background: #1f1a00; }
+  .leg-sq-agg   { width: 12px; height: 12px; border: 1.5px solid #5555cc; background: #1e1a3a; }
+
+  /* memory compress note */
+  .compress-note {
+    font-size: 10px;
+    color: #555;
+    border-left: 2px solid #2a3a2a;
+    padding-left: 8px;
+    margin-top: 4px;
+    line-height: 1.5;
+  }
+
+  .footer-bar {
+    text-align: center;
+    margin-top: 16px;
+    font-size: 10.5px;
+    color: #444;
+    letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+<div class="diagram">
+  <div class="title-bar">kb-agent-serve (FastMCP server process)</div>
+
+  
+  <div class="flow-grid" style="align-items:start">
+    <div class="left">
+      <div class="node node-user">
+        <div class="label">User question</div>
+        <div class="sub">(via MCP tool call)</div>
+      </div>
+    </div>
+    <div class="arrow-col"><span class="arrow-right">→</span></div>
+    <div class="right">
+      <div class="node node-gate">
+        <div class="label">Security Gate</div>
+        <div class="sub">check_confidential() · acknowledge_gate()</div>
+      </div>
+      <div class="node-blocked">🚫 blocked — token required</div>
+    </div>
+  </div>
+
+  
+  <div style="display:flex;align-items:flex-start;margin:4px 0 0 0;gap:0">
+    <div style="width:calc(50% + 15px)"></div>
+    <div>
+      <span class="arrow-allowed">allowed</span>
+    </div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr;margin-top:2px">
+    
+    <div></div>
+    <div></div>
+    <div>
+      <div class="node node-orch">
+        <div class="label">Orchestrator</div>
+        <div class="sub">format intent · keyword route · LLM classify</div>
+      </div>
+    </div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr;margin-top:6px">
+    <div class="route-label">Doc question</div>
+    <div></div>
+    <div class="route-label">Data question</div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr">
+    <div class="arrow-down">↓</div>
+    <div></div>
+    <div class="arrow-down">↓</div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr;align-items:start;gap:0">
+    <div>
+      <div class="two-col">
+        <div>
+          <div class="node node-domain">
+            <div class="label">Domain sub-agent × N</div>
+            <div class="sub">parallel asyncio.gather · domain_rules.py</div>
+          </div>
+        </div>
+        <div class="col-center">→</div>
+        <div>
+          <div class="node node-vector">
+            <div class="label">Vector index</div>
+            <div class="sub">(ChromaDB)</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div></div>
+    <div>
+      <div class="node node-analyst" style="border-left:3px solid #444">
+        <div style="display:flex;align-items:center;gap:6px">
+          <span style="font-size:16px">📊</span>
+          <div>
+            <div class="label">Data Analyst agent</div>
+            <div class="sub">inspector.py · planner.py · engine.py</div>
+          </div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 16px 1fr;margin-top:6px;align-items:start">
+        <div class="node node-schema" style="font-size:11px;text-align:center"><div class="label" style="font-size:11px">Schema Inspector</div></div>
+        <div></div>
+        <div class="node node-engine" style="font-size:11px;text-align:center"><div class="label" style="font-size:11px">Query Engine</div></div>
+      </div>
+      <div style="margin-top:6px">
+        <div class="node node-rawfiles">
+          <div class="label">Raw files</div>
+          <div class="sub">.xlsx .csv .json .pdf .docx</div>
+          <div class="sub">.pptx .png .jpg .gif .webp …</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr">
+    <div class="arrow-down">↓</div>
+    <div></div>
+    <div class="arrow-down">↓</div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr;align-items:start">
+    <div>
+      <div class="node node-agg">
+        <div class="label">Aggregator</div>
+        <div class="sub">aggregate() · merge answers · source citations</div>
+      </div>
+    </div>
+    <div></div>
+    <div>
+      <div class="node node-answer">
+        <div class="label">Answer + Reasoning</div>
+      </div>
+    </div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr">
+    <div class="arrow-down">↓</div>
+    <div></div>
+    <div></div>
+  </div>
+
+  
+  <div style="display:grid;grid-template-columns:1fr 30px 1fr">
+    <div>
+      <div class="node node-answer">
+        <div class="label">Answer + [Source: …] citations</div>
+        <div class="sub">markdown response returned to MCP client</div>
+        <div class="compress-note">
+          Long answers compressed via 3-tier pipeline before memory storage:<br />
+          Tier 1 LLM summarisation (skipped if KB_MEMORY_COMPRESS=false or passthrough) →
+          Tier 2 sentence truncation → Tier 3 hard truncation
+        </div>
+      </div>
+    </div>
+    <div></div>
+    <div></div>
+  </div>
+
+  
+  <div class="arrow-down" style="margin-top:6px">↓ ↓ ↓ ↓  (async write-out)</div>
+  <div class="bottom-row" style="margin-top:8px">
+    <div class="sink">
+      <div class="label">session_memory/</div>
+      <div class="sub">add_turn_sync() — every ask()<br />show_memory() · resume_session()<br />list_sessions() · clear_memory()</div>
+    </div>
+    <div class="sink">
+      <div class="label">audit.jsonl</div>
+      <div class="sub">audit.log_turn() — every ask()<br />read_audit() · audit_summary()</div>
+    </div>
+    <div class="sink">
+      <div class="label">feedback.jsonl</div>
+      <div class="sub">feedback.record() — rate_answer()</div>
+    </div>
+    <div class="sink">
+      <div class="label">writeback.py</div>
+      <div class="sub">update_document() → KB_ROOT files</div>
+    </div>
+  </div>
+
+  
+  <div class="node" style="margin-top:14px;background:#111;border-color:#2a2a2a">
+    <div class="label" style="color:#888;font-size:11px;margin-bottom:6px">19 registered MCP tools</div>
+    <div style="margin-bottom:4px;font-size:10px;color:#555">Knowledge Base</div>
+    <div class="tool-group">
+      <span class="tool-tag">ask</span>
+      <span class="tool-tag">list_domains</span>
+      <span class="tool-tag">reindex</span>
+      <span class="tool-tag">clear_memory</span>
+      <span class="tool-tag">show_memory</span>
+    </div>
+    <div style="margin:6px 0 4px;font-size:10px;color:#555">Security Gate</div>
+    <div class="tool-group">
+      <span class="tool-tag sec">check_confidential</span>
+      <span class="tool-tag sec">acknowledge_gate</span>
+    </div>
+    <div style="margin:6px 0 4px;font-size:10px;color:#555">Data Analyst</div>
+    <div class="tool-group">
+      <span class="tool-tag ana">analyze_file</span>
+      <span class="tool-tag ana">suggest_questions</span>
+      <span class="tool-tag ana">query_data</span>
+      <span class="tool-tag ana">refine_query</span>
+      <span class="tool-tag ana">compare_data</span>
+    </div>
+    <div style="margin:6px 0 4px;font-size:10px;color:#555">Session &amp; Feedback</div>
+    <div class="tool-group">
+      <span class="tool-tag ses">domain_status</span>
+      <span class="tool-tag ses">read_audit</span>
+      <span class="tool-tag ses">audit_summary</span>
+      <span class="tool-tag ses">resume_session</span>
+      <span class="tool-tag ses">list_sessions</span>
+      <span class="tool-tag ses">rate_answer</span>
+      <span class="tool-tag ses">update_document</span>
+    </div>
+  </div>
+
+  
+  <div class="legend">
+    <div style="font-size:10.5px;color:#444;font-weight:600;align-self:center">Legend</div>
+    <div class="legend-item"><div class="leg-line"></div><span>Primary data flow</span></div>
+    <div class="legend-item"><div class="leg-dash"></div><span>Security gate path</span></div>
+    <div class="legend-item"><div class="leg-blue"></div><span>Async write-out (audit / memory / feedback)</span></div>
+    <div class="legend-item"><div class="leg-sq-gate"></div><span>Security Gate — blocks ask() until one-time token is acknowledged</span></div>
+    <div class="legend-item"><div class="leg-sq-agg"></div><span>Aggregator — synthesises multi-domain answers + inline [Source: …] citations</span></div>
+  </div>
+  <div style="margin-top:8px;font-size:10px;color:#444">
+    * Raw files include images (.png .jpg .gif .webp) — text extracted via OCR when KB_OCR_ENABLED=true
+  </div>
+
+  <div class="footer-bar">kb-agent-mcp · Architecture Flow · v3 (19 tools)</div>
+</div>
+
+<div style="text-align:center;margin-top:20px;font-size:12px;color:#333;border-top:1px solid #1a1a1a;padding-top:12px">Made with IBM Bob</div>
+</body>
+</html>

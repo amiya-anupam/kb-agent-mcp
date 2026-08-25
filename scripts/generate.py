@@ -49,23 +49,24 @@ def load_env(root: pathlib.Path):
 # relative paths (agents/, .env, requirements.txt, etc.) stay correct.
 SCRIPT_DIR = pathlib.Path(__file__).parent.parent.resolve()
 
+# Make agents/ importable at module level (needed for _find_readme and other
+# shared helpers).  Must come before any `from agent_base import …` statement.
+sys.path.insert(0, str(SCRIPT_DIR / "agents"))
+from agent_base import (  # noqa: E402
+    _find_readme,
+    DEFAULT_BLOCKLIST,
+    INCLUDE_EXTS,
+    SKIP_PATTERNS,
+)
+
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
     return pathlib.Path(raw).resolve() if raw else SCRIPT_DIR
 
-_DEFAULT_BLOCKLIST = {
-    "agents", ".git", "__pycache__", ".ds_store", "node_modules",
-    ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
-}
-
 def get_blocklist() -> set[str]:
     extra = os.environ.get("KB_IGNORE_FOLDERS", "")
     user  = {f.strip().lower() for f in extra.split(",") if f.strip()}
-    return _DEFAULT_BLOCKLIST | user
-
-INCLUDE_EXTS  = {".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
-                 ".csv", ".boxnote", ".ppt", ".doc"}
-SKIP_PATTERNS = {"readme", ".ds_store", "watch_kb", "__pycache__"}
+    return DEFAULT_BLOCKLIST | user
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -452,50 +453,9 @@ def build_file_summaries(
     return folder_summaries
 
 
-# ── README finder (shared by stub generator and stale-check) ─────────────────
-
-def _find_readme(folder: pathlib.Path) -> pathlib.Path | None:
-    """
-    Locate the README for a knowledge folder using a priority cascade:
-      1. Any .md whose name contains 'readme' (case-insensitive)
-      2. <FolderName>.md  (standard name used by this generator)
-      3. Any .md file whose first 500 chars contain a Markdown heading (# …)
-      4. The first .md file found (last resort)
-
-    Fully dynamic — works for any user-chosen filename.
-    """
-    try:
-        md_files = [f for f in folder.iterdir()
-                    if f.is_file() and f.suffix.lower() == ".md"]
-    except Exception:
-        return None
-
-    if not md_files:
-        return None
-
-    # Priority 1: name contains "readme"
-    for f in md_files:
-        if "readme" in f.name.lower():
-            return f
-
-    # Priority 2: matches the folder name exactly (e.g. "ACE Docs.md")
-    folder_name_md = folder.name + ".md"
-    for f in md_files:
-        if f.name == folder_name_md:
-            return f
-
-    # Priority 3: first .md whose content starts with a Markdown heading
-    for f in md_files:
-        try:
-            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
-            if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
-                return f
-        except Exception:
-            continue
-
-    # Priority 4: first .md file
-    return md_files[0]
-
+# ── README finder — imported from agents/agent_base.py ───────────────────────
+# _find_readme() is now the single canonical copy in agent_base.py.
+# This script imports it at module level (see the sys.path setup near line 50).
 
 # ── README stub generator (for new folders with no README) ───────────────────
 

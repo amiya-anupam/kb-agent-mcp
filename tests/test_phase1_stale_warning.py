@@ -197,8 +197,10 @@ class TestStaleWarningResilience:
 def _setup_stale_test(tmp_path, monkeypatch):
     """Shared setup for stale_file_count integration tests.
 
-    Reloads config AND resets the vector_store ChromaDB client so it opens
-    against the tmp_path rather than the real KB_ROOT.
+    Reloads config AND reloads vector_store so its module-level cfg reference
+    is re-bound to the reloaded singleton (which points to tmp_path).
+    Simply resetting _client = None is insufficient because _get_client() uses
+    the stale cfg captured at original import time.
     """
     import importlib
     import kb_agent_mcp.config as config_mod
@@ -206,8 +208,9 @@ def _setup_stale_test(tmp_path, monkeypatch):
 
     monkeypatch.setenv("KB_ROOT", str(tmp_path))
     importlib.reload(config_mod)
-    # Reset the ChromaDB client singleton so it re-opens at the new path
-    vs_mod._client = None
+    # Reload vector_store so its top-level `from kb_agent_mcp.config import cfg`
+    # re-executes and picks up the new singleton whose kb_index_path → tmp_path.
+    importlib.reload(vs_mod)
 
 
 def test_stale_file_count_returns_tuple(tmp_path, monkeypatch):

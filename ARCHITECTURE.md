@@ -11,9 +11,7 @@ Every statement here is grounded in the source code — no speculation.
 
 ## System overview
 
-[![Architecture Flow Diagram](architecture%20flow%20diagram.png)](architecture%20flow%20diagram.png)
-
-The diagram above shows all three pipelines and every major component.
+The ASCII diagram in the section below shows all three pipelines and every major component.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
@@ -470,7 +468,11 @@ cache without disk I/O. `_save_sync()` writes to both cache and disk.
 Session lifecycle:
 - Expires after `KB_SESSION_TIMEOUT_HOURS` of inactivity (reset to empty on access)
 - Last `KB_SESSION_MAX_TURNS` turns retained (`messages[:KB_SESSION_MAX_TURNS*2]`)
-- Assistant answers truncated to `KB_SESSION_MAX_ANSWER_CHARS` before storage
+- Assistant answers compressed before storage via a three-tier pipeline:
+  - **Tier 1** — LLM one-shot summarisation (temperature=0, 8 s timeout). Skipped
+    when `KB_MEMORY_COMPRESS=false` or `KB_LLM_PROVIDER=passthrough`.
+  - **Tier 2** — Sentence-boundary truncation within `KB_SESSION_MAX_ANSWER_CHARS`.
+  - **Tier 3** — Hard character truncation (final safety net, always available).
 
 Session filename is sanitised: `_SAFE_SESSION_RE = re.compile(r"[^a-zA-Z0-9_\-]")`.
 
@@ -1137,7 +1139,10 @@ cli/
 └── status.py    ──→  vector_store.py, config.py
 ```
 
-All modules import `config.cfg` at module load time (frozen dataclass singleton).
+Most modules import `config.cfg` at module load time (frozen dataclass singleton).
+Exception: `domain_agent.stale_file_count()` uses a deferred `from kb_agent_mcp.config
+import cfg as _cfg` inside the function body so that test fixtures that reload
+`config` pick up the updated singleton rather than the stale module-level reference.
 No circular imports — `config.py` has no imports from the package.
 `security_gate.py` imports `file_parser._has_noindex_ancestor` and
 `file_parser._extract_sync`; `file_parser.py` does not import `security_gate.py`.
@@ -1168,7 +1173,8 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_NUM_CTX` | `32768` | `base_agent.py` | Ollama `num_ctx` parameter |
 | `KB_SESSION_TIMEOUT_HOURS` | `2` | `memory.py` | Session auto-expiry in hours |
 | `KB_SESSION_MAX_TURNS` | `20` | `memory.py` | Max turns retained per session |
-| `KB_SESSION_MAX_ANSWER_CHARS` | `400` | `memory.py` | Answer characters stored in session history |
+| `KB_SESSION_MAX_ANSWER_CHARS` | `400` | `memory.py` | Max characters of an assistant answer stored in session history (Tier 2/3 truncation limit) |
+| `KB_MEMORY_COMPRESS` | `true` | `memory.py` | Set to `false` to disable Tier 1 LLM summarisation and always use sentence truncation |
 | `KB_STALE_CHECK_TTL_SECONDS` | `60` | `server.py` | Seconds between mtime scans in `ask()` (0 = disabled) |
 | `KB_BUDGET_PASSTHROUGH_THRESHOLD` | `0.8` | `orchestrator.py` | Fraction of `KB_BUDGET_TOTAL` that triggers `top_n` reduction in passthrough mode |
 | `KB_FORMAT_DEFAULT` | _(empty)_ | `server.py` | Default output format when none is specified |
