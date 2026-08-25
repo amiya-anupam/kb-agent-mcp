@@ -566,7 +566,30 @@ async def ask(
     if not tasks:
         return f"No matching domain agents for: {domain_names}"
 
-    results = await asyncio.gather(*tasks, return_exceptions=False)
+    # return_exceptions=True so a single failing domain never cancels the others.
+    # Exception results are converted to an error-answer dict so the merge /
+    # aggregation path sees a uniform list and can still return partial answers.
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for name, outcome in zip(
+        [n for n in domain_names if n in agents], raw
+    ):
+        if isinstance(outcome, BaseException):
+            logger.warning("Domain agent %r failed: %s", name, outcome)
+            results.append({
+                "agent":       name,
+                "answer":      f"[{name}: retrieval failed — {outcome}]",
+                "sources":     [],
+                "found":       False,
+                "passthrough": False,
+            })
+        else:
+            results.append(outcome)
+
+    # If every domain failed, surface a clear message rather than an empty merge.
+    if all(not r.get("found") and "retrieval failed" in r.get("answer", "") for r in results):
+        failed_names = ", ".join(r["agent"] for r in results)
+        return f"All domain agents failed to respond ({failed_names}). Check your LLM connection or run `reindex()`."
 
     # ── Feature 6: Cross-domain aggregation ──────────────────────────────────
     # When results come from ≥2 non-passthrough LLM domains, try to produce a

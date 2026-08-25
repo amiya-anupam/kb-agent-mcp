@@ -7,12 +7,12 @@ description: >
 
   Current domains (4):
   - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewals, and related documentation.
+  - **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
   - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
   - **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  App Connect, ACE, migration, ACE, purchasing options, renewals, Cloud Pak for Integration, CP4I, presentation, skills, knowledge domain, notes, what does my KnowledgeBase say, /kb, /agent
+  App Connect, ACE, migration, ACE, purchasing options, renewal, Cloud Pak for Integration, CP4I, presentation, skills, knowledge domain, notes, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -35,7 +35,7 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 
 ## Current Domains
 - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewals, and related documentation.
+- **BizOps**: Folder containing IBM App Connect Enterprise (ACE) purchasing options, renewal materials, and related tracking documents.
 - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
 - **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
 

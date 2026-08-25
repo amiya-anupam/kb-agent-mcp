@@ -1198,7 +1198,6 @@ independently from the same `KB_ROOT`.
 | Component | Path | Status |
 |---|---|---|
 | Legacy CLI | `agents/agent_knowledgebase.py` | Still works; reads same `.kb_index/` |
-| Ingest script | `agents/ingest.py` | Still works; writes JSON context files |
 | Setup shim | `scripts/setup.py` | Thin shim → `kb_agent_mcp.cli.setup` |
 | Bob skill | `agents/SKILL.md` | Active; points at legacy agent |
 | MCP server | `kb_agent_mcp/server.py` | New canonical entry point |

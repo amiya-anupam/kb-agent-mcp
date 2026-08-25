@@ -239,7 +239,8 @@ async def build_all_domain_agents() -> dict[str, DomainAgent]:
     kb_root = _cfg.kb_root_path
     try:
         entries = list(kb_root.iterdir())
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not list KB_ROOT %s: %s", kb_root, exc)
         return agents
     for entry in sorted(entries, key=lambda p: p.name):
         if not entry.is_dir():
