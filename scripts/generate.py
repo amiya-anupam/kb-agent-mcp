@@ -59,6 +59,7 @@ from agent_base import (  # noqa: E402
     SKIP_PATTERNS,
     should_skip,
     folder_to_safe_name,
+    call_llm_generate,
 )
 from embeddings import extract_text_snippet as _extract_snippet_for_summary  # noqa: E402
 
@@ -126,63 +127,7 @@ def llm_available() -> bool:
         return False
 
 
-def call_llm_generate(prompt: str) -> str:
-    """Call the LLM with a plain prompt and return text."""
-    import httpx
-
-    provider  = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
-    base_url  = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
-    model     = os.environ.get("KB_MODEL", "qwen3:14b")
-    api_key   = os.environ.get("KB_API_KEY", "")
-    messages  = [{"role": "user", "content": prompt}]
-
-    if provider == "anthropic":
-        headers = {
-            "x-api-key":         api_key,
-            "anthropic-version": "2023-06-01",
-            "Content-Type":      "application/json",
-        }
-        r = httpx.post(
-            f"{base_url}/v1/messages",
-            headers=headers,
-            json={"model": model, "max_tokens": 1024,
-                  "temperature": 0.3, "messages": messages},
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()["content"][0]["text"].strip()
-
-    if provider in ("openai", "custom"):
-        b = base_url.rstrip("/")
-        if "11434" in b and not b.endswith("/v1"):
-            b = f"{b}/v1"
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        r = httpx.post(
-            f"{b}/chat/completions",
-            headers=headers,
-            json={"model": model, "messages": messages, "temperature": 0.3},
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
-
-    # Ollama
-    import importlib as _imp
-    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
-    if str(_agents_dir) not in sys.path:
-        sys.path.insert(0, str(_agents_dir))
-    _cb = _imp.import_module("context_budget")
-    r = httpx.post(
-        f"{base_url}/api/chat",
-        json={"model": model, "messages": messages, "stream": False,
-              "options": {"temperature": 0.3, "num_ctx": _cb.get("num_ctx")}, "think": False},
-        timeout=60.0,
-    )
-    r.raise_for_status()
-    return r.json()["message"]["content"].strip()
-
+# call_llm_generate is imported from agent_base above (canonical multi-provider dispatch).
 
 # ── Domain meta generation ────────────────────────────────────────────────────
 

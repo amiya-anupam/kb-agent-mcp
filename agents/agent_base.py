@@ -818,6 +818,16 @@ def call_llm(messages: list[dict], temperature: float = 0.2) -> str:
     return _call_ollama(messages, temperature)
 
 
+def call_llm_generate(prompt: str) -> str:
+    """
+    Call the LLM with a plain text prompt and return the response.
+    Convenience wrapper used by generate.py and watch_kb.py for single-turn
+    generation tasks (domain descriptions, file summaries, etc.).
+    Uses temperature=0.3 — slightly more creative than the default RAG setting.
+    """
+    return call_llm([{"role": "user", "content": prompt}], temperature=0.3)
+
+
 def _call_ollama(messages: list[dict], temperature: float) -> str:
     import httpx
     try:
