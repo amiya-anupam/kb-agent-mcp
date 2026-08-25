@@ -175,6 +175,19 @@ def folder_to_safe_name(name: str) -> str:
     return n.strip("_")
 
 
+def should_skip(path: pathlib.Path) -> bool:
+    """Return True if this file should be excluded from indexing.
+
+    Skips:
+    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
+    • any file whose ancestor folder contains a `.noindex` sentinel file
+    """
+    name = path.name.lower()
+    if any(p in name for p in SKIP_PATTERNS):
+        return True
+    return _has_noindex_ancestor(path)
+
+
 def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
     """
     Append a format instruction to a system prompt.

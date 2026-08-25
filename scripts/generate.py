@@ -57,6 +57,8 @@ from agent_base import (  # noqa: E402
     DEFAULT_BLOCKLIST,
     INCLUDE_EXTS,
     SKIP_PATTERNS,
+    should_skip,
+    folder_to_safe_name,
 )
 
 def resolve_kb_root() -> pathlib.Path:
@@ -67,19 +69,6 @@ def get_blocklist() -> set[str]:
     extra = os.environ.get("KB_IGNORE_FOLDERS", "")
     user  = {f.strip().lower() for f in extra.split(",") if f.strip()}
     return DEFAULT_BLOCKLIST | user
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def should_skip(path: pathlib.Path) -> bool:
-    return any(p in path.name.lower() for p in SKIP_PATTERNS)
-
-
-def folder_to_safe_name(name: str) -> str:
-    """ACE Docs → ace_docs  |  My Sales & Revenue → my_sales_revenue"""
-    n = name.lower()
-    n = re.sub(r"[^a-z0-9]+", "_", n)
-    n = n.strip("_")
-    return n
 
 
 def agent_filename(folder_name: str) -> str:

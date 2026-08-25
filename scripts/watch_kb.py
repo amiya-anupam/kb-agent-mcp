@@ -52,7 +52,12 @@ from watchdog.events import FileSystemEventHandler
 # and context_budget are importable at module level.
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "agents"))
 from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
-from agent_base import _find_readme as find_readme, DEFAULT_BLOCKLIST  # noqa: E402
+from agent_base import (  # noqa: E402
+    _find_readme as find_readme,
+    DEFAULT_BLOCKLIST,
+    folder_to_safe_name,
+    _has_noindex_ancestor,
+)
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -122,14 +127,8 @@ AUDIT_LOG_PATH     = SCRIPT_DIR / ".kb_index" / "audit.jsonl"
 
 SUMMARY_EXTRACT_CHARS = 3000
 
-# ── Folder name helpers (all dynamic — never hardcoded) ───────────────────────
-
-def folder_to_safe_name(folder_name: str) -> str:
-    """Convert any folder name to a safe snake_case identifier."""
-    name = folder_name.lower()
-    name = re.sub(r"[^a-z0-9]+", "_", name)
-    return name.strip("_")
-
+# ── Folder name helpers ───────────────────────────────────────────────────────
+# folder_to_safe_name is imported from agent_base (canonical copy).
 
 def agent_filename(folder_name: str) -> str:
     return f"agent_{folder_to_safe_name(folder_name)}.py"
@@ -217,35 +216,17 @@ def ensure_readme(folder: pathlib.Path) -> pathlib.Path:
     print(f"[KB Watcher] Created README: {readme.name}", flush=True)
     return readme
 
-def _has_noindex_ancestor(path: pathlib.Path) -> bool:
-    """
-    Return True if any ancestor directory of *path* (up to WATCH_ROOT) contains
-    a `.noindex` sentinel file.
-
-    Mirrors the canonical implementation in kb_agent_mcp/file_parser and the
-    agents-layer so all three layers enforce the same exclusion rule.
-    """
-    try:
-        for parent in path.parents:
-            if (parent / ".noindex").exists():
-                return True
-            if parent == WATCH_ROOT:
-                break
-    except Exception:
-        pass
-    return False
-
-
 def should_skip(path: pathlib.Path) -> bool:
     """Return True if this file should be excluded from watcher processing.
 
-    Skips:
-    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
-    • any file whose ancestor folder contains a `.noindex` sentinel file
+    Uses the watcher's own SKIP_PATTERNS (which includes .watch.log and other
+    temp files beyond the base set).  _has_noindex_ancestor is imported from
+    agent_base.
     """
     if any(p in path.name.lower() for p in SKIP_PATTERNS):
         return True
     return _has_noindex_ancestor(path)
+
 
 def is_readme(path: pathlib.Path) -> bool:
     """Return True if this path is a README file (should not be indexed as a doc)."""

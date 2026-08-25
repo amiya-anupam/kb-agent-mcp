@@ -46,6 +46,7 @@ _cb = _importlib.import_module("context_budget")
 from agent_base import (
     _has_noindex_ancestor,
     folder_to_safe_name,
+    should_skip,
     AGG_KEYWORDS,
     PREFERRED_NUM_COLS,
     DEFAULT_BLOCKLIST,
@@ -95,21 +96,6 @@ def discover_folders() -> list[str]:
         if has_files:
             folders.append(p.name)
     return folders
-
-
-# ── Skip helper ───────────────────────────────────────────────────────────────
-
-def should_skip(path: pathlib.Path) -> bool:
-    """Return True if this file should be excluded from indexing.
-
-    Skips:
-    • files matching SKIP_PATTERNS (readme, .ds_store, etc.)
-    • any file whose ancestor folder contains a `.noindex` sentinel file
-    """
-    name = path.name.lower()
-    if any(p in name for p in SKIP_PATTERNS):
-        return True
-    return _has_noindex_ancestor(path)
 
 
 # ── Embedding backends ────────────────────────────────────────────────────────
