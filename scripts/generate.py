@@ -60,6 +60,7 @@ from agent_base import (  # noqa: E402
     should_skip,
     folder_to_safe_name,
 )
+from embeddings import extract_text_snippet as _extract_snippet_for_summary  # noqa: E402
 
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
@@ -246,104 +247,7 @@ Rules:
 
 
 # ── Per-file summary generator ────────────────────────────────────────────────
-
-def _extract_snippet_for_summary(file_path: pathlib.Path, max_chars: int = 2000) -> str:
-    """
-    Extract a representative text snippet from a file to feed to the summariser.
-    Reuses the same lightweight extraction logic as embeddings.py.
-    """
-    ext = file_path.suffix.lower()
-    try:
-        if ext in {".txt", ".md", ".csv"}:
-            return file_path.read_text(encoding="utf-8", errors="ignore")[:max_chars]
-
-        elif ext == ".docx":
-            import zipfile
-            with zipfile.ZipFile(file_path) as z:
-                with z.open("word/document.xml") as f:
-                    xml = f.read().decode("utf-8", errors="ignore")
-            text = re.sub(r"<[^>]+>", " ", xml)
-            return " ".join(text.split())[:max_chars]
-
-        elif ext == ".pdf":
-            try:
-                from pypdf import PdfReader
-                reader = PdfReader(str(file_path))
-                text = ""
-                for page in reader.pages[:4]:
-                    text += (page.extract_text() or "") + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[PDF: {file_path.name}]"
-
-        elif ext in {".pptx", ".ppt"}:
-            try:
-                from pptx import Presentation
-                prs = Presentation(str(file_path))
-                text = ""
-                for slide in prs.slides[:6]:
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text") and shape.text.strip():
-                            text += shape.text.strip() + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[PPTX: {file_path.name}]"
-
-        elif ext in {".xlsx", ".xls"}:
-            try:
-                # Large XLSX files (>50 MB) must use the streaming aggregator —
-                # openpyxl takes 80+ seconds to load a 160 MB file and only reads
-                # the first 40 rows, producing a generic header dump.  The streaming
-                # aggregator uses raw XML iterparse, reads all rows in one pass, and
-                # returns a structured revenue/data summary with actual totals.
-                MAX_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB
-                if file_path.stat().st_size > MAX_XLSX_BYTES:
-                    _agents_dir = pathlib.Path(__file__).parent.parent / "agents"
-                    if str(_agents_dir) not in sys.path:
-                        sys.path.insert(0, str(_agents_dir))
-                    from agent_base import _stream_xlsx_aggregate
-                    return _stream_xlsx_aggregate(file_path, max_chars)
-
-                import openpyxl
-                wb = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
-                text = ""
-                for sheet in wb.worksheets[:2]:
-                    text += f"[Sheet: {sheet.title}]\n"
-                    for row in sheet.iter_rows(max_row=40, values_only=True):
-                        row_text = " | ".join(str(c) for c in row if c is not None)
-                        if row_text.strip():
-                            text += row_text + "\n"
-                    if len(text) >= max_chars:
-                        break
-                return text[:max_chars]
-            except Exception:
-                return f"[XLSX: {file_path.name}]"
-
-        elif ext == ".boxnote":
-            try:
-                data = json.loads(file_path.read_text(encoding="utf-8", errors="ignore"))
-                def walk(node):
-                    if isinstance(node, dict):
-                        if node.get("type") == "text":
-                            yield node.get("text", "")
-                        for v in node.values():
-                            yield from walk(v)
-                    elif isinstance(node, list):
-                        for item in node:
-                            yield from walk(item)
-                return " ".join(walk(data))[:max_chars]
-            except Exception:
-                return f"[BoxNote: {file_path.name}]"
-
-    except Exception as e:
-        return f"[Read error: {e}]"
-
-    return f"[Unsupported: {file_path.name}]"
-
+# _extract_snippet_for_summary delegates to embeddings.extract_text_snippet (canonical copy).
 
 def generate_file_summary(file_name: str, snippet: str) -> str:
     """
