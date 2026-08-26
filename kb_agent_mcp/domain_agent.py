@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.base_agent import (
+    AgentResult,
     ask as _base_ask,
     is_data_question as _global_data_q,
 )
@@ -67,7 +68,7 @@ class DomainAgent:
         format_instruction: str = "",
         top_n_override: int | None = None,
         session_id: str = "default",
-    ) -> dict:
+    ) -> AgentResult:
         """
         Run the full RAG pipeline for this domain.
 
@@ -239,7 +240,8 @@ async def build_all_domain_agents() -> dict[str, DomainAgent]:
     kb_root = _cfg.kb_root_path
     try:
         entries = list(kb_root.iterdir())
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not list KB_ROOT %s: %s", kb_root, exc)
         return agents
     for entry in sorted(entries, key=lambda p: p.name):
         if not entry.is_dir():

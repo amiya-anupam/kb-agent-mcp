@@ -128,13 +128,25 @@ def _embed_openai(text: str) -> list[float]:
 
 
 _st_model = None  # lazy-loaded sentence-transformers model
+_ST_MODEL_NAME = "all-MiniLM-L6-v2"
 
 def _embed_sentence_transformers(text: str) -> list[float]:
     global _st_model
     if _st_model is None:
         try:
             from sentence_transformers import SentenceTransformer
-            _st_model = SentenceTransformer("all-MiniLM-L6-v2")
+            try:
+                _st_model = SentenceTransformer(_ST_MODEL_NAME)
+            except OSError as exc:
+                # Raised when the model is not cached and the network is unreachable.
+                raise RuntimeError(
+                    f"Embedding model '{_ST_MODEL_NAME}' could not be loaded — "
+                    "no internet connection and the model is not cached on this machine.\n"
+                    "Run this once on a machine with internet access to pre-cache it:\n"
+                    f"  python -c \"from sentence_transformers import SentenceTransformer; "
+                    f"SentenceTransformer('{_ST_MODEL_NAME}')\"\n"
+                    "After that the model loads entirely offline."
+                ) from exc
         except ImportError:
             raise ImportError(
                 "sentence-transformers is not installed and the configured embed "

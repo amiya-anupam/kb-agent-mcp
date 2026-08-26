@@ -32,9 +32,9 @@ import math
 import re
 from typing import Any
 
+from kb_agent_mcp.base_agent import AgentResult, is_data_question as _is_data_q
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.domain_agent import DomainAgent, build_all_domain_agents
-from kb_agent_mcp.base_agent import is_data_question as _is_data_q
 from kb_agent_mcp.memory import (
     get_history_sync,
     add_turn_sync,
@@ -473,6 +473,168 @@ def _stale_warnings(domain_names: list[str], agents: dict) -> str:
     return "\n\n---\n\n" + "\n\n".join(warnings)
 
 
+# ── Pipeline helpers (SRP: each function owns exactly one stage) ───────────────
+
+async def _resolve_domains(
+    question: str,
+    history: list[dict],
+    agents: dict[str, DomainAgent],
+) -> tuple[list[str], str | None]:
+    """
+    Route the question to one or more domain names.
+
+    Returns:
+        (domain_names, clarification_question)
+        When clarification_question is not None, the caller should return it
+        directly to the user without dispatching to any domain.
+    """
+    kw_domains, kw_confident = _keyword_confidence(question, agents)
+
+    if kw_confident:
+        return kw_domains, None
+
+    classification = await _classify_intent(question, history, agents)
+    domain_names   = classification["domains"] or kw_domains or [list(agents.keys())[0]]
+
+    if classification.get("needs_clarification") and classification.get("clarification_question"):
+        return domain_names, classification["clarification_question"]
+
+    return domain_names, None
+
+
+async def _compute_passthrough_budget(
+    domain_names: list[str],
+    agents: dict[str, DomainAgent],
+) -> tuple[int | None, str]:
+    """
+    When in passthrough mode, compute a reduced top_n that fits the context budget.
+
+    Returns:
+        (top_n_override, budget_status)
+        top_n_override is None when no reduction is needed (or not passthrough mode).
+        budget_status is "" | "narrowed" | "truncated".
+    """
+    from kb_agent_mcp.base_agent import is_passthrough as _is_passthrough
+    if not await _is_passthrough():
+        return None, ""
+
+    selected = [agents[n] for n in domain_names if n in agents]
+    if not selected:
+        return None, ""
+
+    avg_top_n     = max(1, round(sum(a.config.top_n    for a in selected) / len(selected)))
+    avg_max_chars = max(1, round(sum(a.config.max_chars for a in selected) / len(selected)))
+    adjusted, budget_status = _adjusted_top_n(
+        n_domains=len(selected),
+        top_n=avg_top_n,
+        max_chars_per_domain=avg_max_chars,
+    )
+    top_n_override = adjusted if budget_status else None
+    return top_n_override, budget_status
+
+
+async def _dispatch_domains(
+    question: str,
+    history: list[dict],
+    format_instruction: str,
+    domain_names: list[str],
+    agents: dict[str, DomainAgent],
+    top_n_override: int | None,
+    session_id: str,
+) -> list[AgentResult] | None:
+    """
+    Dispatch to selected domain agents in parallel and normalise results.
+
+    Returns:
+        A list of AgentResult dicts, or None when no tasks were created (no
+        matching agents) — the caller should return an error message in that case.
+    """
+    tasks = [
+        agents[name].run(
+            question, history, format_instruction,
+            top_n_override=top_n_override,
+            session_id=session_id,
+        )
+        for name in domain_names
+        if name in agents
+    ]
+    if not tasks:
+        return None
+
+    # return_exceptions=True so a single failing domain never cancels the others.
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    results: list[AgentResult] = []
+    for name, outcome in zip([n for n in domain_names if n in agents], raw):
+        if isinstance(outcome, BaseException):
+            logger.warning("Domain agent %r failed: %s", name, outcome)
+            results.append(AgentResult(
+                agent=name,
+                answer=f"[{name}: retrieval failed — {outcome}]",
+                sources=[],
+                found=False,
+                passthrough=False,
+            ))
+        else:
+            results.append(outcome)
+    return results
+
+
+def _build_sources_block(results: list[AgentResult]) -> str:
+    """
+    Build the deduplicated **Sources** footer from all domain results.
+
+    Returns "" when all results are passthrough (they embed their own source
+    labels) or when no sources were collected.
+    """
+    if any(r.get("passthrough") for r in results):
+        return ""
+
+    seen_paths: set[str] = set()
+    all_sources: list[dict] = []
+    for r in results:
+        for s in r.get("sources", []):
+            p = s.get("path", "")
+            if p and p not in seen_paths:
+                seen_paths.add(p)
+                all_sources.append(s)
+
+    if not all_sources:
+        return ""
+
+    all_sources.sort(key=lambda s: -s.get("score", 0.0))
+    lines = ["\n\n---\n\n**Sources**"]
+    for s in all_sources:
+        name  = s.get("name", s.get("path", "unknown"))
+        score = s.get("score", 0.0)
+        lock  = " 🔒" if s.get("confidential") else ""
+        lines.append(f"- `{name}`{lock} *(relevance: {score:.2f})*")
+    return "\n".join(lines)
+
+
+def _assemble_answer(
+    results: list[AgentResult],
+    agents: dict[str, DomainAgent],
+    question: str,
+    domain_names: list[str],
+    budget_status: str,
+) -> str:
+    """
+    Aggregate/merge domain results then append stale warnings, routing notices,
+    and source citations.
+    """
+    from kb_agent_mcp.aggregator import aggregate as _aggregate
+
+    aggregated = _aggregate(list(results), question=question)
+    answer = aggregated if aggregated is not None else _merge_answers(
+        list(results), agents, question=question, budget_status=budget_status
+    )
+
+    answer += _stale_warnings(domain_names, agents)
+    answer += _minimal_keyword_notice(domain_names, agents)
+    answer += _build_sources_block(results)
+    return answer
+
+
 # ── Main orchestrator function ─────────────────────────────────────────────────
 
 async def ask(
@@ -484,8 +646,8 @@ async def ask(
     Full async pipeline: detect format → route → dispatch → merge → persist.
 
     Args:
-        question:   The user's question (may contain natural-language format phrases).
-        session_id: Conversation session identifier for multi-turn memory.
+        question:    The user's question (may contain natural-language format phrases).
+        session_id:  Conversation session identifier for multi-turn memory.
         format_flag: Explicit format name (table/bullets/oneline/paragraph/numbered/json)
                      or None for auto-detection from the question text.
 
@@ -510,107 +672,28 @@ async def ask(
             + kb_root_hint
         )
 
-    # Detect format intent
     question, format_instruction = detect_format_intent(question, explicit_flag=format_flag)
+    history      = get_history_sync(session_id)
 
-    # Load conversation history (sync — fast disk read)
-    history = get_history_sync(session_id)
+    domain_names, clarification = await _resolve_domains(question, history, agents)
+    if clarification:
+        add_turn_sync(question, clarification, session_id)
+        return clarification
 
-    # Fast keyword pre-filter
-    kw_domains, kw_confident = _keyword_confidence(question, agents)
+    top_n_override, budget_status = await _compute_passthrough_budget(domain_names, agents)
 
-    if kw_confident:
-        domain_names = kw_domains
-    else:
-        classification = await _classify_intent(question, history, agents)
-        domain_names   = classification["domains"] or kw_domains or [list(agents.keys())[0]]
-
-        # Clarification needed?
-        if classification.get("needs_clarification") and classification.get("clarification_question"):
-            cq = classification["clarification_question"]
-            # Persist clarification exchange in session memory (sync, fast)
-            add_turn_sync(question, cq, session_id)
-            return cq
-
-    # ── Passthrough budget reduction (Risk 14) ────────────────────────────────
-    from kb_agent_mcp.base_agent import is_passthrough as _is_passthrough
-    _passthrough = await _is_passthrough()
-    budget_status = ""
-    top_n_override: int | None = None
-
-    if _passthrough:
-        # Estimate context across all selected domains using representative config.
-        # Take the median top_n / max_chars across selected agents as the estimate.
-        selected_agents = [agents[n] for n in domain_names if n in agents]
-        if selected_agents:
-            avg_top_n    = max(1, round(sum(a.config.top_n    for a in selected_agents) / len(selected_agents)))
-            avg_max_chars = max(1, round(sum(a.config.max_chars for a in selected_agents) / len(selected_agents)))
-            adjusted, budget_status = _adjusted_top_n(
-                n_domains=len(selected_agents),
-                top_n=avg_top_n,
-                max_chars_per_domain=avg_max_chars,
-            )
-            if budget_status:
-                top_n_override = adjusted
-
-    # Dispatch to selected domain agents in parallel
-    tasks = [
-        agents[name].run(
-            question, history, format_instruction,
-            top_n_override=top_n_override,
-            session_id=session_id,
-        )
-        for name in domain_names
-        if name in agents
-    ]
-    if not tasks:
+    results = await _dispatch_domains(
+        question, history, format_instruction,
+        domain_names, agents, top_n_override, session_id,
+    )
+    if results is None:
         return f"No matching domain agents for: {domain_names}"
 
-    results = await asyncio.gather(*tasks, return_exceptions=False)
+    if all(not r.get("found") and "retrieval failed" in r.get("answer", "") for r in results):
+        failed_names = ", ".join(r["agent"] for r in results)
+        return f"All domain agents failed to respond ({failed_names}). Check your LLM connection or run `reindex()`."
 
-    # ── Feature 6: Cross-domain aggregation ──────────────────────────────────
-    # When results come from ≥2 non-passthrough LLM domains, try to produce a
-    # unified synthesised answer (conflict detection + complementary highlights).
-    # Falls back to standard _merge_answers() when aggregation is not applicable
-    # (single domain, passthrough mode, or aggregator returns None).
-    from kb_agent_mcp.aggregator import aggregate as _aggregate
-    _aggregated = _aggregate(list(results), question=question)
-    if _aggregated is not None:
-        final_answer = _aggregated
-    else:
-        final_answer = _merge_answers(list(results), agents, question=question, budget_status=budget_status)
-
-    # Stale-index check: appends a warning if >5% new files are unindexed.
-    # The check is a lightweight dir-walk + ChromaDB count — no embedding needed.
-    final_answer += _stale_warnings(domain_names, agents)
-
-    # Cat 3b — routing quality notice when domain has minimal keyword config.
-    final_answer += _minimal_keyword_notice(domain_names, agents)
-
-    # ── Feature 2: Source citations ───────────────────────────────────────────
-    # Collect every unique source file that contributed to this answer and
-    # append a clean **Sources** block.  Skips passthrough answers (those
-    # already embed their own source labels in the passthrough block) and
-    # answers that carry no sources at all (e.g. "no information found").
-    if not any(r.get("passthrough") for r in results):
-        all_sources: list[dict] = []
-        seen_paths: set[str] = set()
-        for r in results:
-            for s in r.get("sources", []):
-                p = s.get("path", "")
-                if p and p not in seen_paths:
-                    seen_paths.add(p)
-                    all_sources.append(s)
-        # Sort by descending relevance score
-        all_sources.sort(key=lambda s: -s.get("score", 0.0))
-        if all_sources:
-            lines = ["\n\n---\n\n**Sources**"]
-            for s in all_sources:
-                name  = s.get("name", s.get("path", "unknown"))
-                score = s.get("score", 0.0)
-                lock  = " 🔒" if s.get("confidential") else ""
-                lines.append(f"- `{name}`{lock} *(relevance: {score:.2f})*")
-            final_answer += "\n".join(lines)
+    final_answer = _assemble_answer(results, agents, question, domain_names, budget_status)
 
     add_turn_sync(question, final_answer, session_id)
     return final_answer

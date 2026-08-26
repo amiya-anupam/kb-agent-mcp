@@ -92,7 +92,18 @@ def _load_st_model() -> Any:
                         "Then copy the cache directory to this machine."
                     )
             from sentence_transformers import SentenceTransformer
-            _st_model = SentenceTransformer(_ST_MODEL_NAME)
+            try:
+                _st_model = SentenceTransformer(_ST_MODEL_NAME)
+            except OSError as exc:
+                # Raised when the model is not cached and the network is unreachable.
+                raise RuntimeError(
+                    f"Embedding model '{_ST_MODEL_NAME}' could not be loaded — "
+                    "no internet connection and the model is not cached on this machine.\n"
+                    "Run this once on a machine with internet access to pre-cache it:\n"
+                    f"  python -c \"from sentence_transformers import SentenceTransformer; "
+                    f"SentenceTransformer('{_ST_MODEL_NAME}')\"\n"
+                    "After that the model loads entirely offline."
+                ) from exc
         except ImportError as exc:
             raise ImportError(
                 "sentence-transformers is not installed and no other embedding backend "
