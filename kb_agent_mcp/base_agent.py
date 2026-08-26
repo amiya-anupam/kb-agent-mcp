@@ -24,8 +24,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading as _threading
 import time as _time
 from pathlib import Path
+from typing import Any, TypedDict
 
 import httpx
 
@@ -40,21 +42,42 @@ from kb_agent_mcp.file_parser import extract as _extract_file
 logger = logging.getLogger(__name__)
 
 
+# ── AgentResult TypedDict ──────────────────────────────────────────────────────
+
+class AgentResult(TypedDict, total=False):
+    """Typed return shape for base_agent.ask() and DomainAgent.run()."""
+    agent:             str    # required
+    answer:            str    # required
+    sources:           list   # required — list[dict]
+    found:             bool   # required
+    passthrough:       bool
+    passthrough_block: str
+    confidence_footer: str
+    truncated:         bool
+
+
 # ── Shared HTTP client (connection pool reused across all LLM calls) ──────────
 # httpx.Client keeps TCP connections alive — avoids a fresh TCP+TLS handshake
 # per LLM request (saves 100–500 ms per call on HTTPS endpoints).
 _http_client: httpx.Client | None = None
-_http_client_lock = asyncio.Lock()
+_http_client_tlock = _threading.Lock()
 
 
 def _get_http_client() -> httpx.Client:
-    """Return (or lazily create) the shared sync httpx.Client."""
+    """Return (or lazily create) the shared sync httpx.Client.
+
+    Uses a threading.Lock (not asyncio.Lock) because this function is called
+    from sync worker threads via asyncio.to_thread — asyncio primitives are
+    not safe to use outside the event loop.
+    """
     global _http_client
     if _http_client is None:
-        _http_client = httpx.Client(
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0),
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
-        )
+        with _http_client_tlock:
+            if _http_client is None:
+                _http_client = httpx.Client(
+                    timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0),
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                )
     return _http_client
 
 
@@ -267,16 +290,30 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 
 # ── LLM call (provider-agnostic, async) ────────────────────────────────────────
 
+# Registry maps provider name → sync callable.
+# To add a new provider: register it here — call_llm never needs to change.
+_LLM_REGISTRY: dict[str, Any] = {}
+
+def _register_provider(*names: str):
+    """Decorator that registers a sync LLM callable under one or more provider names."""
+    def decorator(fn):
+        for name in names:
+            _LLM_REGISTRY[name] = fn
+        return fn
+    return decorator
+
+
 async def call_llm(messages: list[dict], temperature: float = 0.2) -> str:
     """Send messages to the configured LLM and return the response text."""
     provider = cfg.KB_LLM_PROVIDER.lower()
-    if provider == "anthropic":
-        return await asyncio.to_thread(_call_anthropic_sync, messages, temperature)
-    if provider in ("openai", "custom"):
-        return await asyncio.to_thread(_call_openai_compat_sync, messages, temperature)
-    return await asyncio.to_thread(_call_ollama_sync, messages, temperature)
+    handler = _LLM_REGISTRY.get(provider)
+    if handler is None:
+        # Default fallback: treat unknown providers as Ollama-compatible.
+        handler = _LLM_REGISTRY["ollama"]
+    return await asyncio.to_thread(handler, messages, temperature)
 
 
+@_register_provider("ollama")
 def _call_ollama_sync(messages: list[dict], temperature: float) -> str:
     try:
         r = _get_http_client().post(
@@ -301,6 +338,7 @@ def _call_ollama_sync(messages: list[dict], temperature: float) -> str:
         ) from e
 
 
+@_register_provider("openai", "custom")
 def _call_openai_compat_sync(messages: list[dict], temperature: float) -> str:
     base = cfg.KB_LLM_BASE_URL.rstrip("/")
     if "11434" in base and not base.endswith("/v1"):
@@ -327,6 +365,7 @@ def _call_openai_compat_sync(messages: list[dict], temperature: float) -> str:
         raise RuntimeError(hint) from e
 
 
+@_register_provider("anthropic")
 def _call_anthropic_sync(messages: list[dict], temperature: float) -> str:
     system = ""
     chat_messages = []
@@ -397,21 +436,8 @@ async def ask(
     max_chars: int | None = None,
     pre_ranked_results: list[dict] | None = None,
     session_id: str = "default",
-) -> dict:
-    """
-    README-first async RAG pipeline for a single domain folder.
-
-    Returns:
-        {
-            "agent":              str,
-            "answer":             str,
-            "sources":            list[dict],
-            "found":              bool,
-            "passthrough":        bool (only when in passthrough mode),
-            "passthrough_block":  str (only when in passthrough mode),
-            "confidence_footer":  str (when available),
-        }
-    """
+) -> AgentResult:
+    """README-first async RAG pipeline for a single domain folder."""
     if max_chars is None:
         max_chars = _cb_get("rag_file")
 
@@ -429,14 +455,14 @@ async def ask(
                 agent_name=agent_name,
                 source_label=source_label,
             )
-            return {
-                "agent":             agent_name,
-                "answer":            block,
-                "sources":           [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}],
-                "found":             True,
-                "passthrough":       True,
-                "passthrough_block": block,
-            }
+            return AgentResult(
+                agent=agent_name,
+                answer=block,
+                sources=[{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}],
+                found=True,
+                passthrough=True,
+                passthrough_block=block,
+            )
 
         messages = [{"role": "system", "content": system_prompt}]
         if conversation_history:
@@ -452,14 +478,14 @@ async def ask(
 
         answer = await call_llm(messages)
         readme_sources = [{"name": source_label, "path": f"{folder_name}/README", "score": 1.0}]
-        return {
-            "agent":             agent_name,
-            "answer":            answer,
-            "sources":           readme_sources,
-            "confidence_footer": format_confidence_footer(readme_sources),
-            "found":             True,
-            "passthrough":       False,
-        }
+        return AgentResult(
+            agent=agent_name,
+            answer=answer,
+            sources=readme_sources,
+            confidence_footer=format_confidence_footer(readme_sources),
+            found=True,
+            passthrough=False,
+        )
 
     # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
     if pre_ranked_results is not None:
@@ -469,13 +495,13 @@ async def ask(
         results = await _vs_search(folder_name, question, top_n=top_n)
 
     if not results:
-        return {
-            "agent":       agent_name,
-            "answer":      f"I could not find any relevant documents in '{folder_name}' to answer this question.",
-            "sources":     [],
-            "found":       False,
-            "passthrough": False,
-        }
+        return AgentResult(
+            agent=agent_name,
+            answer=f"I could not find any relevant documents in '{folder_name}' to answer this question.",
+            sources=[],
+            found=False,
+            passthrough=False,
+        )
 
     # ── Security gate — classify each result file ─────────────────────────────
     # Files flagged as confidential are either redacted (gate not acknowledged)
@@ -515,27 +541,27 @@ async def ask(
         valid_results.append(r_annotated)
 
     if not extract_tasks and not redacted_names:
-        return {
-            "agent":       agent_name,
-            "answer":      f"Found index entries for '{folder_name}' but source files are missing.",
-            "sources":     [],
-            "found":       False,
-            "passthrough": False,
-        }
+        return AgentResult(
+            agent=agent_name,
+            answer=f"Found index entries for '{folder_name}' but source files are missing.",
+            sources=[],
+            found=False,
+            passthrough=False,
+        )
 
     if not extract_tasks and redacted_names:
         names = ", ".join(f"`{n}`" for n in redacted_names)
-        return {
-            "agent":   agent_name,
-            "answer":  (
+        return AgentResult(
+            agent=agent_name,
+            answer=(
                 f"The most relevant file(s) for this question ({names}) are flagged as "
                 "confidential and have been excluded.\n\n"
                 "Call `check_confidential()` then `acknowledge_gate()` to include them."
             ),
-            "sources":     [],
-            "found":       True,
-            "passthrough": False,
-        }
+            sources=[],
+            found=True,
+            passthrough=False,
+        )
 
     texts = await asyncio.gather(*extract_tasks)
     context_was_truncated = False
@@ -575,14 +601,14 @@ async def ask(
             agent_name=agent_name,
             source_label=", ".join(s["name"] for s in sources[:3]),
         )
-        return {
-            "agent":             agent_name,
-            "answer":            block,
-            "sources":           sources,
-            "found":             True,
-            "passthrough":       True,
-            "passthrough_block": block,
-        }
+        return AgentResult(
+            agent=agent_name,
+            answer=block,
+            sources=sources,
+            found=True,
+            passthrough=True,
+            passthrough_block=block,
+        )
 
     messages = [{"role": "system", "content": system_prompt}]
     if conversation_history:
@@ -597,15 +623,15 @@ async def ask(
     })
 
     answer = await call_llm(messages)
-    return {
-        "agent":             agent_name,
-        "answer":            answer + redacted_note,
-        "sources":           sources,
-        "confidence_footer": format_confidence_footer(sources),
-        "found":             True,
-        "passthrough":       False,
-        "truncated":         context_was_truncated,
-    }
+    return AgentResult(
+        agent=agent_name,
+        answer=answer + redacted_note,
+        sources=sources,
+        confidence_footer=format_confidence_footer(sources),
+        found=True,
+        passthrough=False,
+        truncated=context_was_truncated,
+    )
 
 
 # ── Passthrough block builder ──────────────────────────────────────────────────

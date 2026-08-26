@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from kb_agent_mcp.config import cfg
 from kb_agent_mcp.base_agent import (
+    AgentResult,
     ask as _base_ask,
     is_data_question as _global_data_q,
 )
@@ -67,7 +68,7 @@ class DomainAgent:
         format_instruction: str = "",
         top_n_override: int | None = None,
         session_id: str = "default",
-    ) -> dict:
+    ) -> AgentResult:
         """
         Run the full RAG pipeline for this domain.
 
