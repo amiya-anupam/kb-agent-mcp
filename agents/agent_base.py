@@ -1131,8 +1131,8 @@ def ask(
                             f"  [{agent_name}] 📌 Pinned revenue file: {name}",
                             flush=True,
                         )
-            except Exception:
-                pass  # index unreadable → fall through with original results
+            except Exception as exc:
+                logger.debug("Pin-file index read failed (%s); using original results", exc)
 
         # Sort: Revenue Report files first, everything else preserves its order
         def _revenue_priority(r: dict) -> int:
