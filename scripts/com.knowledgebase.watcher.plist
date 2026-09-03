@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <!-- Unique label — used by launchctl to identify this agent -->
+  <key>Label</key>
+  <string>com.knowledgebase.watcher</string>
+
+  <!-- The command to run -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/Frameworks/Python.framework/Versions/3.14/bin/python3</string>
+    <string>/Users/amiyaanupam/Desktop/KnowledgeBase/scripts/watch_kb.py</string>
+  </array>
+
+  <!-- Environment variables (mirrors .env values) -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>KB_ROOT</key>
+    <string>/Users/amiyaanupam/Desktop/KnowledgeBase</string>
+    <key>KB_MODEL</key>
+    <string>qwen3:14b</string>
+    <key>KB_LLM_PROVIDER</key>
+    <string>ollama</string>
+    <key>KB_LLM_BASE_URL</key>
+    <string>http://localhost:11434</string>
+  </dict>
+
+  <!-- Working directory -->
+  <key>WorkingDirectory</key>
+  <string>/Users/amiyaanupam/Desktop/KnowledgeBase</string>
+
+  <!-- Start on login, restart if it crashes -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Log stdout/stderr to files you can tail -->
+  <key>StandardOutPath</key>
+  <string>/Users/amiyaanupam/Desktop/KnowledgeBase/.watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/amiyaanupam/Desktop/KnowledgeBase/.watch.log</string>
+
+  <!-- Throttle restarts — wait 10s before restarting on crash -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+</dict>
+</plist>
