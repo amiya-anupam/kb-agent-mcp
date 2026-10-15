@@ -194,10 +194,12 @@ class TestBuildBm25:
 
 class TestInvalidateBm25:
     def test_clears_domain_entry(self):
-        from kb_agent_mcp.vector_store import _BM25Entry
-        _BM25_CACHE["test"] = _BM25Entry(index=object(), ids=["x"])
-        _invalidate_bm25("test")
-        assert "test" not in _BM25_CACHE
+        # Resolve through the module at call time: other tests importlib.reload()
+        # vector_store, which rebinds the module-level _BM25_CACHE dict.
+        import kb_agent_mcp.vector_store as vs
+        vs._BM25_CACHE["test"] = vs._BM25Entry(index=object(), ids=["x"])
+        vs._invalidate_bm25("test")
+        assert "test" not in vs._BM25_CACHE
 
     def test_noop_when_not_cached(self):
         _BM25_CACHE.pop("missing", None)

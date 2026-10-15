@@ -62,6 +62,7 @@ from agent_base import (  # noqa: E402
     call_llm_generate,
 )
 from embeddings import extract_text_snippet as _extract_snippet_for_summary  # noqa: E402
+import content_gate as gate  # noqa: E402
 
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
@@ -101,12 +102,8 @@ def discover_folders(kb_root: pathlib.Path, blocklist: set[str]) -> list[str]:
 
 
 def count_files(folder: pathlib.Path) -> int:
-    return sum(
-        1 for f in folder.rglob("*")
-        if f.is_file()
-        and f.suffix.lower() in INCLUDE_EXTS
-        and not should_skip(f)
-    )
+    """Indexable source documents (generated README stubs are not counted)."""
+    return len(list_indexable_files(folder))
 
 
 # ── LLM helpers ───────────────────────────────────────────────────────────────
@@ -131,38 +128,48 @@ def llm_available() -> bool:
 
 # ── Domain meta generation ────────────────────────────────────────────────────
 
-def generate_domain_meta(folder_name: str, folder: pathlib.Path) -> dict:
-    """
-    Ask the LLM to generate a description and keywords for this folder
-    by sampling a few filenames + snippets.
-    Returns { "description": str, "keywords": [str, ...] }
-    """
-    # Collect up to 20 file names + first-line snippets
-    samples = []
-    for f in sorted(folder.rglob("*")):
-        if not f.is_file() or f.suffix.lower() not in INCLUDE_EXTS:
-            continue
-        if should_skip(f):
-            continue
-        try:
-            if f.suffix.lower() in {".txt", ".md", ".csv"}:
-                first_line = f.read_text(encoding="utf-8", errors="ignore")[:200]
-            else:
-                first_line = f"[{f.suffix.upper().lstrip('.')} file]"
-            samples.append(f"- {f.name}: {first_line[:100]}")
-        except Exception:
-            samples.append(f"- {f.name}")
-        if len(samples) >= 20:
-            break
+def list_indexable_files(folder: pathlib.Path) -> list[pathlib.Path]:
+    """Source documents in a folder. README stubs written by this script are
+    excluded: they only restate the description and would inflate counts."""
+    return [
+        f for f in sorted(folder.rglob("*"))
+        if f.is_file() and f.suffix.lower() in INCLUDE_EXTS and not should_skip(f)
+        and not gate.is_generated_stub_file(f)
+    ]
 
-    samples_text = "\n".join(samples)
+
+def generate_domain_meta(
+    folder_name: str,
+    folder: pathlib.Path,
+    evidences: list | None = None,
+    use_llm: bool = True,
+) -> dict:
+    """
+    Produce a description + keywords for this folder, gated on real content.
+
+    1. The gate reads every document (``content_gate.scan_folder``).
+    2. Extractive description/keywords are built from that content (no LLM).
+    3. If an LLM is available it is fed the evidence and its answer is kept
+       only when it is grounded in the evidence; otherwise the extractive
+       version is used.
+    Returns { "description", "keywords", "source", "grounding" }.
+    """
+    if evidences is None:
+        evidences = gate.scan_folder(folder, list_indexable_files(folder))
+
+    extractive = gate.extractive_domain_meta(folder_name, evidences)
+    if not use_llm or not any(e.usable for e in evidences):
+        return {**extractive, "source": "extractive",
+                "grounding": gate.grounding_score(extractive["description"], evidences)}
+
+    samples_text = gate.evidence_for_prompt(evidences)
 
     prompt = f"""You are helping configure a knowledge base search system.
-I have a folder called "{folder_name}" containing these files:
+I have a folder called "{folder_name}" containing documents. Evidence read from their actual content:
 
 {samples_text}
 
-Based on these files, respond with ONLY a valid JSON object in this exact format:
+Based ONLY on this evidence, respond with ONLY a valid JSON object in this exact format:
 {{
   "description": "One sentence describing what this folder contains (max 200 chars)",
   "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5", "keyword6", "keyword7", "keyword8", "keyword9", "keyword10"]
@@ -173,22 +180,31 @@ Rules:
 - keywords: 10-15 short words or phrases a user might type when asking about this domain
 - respond with ONLY the JSON object, no explanation"""
 
-    raw = call_llm_generate(prompt)
-
-    # Extract JSON from response (LLM may wrap it in markdown)
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match:
-        try:
+    candidate, keywords = "", []
+    try:
+        raw = call_llm_generate(prompt)
+        # Extract JSON from response (LLM may wrap it in markdown)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
             data = json.loads(match.group())
-            return {
-                "description": str(data.get("description", folder_name))[:200],
-                "keywords":    [str(k) for k in data.get("keywords", [])[:15]],
-            }
-        except json.JSONDecodeError:
-            pass
+            candidate = str(data.get("description", ""))[:200]
+            kw = data.get("keywords", [])
+            if isinstance(kw, str):  # LLMs sometimes return "a, b, c"
+                kw = [k.strip() for k in kw.split(",") if k.strip()]
+            keywords = [str(k) for k in kw[:15]] if isinstance(kw, list) else []
+    except Exception:
+        pass
 
-    # Fallback
-    return {"description": folder_name, "keywords": [folder_name.lower()]}
+    # Accuracy check: keep the LLM text only if it is grounded in the evidence.
+    text, source, score = gate.verified_or_extractive(
+        candidate, evidences, extractive["description"]
+    )
+    return {
+        "description": text,
+        "keywords": (keywords if source == "llm" and keywords else extractive["keywords"]),
+        "source": source,
+        "grounding": score,
+    }
 
 
 # ── Per-file summary generator ────────────────────────────────────────────────
@@ -197,7 +213,8 @@ Rules:
 def generate_file_summary(file_name: str, snippet: str) -> str:
     """
     Ask the LLM to produce a 3–5 sentence summary of a single file.
-    Returns the summary string (falls back to a truncated snippet on failure).
+    Returns the summary string, or "" on failure (the caller then keeps the
+    extractive summary — never an unverified truncation).
     """
     prompt = (
         f'Summarise the following content from a file called "{file_name}" '
@@ -210,8 +227,7 @@ def generate_file_summary(file_name: str, snippet: str) -> str:
     try:
         return call_llm_generate(prompt).strip()
     except Exception:
-        # Graceful fallback: use first 300 chars of the snippet as the summary
-        return snippet[:300].strip()
+        return ""
 
 
 def build_file_summaries(
@@ -220,6 +236,8 @@ def build_file_summaries(
     kb_root: pathlib.Path,
     existing_cache: dict,
     force: bool = False,
+    use_llm: bool = True,
+    evidence_map: dict | None = None,
 ) -> dict:
     """
     Generate 3–5 sentence LLM summaries for every indexable file in a folder.
@@ -241,16 +259,12 @@ def build_file_summaries(
     """
     import hashlib
 
-    files = [
-        f for f in sorted(folder.rglob("*"))
-        if f.is_file()
-        and f.suffix.lower() in INCLUDE_EXTS
-        and not should_skip(f)
-    ]
+    files = list_indexable_files(folder)
 
     folder_summaries: dict[str, dict] = {}
     new_count = 0
     total = len(files)
+    evidences: list = []
 
     for idx, f in enumerate(files, start=1):
         rel_key = str(f.relative_to(kb_root)).replace("\\", "/")
@@ -259,32 +273,71 @@ def build_file_summaries(
         except Exception:
             continue
 
+        # ── Gate: read the real content before anything is written ───────────
+        ev = (evidence_map or {}).get(f) or gate.inspect_file(f)
+        evidences.append(ev)
+
         cached = existing_cache.get(rel_key, {})
-        if not force and cached.get("hash") == file_hash and cached.get("summary"):
-            # Cache hit — reuse without calling the LLM
+        cache_ok = (
+            cached.get("hash") == file_hash
+            and cached.get("summary")
+            and not gate.is_placeholder_summary(cached["summary"], f)
+        )
+        # Deterministic summaries are only rebuilt when the gate logic changed
+        # (version bump) — or with --force; otherwise unchanged files are reused.
+        deterministic = cached.get("source") in ("extractive", "filename")
+        if deterministic and cached.get("gate_version") != gate.GATE_VERSION:
+            cache_ok = False
+        elif deterministic and force and use_llm:
+            cache_ok = False  # --force + LLM: try for a better (LLM) summary
+        # Never throw away a good cached summary when no LLM is available;
+        # otherwise reuse it unless --force.
+        if cache_ok and (not force or not use_llm):
             folder_summaries[rel_key] = cached
             continue
 
-        # Cache miss — extract snippet and summarise
-        snippet = _extract_snippet_for_summary(f)
-        if not snippet or snippet.startswith("["):
-            # Extraction failed — store a minimal placeholder
+        if not ev.usable or (ev.status == gate.THIN and ev.path.suffix.lower() in gate.NAME_ONLY_EXTS):
+            # Nothing readable → do NOT fabricate a description. Use only the
+            # filename and its folder path, which are facts about the file.
+            where = " / ".join(f.relative_to(kb_root).parts[1:-1])
+            stem = f.stem.replace("_", " ").replace("-", " ")
             folder_summaries[rel_key] = {
-                "summary": f.name,
+                "summary": f"{stem} ({where})" if where else stem,
                 "hash":    file_hash,
+                "source":  "filename",
+                "gate":    ev.status,
+                "gate_version": gate.GATE_VERSION,
             }
             continue
 
-        print(f"    Summarising file {idx}/{total}: {f.name}")
-        summary = generate_file_summary(f.name, snippet)
+        extractive = gate.extractive_file_summary(ev)
+        summary, source, score = extractive, "extractive", gate.grounding_score(extractive, [ev])
+        if use_llm:
+            print(f"    Summarising file {idx}/{total}: {f.name}")
+            candidate = generate_file_summary(f.name, ev.text)
+            summary, source, score = gate.verified_or_extractive(candidate, [ev], extractive)
         folder_summaries[rel_key] = {
-            "summary": summary,
-            "hash":    file_hash,
+            "summary":   summary,
+            "hash":      file_hash,
+            "source":    source,
+            "grounding": score,
+            "gate":      ev.status,
+            "gate_version": gate.GATE_VERSION,
         }
         new_count += 1
 
+    report = gate.gate_report(evidences)
+    print(
+        f"  ✓ Gate: {report['ok']} ok, {report['thin']} thin, "
+        f"{report['failed']} failed, {report['unsupported']} unsupported "
+        f"(of {report['total']})"
+    )
+    # Per-file warnings only when something was (re)processed — keeps no-change runs quiet.
+    if new_count or force:
+        for item in report["flagged"][:10]:
+            print(f"      ⚠ {item['status']:<11} {item['file']} — {item['reason']}")
     if new_count:
-        print(f"  ✓ {new_count} new file summary/summaries generated for {folder_name}")
+        print(f"  ✓ {new_count} file summary/summaries generated for {folder_name}")
     else:
         print(f"  ✓ File summaries cached ({len(folder_summaries)} files, unchanged)")
 
@@ -343,6 +396,9 @@ def generate_readme_stub(folder_name: str, folder: pathlib.Path, description: st
             f"_Add your own notes about this domain above this line._\n"
         )
 
+    # Marker lets the content gate recognise (and ignore) this generated file.
+    if gate.STUB_MARKER not in stub_content:
+        stub_content = f"{gate.STUB_MARKER}\n{stub_content}"
     readme_path.write_text(stub_content, encoding="utf-8")
     return readme_path
 
@@ -921,7 +977,7 @@ def main():
     if use_llm:
         print("Checking LLM availability...", end=" ", flush=True)
         use_llm = llm_available()
-        print("✓ available" if use_llm else "✗ not reachable (will use placeholder descriptions)")
+        print("✓ available" if use_llm else "✗ not reachable (will use content-based descriptions)")
         print()
 
     # Load existing file summaries cache (shared across all domains).
@@ -948,23 +1004,48 @@ def main():
         print(f"  Building index...")
         build_index(folder_name, force=args.force)
 
+        # ── Gatekeeper: read every document's real content first ──────────────
+        print(f"  Gate: reading document content...")
+        evidences   = gate.scan_folder(folder, list_indexable_files(folder))
+        evidence_map = {e.path: e for e in evidences}
+
         # Check if we can skip meta generation
         existing = domain_meta.get(folder_name, {})
         cached_count = existing.get("file_count", -1)
-        has_meta = bool(existing.get("description") and existing.get("keywords"))
+        has_meta = bool(
+            existing.get("description") and existing.get("keywords")
+            and not gate.is_placeholder(existing["description"])
+        )
 
-        if has_meta and cached_count == n_files and not args.force:
-            print(f"  ✓ Meta cached ({n_files} files, unchanged)")
+        # Accuracy check on the existing description: with --force and no LLM,
+        # keep it only if it is still grounded in the content just read.
+        # Earlier extractive text is rebuilt (deterministic); only LLM/hand-written text is protected.
+        keep_grounded = (
+            args.force and not use_llm and has_meta and cached_count == n_files
+            and existing.get("description_source") != "extractive"
+            and gate.grounding_score(existing["description"], evidences) >= gate.MIN_GROUNDING
+        )
+
+        if has_meta and cached_count == n_files and (not args.force or keep_grounded):
+            print(f"  ✓ Meta cached ({n_files} files, unchanged"
+                  f"{', grounded in content' if keep_grounded else ''})")
             entry = existing
-        elif use_llm:
-            print(f"  Generating description + keywords via LLM...")
+            if keep_grounded and not entry.get("description_source"):
+                entry["description_source"] = "cached"
+                entry["description_grounding"] = gate.grounding_score(
+                    entry["description"], evidences)
+        elif use_llm or any(e.usable for e in evidences):
+            print(f"  Generating description + keywords "
+                  f"({'LLM + content gate' if use_llm else 'content gate, no LLM'})...")
+            desc_source, desc_grounding = "placeholder", 0.0
             try:
-                meta = generate_domain_meta(folder_name, folder)
+                meta = generate_domain_meta(folder_name, folder, evidences, use_llm)
                 description = meta["description"]
                 keywords    = meta["keywords"]
-                print(f"  ✓ Description: {description[:80]}...")
+                desc_source, desc_grounding = meta["source"], meta["grounding"]
+                print(f"  ✓ [{desc_source}, grounding {desc_grounding}] {description[:80]}...")
             except Exception as e:
-                print(f"  ⚠ LLM meta failed ({e}) — using placeholder")
+                print(f"  ⚠ meta generation failed ({e}) — using placeholder")
                 description = f"Knowledge domain: {folder_name}"
                 keywords    = [folder_name.lower(), safe.replace("_", " ")]
             agent_name    = f"{folder_name} Agent"
@@ -986,9 +1067,11 @@ def main():
                 "top_n":        existing.get("top_n", 4),
                 "max_chars":    existing.get("max_chars", 6000),
                 "system_prompt": system_prompt,
+                "description_source":    desc_source,
+                "description_grounding": desc_grounding,
             }
         else:
-            print(f"  ℹ Using placeholder description (re-run without --no-llm to generate)")
+            print(f"  ℹ Using placeholder description (no readable content)")
             agent_name    = f"{folder_name} Agent"
             description   = existing.get("description") or f"Knowledge domain: {folder_name}"
             keywords      = existing.get("keywords") or [folder_name.lower(), safe.replace("_", " ")]
@@ -1021,24 +1104,22 @@ def main():
         #
         # The inline copy lets classify_intent() use per-file context for
         # routing without reading a second file at query time.
-        if use_llm:
-            print(f"  Generating file summaries...")
-            folder_summaries = build_file_summaries(
-                folder_name    = folder_name,
-                folder         = folder,
-                kb_root        = kb_root,
-                existing_cache = summaries_cache,
-                force          = args.force,
-            )
-            # Merge back into the shared cache (written once after the loop)
-            summaries_cache.update(folder_summaries)
-            # Inline in domain_meta: flat map of path → summary string
-            entry["file_summaries"] = {
-                k: v["summary"] for k, v in folder_summaries.items()
-            }
-        else:
-            # --no-llm: carry forward whatever was already stored
-            entry["file_summaries"] = existing.get("file_summaries", {})
+        print(f"  Generating file summaries...")
+        folder_summaries = build_file_summaries(
+            folder_name    = folder_name,
+            folder         = folder,
+            kb_root        = kb_root,
+            existing_cache = summaries_cache,
+            force          = args.force,
+            use_llm        = use_llm,
+            evidence_map   = evidence_map,
+        )
+        # Merge back into the shared cache (written once after the loop)
+        summaries_cache.update(folder_summaries)
+        # Inline in domain_meta: flat map of path → summary string
+        entry["file_summaries"] = {
+            k: v["summary"] for k, v in folder_summaries.items()
+        }
 
         domain_meta[folder_name] = entry
         domains_list.append(entry)
@@ -1065,14 +1146,13 @@ def main():
             print(f"  🗑  Removed stale domain: {key}")
 
     # ── Step 5b: write file_summaries.json cache ──────────────────────────────
-    if use_llm:
-        summaries_path.write_text(
-            json.dumps(summaries_cache, indent=2), encoding="utf-8"
-        )
-        total_summaries = sum(
-            1 for v in summaries_cache.values() if v.get("summary")
-        )
-        print(f"✓ file_summaries.json written ({total_summaries} file summaries)\n")
+    summaries_path.write_text(
+        json.dumps(summaries_cache, indent=2), encoding="utf-8"
+    )
+    total_summaries = sum(
+        1 for v in summaries_cache.values() if v.get("summary")
+    )
+    print(f"✓ file_summaries.json written ({total_summaries} file summaries)\n")
 
     # ── Step 6: write domain_meta.json ────────────────────────────────────────
     meta_path.write_text(json.dumps(domain_meta, indent=2), encoding="utf-8")

@@ -334,6 +334,10 @@ class TestVectorIndexing:
         importlib.reload(c)
         # Reset the ChromaDB client singleton between tests
         import kb_agent_mcp.vector_store as vs
+        # vector_store binds `cfg` at import time; reload() above does not update
+        # that binding, so point it at the fresh tmp config explicitly. Without
+        # this the tests can hit the real .kb_index (dimension-mismatch failures).
+        monkeypatch.setattr(vs, "cfg", c.cfg)
         vs._client = None
         yield
         vs._client = None
@@ -506,11 +510,15 @@ class TestMCPServerTools:
         import kb_agent_mcp.writeback as wb_mod
         import kb_agent_mcp.server as srv_mod
         vs._client = None
+        # Orchestrator caches built agents globally; start from a clean cache so
+        # list_domains reflects this test's KB_ROOT, not a previous test's.
+        import kb_agent_mcp.orchestrator as orch_mod
+        monkeypatch.setattr(orch_mod, "_agents", None)
         # Replace cfg in all consumer modules — monkeypatch restores automatically
         new_cfg = dataclasses.replace(c_mod.cfg, KB_ROOT=str(tmp_path))
         for mod, attr in [
             (c_mod, "cfg"), (audit_mod, "cfg"), (mem_mod, "cfg"),
-            (fb_mod, "cfg"), (wb_mod, "cfg"), (srv_mod, "cfg"),
+            (fb_mod, "cfg"), (wb_mod, "cfg"), (srv_mod, "cfg"), (vs, "cfg"),
         ]:
             monkeypatch.setattr(mod, attr, new_cfg)
         # Create a minimal domain
