@@ -291,7 +291,7 @@ def extract_snippet(file_path: pathlib.Path) -> str:
             from pptx import Presentation
             prs = Presentation(str(file_path))
             text = ""
-            for slide in prs.slides[:6]:
+            for slide in list(prs.slides)[:6]:
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text.strip():
                         text += shape.text.strip() + "\n"

@@ -36,7 +36,7 @@ def _fresh_agent_base(monkeypatch, env: dict[str, str]):
     # Force reimport so module-level constants pick up new env vars.
     for mod_name in list(sys.modules.keys()):
         if "agent_base" in mod_name and "agent_knowledgebase" not in mod_name:
-            del sys.modules[mod_name]
+            monkeypatch.delitem(sys.modules, mod_name, raising=False)
 
     import agent_base as ab
     return ab
