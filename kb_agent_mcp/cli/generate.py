@@ -553,6 +553,18 @@ async def _run_generate(
         else:
             info("Skipped — edit domain_config.yaml manually to add this domain")
 
+    # ── Markdown context store (digests + INDEX.md + MANIFEST.md) ────────────
+    # Incremental and never fatal: a failure here must not fail index generation.
+    try:
+        from kb_agent_mcp.context_store.sync import safe_sync
+        info("Updating markdown context store…")
+        _cres = await asyncio.to_thread(
+            safe_sync, kb_root, [domain_filter] if domain_filter else None)
+        if _cres is not None:
+            ok(f"context store: {_cres.summary()}")
+    except Exception as _exc:
+        warn(f"Context store skipped: {_exc}")
+
     # ── Install Bob skill ─────────────────────────────────────────────────────
     if accepted_domains:
         _install_bob_skill(kb_root, accepted_domains)

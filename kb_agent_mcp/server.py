@@ -1236,6 +1236,37 @@ async def update_document(
     )
 
 
+# ── Tool: kb_context ───────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def kb_context(
+    kind: str = "manifest",
+    domain: str = "",
+    path: str = "",
+) -> str:
+    """
+    Read the markdown context store: a cheap, no-LLM view of the knowledge base.
+
+    Start with the manifest, drill into a domain index, then read one file's digest.
+    The same files sit under <KB_ROOT>/.kb_index/context/ and can be read directly.
+
+    Args:
+        kind:   "manifest" (one line per domain), "index" (a domain or sub-folder
+                listing), or "digest" (summary of a single file).
+        domain: Domain folder name, required for kind="index" (e.g. "BizOps").
+        path:   For "index": optional sub-folder inside the domain.
+                For "digest": the file path relative to KB_ROOT
+                (e.g. "BizOps/Renewal Tracking/file.xlsx").
+    """
+    import asyncio
+    from kb_agent_mcp.context_store.sync import read_context
+
+    try:
+        return await asyncio.to_thread(read_context, kind, None, domain, path)
+    except (FileNotFoundError, ValueError) as exc:
+        return f"❌ {exc}"
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 def _rich_kb_root_error(root_val: str, root_path: str) -> str:

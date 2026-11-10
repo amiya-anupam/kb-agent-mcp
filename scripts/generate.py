@@ -1154,6 +1154,18 @@ def main():
     meta_path.write_text(json.dumps(domain_meta, indent=2), encoding="utf-8")
     print(f"✓ domain_meta.json written ({len(domain_meta)} domains)\n")
 
+    # ── Step 6b: markdown context store (digests + INDEX.md + MANIFEST.md) ────
+    # Incremental: only new/changed files are re-digested. Never fails the run.
+    try:
+        sys.path.insert(0, str(SCRIPT_DIR))
+        from kb_agent_mcp.context_store.sync import safe_sync
+        print("Updating markdown context store...")
+        _cres = safe_sync(kb_root, log=lambda m: print(f"  {m}"))
+        if _cres is not None:
+            print(f"✓ context store: {_cres.summary()}\n")
+    except Exception as _e:
+        print(f"  ⚠ context store skipped ({_e})\n")
+
     # ── Step 7: orchestrator reads domain_meta.json — nothing more to generate ─
     print("  ✓ Orchestrator ready (data-driven from domain_meta.json)\n")
 

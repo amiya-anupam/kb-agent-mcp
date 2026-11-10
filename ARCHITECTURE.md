@@ -26,7 +26,7 @@ The ASCII diagram in the section below shows all three pipelines and every major
 ╔══════════════════════════════════════╩═══════════════════════════════════════════════════╗
 ║  kb-agent-serve  (FastMCP server process)                                                ║
 ║                                                                                          ║
-║  ┌─────────────────────────────────  server.py  (14 tools)  ──────────────────────────┐  ║
+║  ┌─────────────────────────────────  server.py  (20 tools)  ──────────────────────────┐  ║
 ║  │                                                                                     │  ║
 ║  │  ╔══ KB tools ════════════════╗  ╔══ Security Gate ══════════╗  ╔══ Analyst ═════╗ │  ║
 ║  │  ║ ask()                      ║  ║ check_confidential()      ║  ║ analyze_file() ║ │  ║
@@ -136,7 +136,7 @@ There are three independent processing pipelines:
 ```
 kb_agent_mcp/
 ├── __init__.py          Package metadata (__version__ from importlib.metadata)
-├── server.py            FastMCP server — 14 MCP tools; startup validation; stale-index TTL cache
+├── server.py            FastMCP server — 20 MCP tools; startup validation; stale-index TTL cache
 ├── orchestrator.py      Query pipeline: format detection → keyword route → LLM classify → dispatch → aggregate → merge
 ├── domain_agent.py      DomainAgent wrapper — per-domain config, pre-rank, stale_file_count
 ├── base_agent.py        README-first RAG pipeline + all LLM call implementations + question classifiers
@@ -199,7 +199,7 @@ A module-level singleton `cfg = Config()` is imported by every other module.
 ---
 
 ### `server.py`
-The FastMCP application. Registers **fourteen MCP tools** in four groups:
+The FastMCP application. Registers **twenty MCP tools** (main groups below):
 
 **Knowledge Base tools:**
 
@@ -236,6 +236,12 @@ The FastMCP application. Registers **fourteen MCP tools** in four groups:
 | `resume_session` | `resume_session(session_id)` | Returns the last N turns of a prior session so the AI can continue without re-querying |
 | `rate_answer` | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific turn; persists to `feedback.jsonl` |
 | `update_document` | `update_document(rel_path, content, mode?)` | Writes (overwrite) or appends to a document under `KB_ROOT` via `writeback.write_document()` |
+
+**Context Store tool:**
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `kb_context` | `kb_context(kind?, domain?, path?)` | Returns `MANIFEST.md`, a domain/folder `INDEX.md`, or one file digest from `<KB_ROOT>/.kb_index/context/` via `context_store.sync.read_context()` |
 
 **Module-level state:**
 - `_stale_cache: dict` — `{stale, details, checked_at}`; TTL-guarded mtime scan
@@ -1027,7 +1033,7 @@ against the refreshed file inventory after a full rebuild.
 │  kb-agent-serve  (FastMCP server process)                               │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  server.py  (14 MCP tools)                                      │   │
+│  │  server.py  (20 MCP tools)                                      │   │
 │  │  ┌──────────┐ ┌─────────────┐ ┌────────────────┐ ┌──────────┐  │   │
 │  │  │  ask()   │ │list_domains │ │   reindex()    │ │ memory   │  │   │
 │  │  └─────┬────┘ └──────┬──────┘ └───────┬────────┘ └──────────┘  │   │

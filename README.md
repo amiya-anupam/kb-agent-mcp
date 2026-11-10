@@ -91,7 +91,7 @@ Requires Python 3.10+.
 
 ## MCP Tools
 
-Once the server is running, the following **fourteen tools** are available in four groups:
+Once the server is running, the following **twenty tools** are available; the groups below list the main ones:
 
 ### Knowledge Base tools (5)
 
@@ -130,6 +130,12 @@ Supported file formats: `.xlsx` `.xls` `.csv` `.json` `.jsonl` `.pdf` `.docx` `.
 | `resume_session(session_id)` | Returns the last N turns of a prior session |
 | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific answer turn |
 | `update_document(rel_path, content, mode?)` | Writes or appends to a document under `KB_ROOT` |
+
+### Context Store tool (1)
+
+| Tool | Description |
+|---|---|
+| `kb_context(kind?, domain?, path?)` | Read the markdown context store without an LLM: `manifest` → domain `index` → per-file `digest`. Build it with `kb-agent context build`. |
 
 ### `ask` examples
 
@@ -514,7 +520,7 @@ AI tool (Claude, Bob, Cursor, …)
         │   MCP protocol
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  server.py  (FastMCP — 14 tools)                              │
+│  server.py  (FastMCP — 20 tools)                              │
 ├──────────────────────────┬────────────────────────────────────┤
 │  Knowledge Base (5)      │  Data Analyst (4)                  │
 │  ask()                   │  analyze_file()                    │

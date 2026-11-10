@@ -10,6 +10,7 @@ Usage:
   kb-agent watch      # watch KB_ROOT for changes
   kb-agent doctor     # health check (--fix to auto-repair)
   kb-agent status     # per-domain status table
+  kb-agent context    # build / refresh the markdown context store (build|refresh)
   kb-agent init       # first-time setup: setup → generate → doctor in sequence
 
 All flags accepted by each subcommand pass through unchanged:
@@ -37,6 +38,7 @@ _SUBCOMMANDS = {
     "watch":    ("kb_agent_mcp.cli.watch",    "main"),
     "doctor":   ("kb_agent_mcp.cli.doctor",   "main"),
     "status":   ("kb_agent_mcp.cli.status",   "main"),
+    "context":  ("kb_agent_mcp.cli.context",  "main"),
 }
 
 _SUBCOMMAND_HELP = {
@@ -46,6 +48,7 @@ _SUBCOMMAND_HELP = {
     "watch":    "watch KB_ROOT for file changes and keep indexes in sync",
     "doctor":   "run health checks; use --fix to auto-repair failures",
     "status":   "show per-domain health table; use --sessions to list named sessions",
+    "context":  "build / refresh the markdown context store (digests, INDEX.md, MANIFEST.md)",
     "init":     "first-time setup: runs setup → generate → doctor in sequence",
 }
 

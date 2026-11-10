@@ -39,6 +39,7 @@ import re
 import sys
 import json
 import time
+import threading
 import shutil
 import subprocess
 import datetime
@@ -636,6 +637,10 @@ def _purge_folder_artifacts(folder_name: str, cache: dict) -> bool:
         cache_dirty = True
         print(f"[KB Watcher] 🗑 Purged {len(stale)} cache entries for {folder_name}", flush=True)
 
+    # Drop the folder's context-store digests and refresh the MANIFEST (full sync
+    # also prunes digests of deleted domains).
+    _sync_context_store(None, f"folder removed: {folder_name}")
+
     return cache_dirty
 
 
@@ -984,6 +989,28 @@ def _rescan_since(since: float):
     else:
         print(f"[KB Watcher] ✓ Post-generate rescan: nothing missed", flush=True)
 
+# ── Markdown context store hook ───────────────────────────────────────────────
+
+_ctx_lock = threading.Lock()
+
+
+def _sync_context_store(domains, reason: str = ""):
+    """Refresh digests/INDEX/MANIFEST for *domains* (None = all). Never raises."""
+    def _run():
+        if not _ctx_lock.acquire(blocking=False):
+            return                      # a sync is already running; the next event will catch up
+        try:
+            sys.path.insert(0, str(SCRIPT_DIR))
+            from kb_agent_mcp.context_store.sync import safe_sync
+            safe_sync(WATCH_ROOT, domains=domains,
+                      log=lambda m: print(f"[KB Watcher] 📄 {m}", flush=True))
+        except Exception as e:
+            print(f"[KB Watcher] ⚠ context store sync failed: {e}", flush=True)
+        finally:
+            _ctx_lock.release()
+    threading.Thread(target=_run, name="kb-context-sync", daemon=True).start()
+
+
 # ── Embeddings helper (lazy import) ───────────────────────────────────────────
 
 def _update_index(folder_name: str, file_path: pathlib.Path):
@@ -1030,6 +1057,7 @@ class KBHandler(FileSystemEventHandler):
         self._pending_generate:         float | None = None
         self._pending_generate_reason:  str          = ""
         self._pending_reindex:          dict[str, str] = {}   # domain → reason (debounced per-domain)
+        self._pending_context:          set[str] = set()      # domains whose context-store digests are stale
         self._known_folders:            set[str]     = {
             p.name for p in discover_knowledge_folders()
         }
@@ -1081,6 +1109,7 @@ class KBHandler(FileSystemEventHandler):
             # Only fire when the matching readme debounce has passed
             if self._pending_readme.get(folder_name, 0) <= now:
                 del self._pending_deindex[folder_name]
+                self._pending_context.add(folder_name)
                 for fp in files:
                     _remove_index(folder_name, fp)
                     rel_key = str(fp.relative_to(WATCH_ROOT))
@@ -1092,6 +1121,7 @@ class KBHandler(FileSystemEventHandler):
         for folder_name, files in list(self._pending_index.items()):
             if self._pending_readme.get(folder_name, 0) <= now:
                 del self._pending_index[folder_name]
+                self._pending_context.add(folder_name)
                 for fp in files:
                     if fp.exists():
                         _update_index(folder_name, fp)
@@ -1110,6 +1140,11 @@ class KBHandler(FileSystemEventHandler):
             if folder_name in self._pending_reindex:
                 reason = self._pending_reindex.pop(folder_name)
                 run_reindex(folder_name, reason)
+
+        # 3b. Refresh the markdown context store for domains touched this tick
+        if self._pending_context:
+            dirty, self._pending_context = sorted(self._pending_context), set()
+            _sync_context_store(dirty)
 
         # 4. Poll for folder changes the OS may not have delivered directory events for.
         #    macOS FSEvents sometimes coalesces mkdir/rmdir into just file events.
