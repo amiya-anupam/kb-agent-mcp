@@ -743,6 +743,36 @@ def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
     return warnings
 
 
+# Keys (folder + file, without the age) of the stale files reported last time.
+_last_stale_keys: frozenset[str] = frozenset()
+
+
+def report_stale(warnings: list[str], label: str = "Stale file check") -> None:
+    """
+    Log stale-file warnings without flooding the log.
+
+    Always prints one summary line. Per-file detail is printed only when the
+    set of stale files differs from the previous report (the age in days is
+    ignored, since it changes daily).
+    """
+    global _last_stale_keys
+
+    if not warnings:
+        _last_stale_keys = frozenset()
+        print(f"[KB Watcher] ✓ {label}: no stale files", flush=True)
+        return
+
+    keys = frozenset(w.rsplit(" was last updated", 1)[0] for w in warnings)
+    if keys == _last_stale_keys:
+        print(f"[KB Watcher] 🕐 {label}: {len(warnings)} stale files (unchanged)", flush=True)
+        return
+
+    _last_stale_keys = keys
+    print(f"[KB Watcher] 🕐 {label}: {len(warnings)} stale files", flush=True)
+    for w in warnings:
+        print(f"  {w}", flush=True)
+
+
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 def _write_audit(event: str, detail: dict | None = None):
@@ -1091,11 +1121,7 @@ class KBHandler(FileSystemEventHandler):
             self._next_stale_check = now + _STALE_CHECK_INTERVAL
             folders = [WATCH_ROOT / fn for fn in self._known_folders
                        if (WATCH_ROOT / fn).is_dir()]
-            stale   = check_stale_files(folders)
-            if stale:
-                print("[KB Watcher] 🕐 Stale file check:", flush=True)
-                for w in stale:
-                    print(f"  {w}", flush=True)
+            report_stale(check_stale_files(folders))
 
         # 8. LLM upgrade queue — attempt to upgrade heuristic summaries to LLM
         #    quality when the LLM becomes reachable.  Process at most
@@ -1298,13 +1324,7 @@ def main():
             f"(KB_STALE_DAYS — set to 0 to disable)",
             flush=True,
         )
-        stale_warnings = check_stale_files(folders)
-        if stale_warnings:
-            print(f"[KB Watcher] ⚠ Stale files detected:", flush=True)
-            for w in stale_warnings:
-                print(f"  {w}", flush=True)
-        else:
-            print(f"[KB Watcher] ✓ No stale files (all within {STALE_DAYS} days)", flush=True)
+        report_stale(check_stale_files(folders), label="Startup stale check")
 
     handler  = KBHandler()
     observer = Observer()
