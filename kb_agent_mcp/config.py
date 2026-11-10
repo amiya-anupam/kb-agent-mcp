@@ -215,6 +215,15 @@ class Config:
         "KB_SECURITY_GATE_ENABLED", True
     ))
 
+    # ── Tiered retrieval (context store) ──────────────────────────────────────
+    # KB_CONTEXT_STORE=1 makes agents read the markdown context store
+    # (.kb_index/context/: INDEX → digests, then the analyst engine for exact
+    # numbers) before falling back to Chroma / BM25.  On by default; it is a
+    # no-op until a store exists (kb-agent context build).  Set 0 to disable.
+    KB_CONTEXT_STORE: bool = field(default_factory=lambda: _bool(
+        "KB_CONTEXT_STORE", True
+    ))
+
     # ── Default session identity ──────────────────────────────────────────────
     # When set, this name is used as the default session_id instead of
     # "default".  Set KB_DEFAULT_SESSION_ID to a stable value so conversation

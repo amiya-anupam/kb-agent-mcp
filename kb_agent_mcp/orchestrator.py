@@ -132,11 +132,54 @@ def detect_format_intent(
 
 # ── Keyword router ─────────────────────────────────────────────────────────────
 
+_MANIFEST_BULLET_RE = re.compile(r"^- \*\*(?P<name>.+?)\*\* — .*? · (?P<kws>[^·]+)$")
+
+
+def manifest_keywords() -> dict[str, list[str]]:
+    """Per-domain routing keywords from the context-store MANIFEST.md.
+
+    Keywords shared by several domains (e.g. "IBM") carry no routing signal and
+    are dropped. Returns {} when the store is absent.
+    """
+    try:
+        from kb_agent_mcp.context_store.sync import read_context
+        text = read_context("manifest")
+    except Exception:
+        return {}
+    per: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        m = _MANIFEST_BULLET_RE.match(line.strip())
+        if m:
+            per[m["name"]] = [k.strip() for k in m["kws"].split(",") if k.strip()]
+    owners: dict[str, int] = {}
+    for kws in per.values():
+        for k in {k.lower() for k in kws}:
+            owners[k] = owners.get(k, 0) + 1
+    return {n: [k for k in kws if owners[k.lower()] == 1] for n, kws in per.items()}
+
+
+def _count_hits(q: str, kws: list[str]) -> int:
+    seen: set[str] = set()
+    hits = 0
+    for kw in kws:
+        kw = kw.lower()
+        if kw in seen:
+            continue
+        seen.add(kw)
+        if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?:e?s)?(?![a-z0-9])", q):
+            hits += 1
+    return hits
+
+
 def _keyword_hit_counts(
     question: str,
     agents: dict[str, DomainAgent],
 ) -> dict[str, int]:
-    """Whole-word keyword hits per domain; the folder name is an implicit keyword."""
+    """Whole-word keyword hits per domain; the folder name is an implicit keyword.
+
+    With KB_CONTEXT_STORE on, manifest keywords are a fallback signal: they are
+    counted only when the configured keywords match no domain at all.
+    """
     q = question.lower()
     counts: dict[str, int] = {}
     for name, agent in agents.items():
@@ -146,16 +189,10 @@ def _keyword_hit_counts(
             kws.append(low)
             if " " in low:
                 kws.append(low.split()[0])
-        seen: set[str] = set()
-        hits = 0
-        for kw in kws:
-            kw = kw.lower()
-            if kw in seen:
-                continue
-            seen.add(kw)
-            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?:e?s)?(?![a-z0-9])", q):
-                hits += 1
-        counts[name] = hits
+        counts[name] = _count_hits(q, kws)
+    if cfg.KB_CONTEXT_STORE and not any(counts.values()):
+        mk = manifest_keywords()
+        counts = {name: _count_hits(q, mk.get(name, [])) for name in agents}
     return counts
 
 

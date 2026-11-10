@@ -772,6 +772,9 @@ MCP client → server.ask()
     │       ├── [data question] _pre_rank() → vector_store.search() + apply_pin_rules()
     │       └── base_agent.ask()
     │           │
+    │           ├── [KB_CONTEXT_STORE] tiered.tiered_context()   → see "Tiered retrieval"
+    │           │   └── returns None when the store has nothing → falls through to README-first
+    │           │
     │           ├── [README-first]
     │           │   ├── _find_readme()  [_README_CACHE hit → no disk I/O on warm calls]
     │           │   ├── [simple]  _extract_auto_index() → context_budget.build_context()
@@ -836,6 +839,40 @@ MCP client → server.refine_query(session_id, feedback)
       └── query_data(file_path, original_question, session_id)
             (re-runs full pipeline with updated params)
 ```
+
+---
+
+## Tiered retrieval (`KB_CONTEXT_STORE`)
+
+When `KB_CONTEXT_STORE` is on (default) and the markdown context store exists under
+`.kb_index/context/` (built by `kb-agent context build`), `base_agent.ask()` tries the
+store before the README and Chroma paths. Order:
+
+| Tier | Source | Where |
+|---|---|---|
+| 1 | `MANIFEST.md` — which domain | `orchestrator.py` (`manifest_keywords()`) |
+| 2 | `<domain>/INDEX.md` — which files | `tiered.py` (overview questions only) |
+| 3 | per-file digests, ranked by question terms | `tiered.py` (`select_digests`, `compact_digest`) |
+| 4 | analyst engine on the raw file, for exact numbers | `tiered.py` (`_analyst_answer`, data questions only) |
+| 5 | Chroma + BM25 fallback, then README | unchanged `base_agent.ask()` path |
+
+Behaviour notes:
+
+- **Fallback is automatic.** `tiered_context()` returns `None` when the store is missing,
+  the domain has no digests, or nothing matches the question. The README-first and RAG
+  paths then run exactly as before. With the flag off the tiered code is never called.
+- **Manifest routing is a fallback signal.** Manifest keywords are used only when no
+  configured domain keyword matched. Added unconditionally they were noisy and lowered
+  top-1 routing accuracy on the golden set. Matching stays whole-word. Keywords shared by
+  several domains are dropped.
+- **Security gate.** Confidential digests are excluded until `acknowledge_gate()`; the
+  response says how many were excluded. Acknowledged ones are tagged `🔒` in `sources`.
+- **Analyst errors are non-fatal.** `clarifying`, `error`, empty answers and exceptions
+  are ignored and the digests are used alone.
+- **Indexing cap.** `KB_MAX_CHUNKS_PER_FILE` (default 60) limits Chroma chunks per file.
+  Long tabular files rely on digests and the analyst engine for completeness.
+
+Measured on the golden set: [`docs/PHASE4_GOLDEN_COMPARISON.md`](docs/PHASE4_GOLDEN_COMPARISON.md).
 
 ---
 
@@ -1176,6 +1213,8 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_BUDGET_SUMMARY` | `500` | `context_budget.py` | Per-file summary line budget in AUTO-INDEX table |
 | `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint per chunk |
 | `KB_MAX_CHUNKS_PER_FILE` | `60` | `vector_store.py` | Max chunks indexed per file; longer files are sampled head/middle/tail |
+| `KB_STALE_DAYS` | `90` | `config.py` | Days before a file/index is flagged stale in `doctor`, `status` and the watcher (0 = disabled) |
+| `KB_CONTEXT_STORE` | `true` | `tiered.py`, `base_agent.py`, `orchestrator.py` | Answer from the markdown context store (manifest → index → digests → analyst) before Chroma/BM25. No-op when no store exists; set `0` to disable |
 | `KB_MIN_README_CHARS` | `200` | `base_agent.py` | README below this length is treated as absent |
 | `KB_NUM_CTX` | `32768` | `base_agent.py` | Ollama `num_ctx` parameter |
 | `KB_SESSION_TIMEOUT_HOURS` | `2` | `memory.py` | Session auto-expiry in hours |

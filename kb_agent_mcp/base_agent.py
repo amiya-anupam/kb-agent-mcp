@@ -447,6 +447,56 @@ async def ask(
     if max_chars is None:
         max_chars = _cb_get("rag_file")
 
+    # ── Tiered retrieval: context store (flag-gated) ─────────────────────────
+    # INDEX / digests / analyst engine; falls through to README + RAG when the
+    # store is absent or has nothing relevant.
+    if cfg.KB_CONTEXT_STORE:
+        from kb_agent_mcp.tiered import tiered_context
+        tier = await tiered_context(
+            folder_name,
+            question,
+            data_question=is_data_question(question) or pre_ranked_results is not None,
+            session_id=session_id,
+        )
+        if tier is not None:
+            if await is_passthrough():
+                block = _build_passthrough_block(
+                    question=question,
+                    context=tier.context,
+                    system_prompt=system_prompt,
+                    agent_name=agent_name,
+                    source_label=tier.label,
+                )
+                return AgentResult(
+                    agent=agent_name,
+                    answer=block,
+                    sources=tier.sources,
+                    found=True,
+                    passthrough=True,
+                    passthrough_block=block,
+                )
+            messages = [{"role": "system", "content": system_prompt}]
+            if conversation_history:
+                messages.extend(conversation_history[-_cb_get("history"):])
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Use the following knowledge base content to answer the question.\n\n"
+                    f"{tier.context}\n---\n\n"
+                    f"Question: {question}"
+                ),
+            })
+            answer = await call_llm(messages)
+            return AgentResult(
+                agent=agent_name,
+                answer=answer,
+                sources=tier.sources,
+                confidence_footer=format_confidence_footer(tier.sources),
+                found=True,
+                passthrough=False,
+            )
+
+
     # ── Strategy 1: README-first ──────────────────────────────────────────────
     readme_context, source_label = await asyncio.to_thread(
         _get_readme_context, folder_name, question
