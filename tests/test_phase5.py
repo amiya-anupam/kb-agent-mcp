@@ -5,7 +5,7 @@ Phase 5 tests covering Docs & Doctor:
   - Risk 3:  _serve_absolute_path() returns absolute path from venv bin
   - Risk 5:  _check_serve_path() warns when not in a venv
   - Risk 12: _check_chroma_collections() detects RuntimeError (version mismatch)
-  - Risk 11: _check_chroma_collections() warns when indexed_at is > 7 days old
+  - Risk 11: _check_chroma_collections() warns when indexed_at is older than STALE_DAYS
   - Docs:    .env.example contains KB_STALE_CHECK_TTL_SECONDS,
              KB_BUDGET_PASSTHROUGH_THRESHOLD, KB_LLM_PROVIDER_GENERATE
 """
@@ -169,7 +169,7 @@ class TestChromaStaleIndexDoctor:
         return fake_col
 
     def test_fresh_index_passes(self, monkeypatch, capsys):
-        """When indexed_at is < 7 days old, check must pass with ✓."""
+        """When indexed_at is within STALE_DAYS, check must pass with ✓."""
         import kb_agent_mcp.vector_store as vs_mod
         monkeypatch.setattr(vs_mod, "_get_client", lambda: None)
         monkeypatch.setattr(vs_mod, "get_or_create_collection",
@@ -182,17 +182,18 @@ class TestChromaStaleIndexDoctor:
         assert "⚠" not in out
 
     def test_stale_index_warns(self, monkeypatch, capsys):
-        """When indexed_at is > 7 days old, check must warn with ⚠."""
+        """When indexed_at is older than STALE_DAYS, check must warn with ⚠."""
         import kb_agent_mcp.vector_store as vs_mod
+        from kb_agent_mcp.cli.doctor import _check_chroma_collections, STALE_DAYS
+        age = STALE_DAYS + 3
         monkeypatch.setattr(vs_mod, "_get_client", lambda: None)
         monkeypatch.setattr(vs_mod, "get_or_create_collection",
-                            lambda name: self._fake_col(10, age_days=10))
+                            lambda name: self._fake_col(10, age_days=age))
 
-        from kb_agent_mcp.cli.doctor import _check_chroma_collections
         _check_chroma_collections(["TestDomain"])
         out = capsys.readouterr().out
         assert "⚠" in out
-        assert "10" in out  # age in days shown
+        assert str(age) in out  # age in days shown
 
     def test_no_indexed_at_falls_back_to_count(self, monkeypatch, capsys):
         """When indexed_at is absent, fall back to count-based pass/warn."""
