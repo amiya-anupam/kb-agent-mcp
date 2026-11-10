@@ -154,6 +154,17 @@ def select_digests(domain_dir: Path, question: str) -> list[tuple[float, _Doc]]:
     return [x for x in scored if x[0] >= REL_SCORE * best][:MAX_DIGESTS]
 
 
+def domain_scores(question: str, domain_names: list[str], ctx: Path | None = None) -> dict[str, float]:
+    """Best-matching digest score per domain (0.0 = nothing relevant). Routing signal."""
+    base = ctx or context_dir()
+    out = {}
+    for name in domain_names:
+        ddir = base / domain_slug(name)
+        picked = select_digests(ddir, question) if ddir.is_dir() else []
+        out[name] = picked[0][0] if picked else 0.0
+    return out
+
+
 # ── Digest → context ───────────────────────────────────────────────────────────
 
 def compact_digest(text: str) -> str:

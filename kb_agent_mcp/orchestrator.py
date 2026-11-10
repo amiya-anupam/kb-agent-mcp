@@ -225,6 +225,33 @@ def _keyword_confidence(
     return matched, False
 
 
+ROUTE_FANOUT_RATIO = 0.75   # domains scoring this share of the best are also queried
+ROUTE_MAX_DOMAINS  = 2
+
+
+def content_route(question: str, agents: dict[str, DomainAgent]) -> list[str]:
+    """Domains whose context-store digests best match the question, best first.
+
+    Scores every domain by its best digest (name, keyword and body match), so
+    routing follows what the files actually say rather than hand-kept keyword
+    lists.  A runner-up within ROUTE_FANOUT_RATIO of the best is kept so a close
+    call is answered from both domains.  Returns [] when the store is absent or
+    nothing matches.
+    """
+    from kb_agent_mcp.tiered import domain_scores
+    try:
+        scores = domain_scores(question, list(agents))
+    except Exception as exc:                          # routing must never fail a query
+        logger.debug("content routing failed: %s", exc)
+        return []
+    ranked = sorted((n for n, v in scores.items() if v > 0), key=lambda n: -scores[n])
+    if not ranked:
+        return []
+    best = scores[ranked[0]]
+    keep = [n for n in ranked if scores[n] >= ROUTE_FANOUT_RATIO * best]
+    return keep[:ROUTE_MAX_DOMAINS]
+
+
 # ── LLM intent classifier ──────────────────────────────────────────────────────
 
 async def _classify_intent(
@@ -543,8 +570,17 @@ async def _resolve_domains(
     """
     kw_domains, kw_confident = _keyword_confidence(question, agents)
 
+    by_content = content_route(question, agents) if cfg.KB_CONTEXT_STORE else []
+
     if kw_confident:
+        # Content evidence outranks a keyword hit: a bare "CP4I" in a BizOps
+        # spreadsheet question must not send it to the CP4I docs.
+        if by_content and not set(kw_domains) & set(by_content):
+            return by_content, None
         return kw_domains, None
+
+    if by_content:
+        return by_content, None
 
     classification = await _classify_intent(question, history, agents)
     domain_names   = classification["domains"] or kw_domains or [list(agents.keys())[0]]

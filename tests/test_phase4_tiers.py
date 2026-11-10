@@ -281,3 +281,86 @@ def test_golden_question_file_is_well_formed():
     assert len({q["id"] for q in data}) == len(data)
     for q in data:
         assert q["domain"] and q["question"] and q["expected_facts"]
+
+
+# ── Lazy pre-rank (skip Chroma when the store answers) ─────────────────────────
+
+@pytest.fixture
+def agent_env(store, flag, monkeypatch):
+    from kb_agent_mcp import domain_agent
+    monkeypatch.setattr(domain_agent, "_global_data_q", lambda q: True)
+    old = base_agent._passthrough_cache
+    base_agent._passthrough_cache = True
+    calls = []
+
+    async def fake_pre_rank(self, question, top_n=None):
+        calls.append(question)
+        return []
+    monkeypatch.setattr(domain_agent.DomainAgent, "_pre_rank", fake_pre_rank)
+    yield calls
+    base_agent._passthrough_cache = old
+
+
+async def test_pre_rank_skipped_when_store_answers(agent_env, flag):
+    from kb_agent_mcp.domain_agent import DomainAgent
+    flag(True)
+    res = await DomainAgent("BizOps").run("What is the production VPC perpetual part number?", [])
+    assert "D1Q4ELL" in res["answer"]
+    assert agent_env == []
+
+
+async def test_pre_rank_runs_when_store_declines(agent_env, flag):
+    from kb_agent_mcp.domain_agent import DomainAgent
+    flag(True)
+    await DomainAgent("BizOps").run("zzzz qqqq xxxx", [])
+    assert agent_env == ["zzzz qqqq xxxx"]
+
+
+async def test_pre_rank_eager_when_flag_off(agent_env, flag):
+    from kb_agent_mcp.domain_agent import DomainAgent
+    flag(False)
+    await DomainAgent("BizOps").run("What is the production VPC perpetual part number?", [])
+    assert len(agent_env) == 1
+
+
+# ── Content-based routing ──────────────────────────────────────────────────────
+
+@pytest.fixture
+def two_domains(tmp_path, monkeypatch):
+    root = tmp_path / "kb"
+    (root / "BizOps").mkdir(parents=True)
+    (root / "Cloud Docs").mkdir()
+    (root / "BizOps" / "renewals_tracking.md").write_text(
+        "# Renewals tracking\n\nRenewal rate by region for the half-year renewals.\n", encoding="utf-8")
+    (root / "Cloud Docs" / "overview.md").write_text(
+        "# Overview\n\nCloud Pak architecture and installation guide.\n", encoding="utf-8")
+    for c in _cfgs():
+        monkeypatch.setattr(type(c), "kb_root_path", property(lambda self: root))
+        monkeypatch.setattr(type(c), "kb_index_path", property(lambda self: root / ".kb_index"))
+    sync(root)
+    from kb_agent_mcp.domain_agent import DomainAgent
+    agents = {n: DomainAgent(n) for n in ("BizOps", "Cloud Docs")}
+    agents["Cloud Docs"].config.keywords = ["cloud pak"]      # greedy keyword
+    return agents
+
+
+def test_content_route_ranks_domain_by_digest_match(two_domains):
+    from kb_agent_mcp.orchestrator import content_route
+    assert content_route("renewal rate by region", two_domains)[0] == "BizOps"
+    assert content_route("zzzz qqqq", two_domains) == []
+
+
+async def test_content_beats_greedy_keyword(two_domains, flag):
+    from kb_agent_mcp.orchestrator import _resolve_domains
+    flag(True)
+    q = "renewal rate by region for cloud pak renewals"
+    domains, _ = await _resolve_domains(q, [], two_domains)
+    assert domains[0] == "BizOps"
+
+
+async def test_routing_unchanged_when_flag_off(two_domains, flag):
+    from kb_agent_mcp.orchestrator import _keyword_confidence, _resolve_domains
+    flag(False)
+    q = "install cloud pak"
+    domains, _ = await _resolve_domains(q, [], two_domains)
+    assert domains == _keyword_confidence(q, two_domains)[0]

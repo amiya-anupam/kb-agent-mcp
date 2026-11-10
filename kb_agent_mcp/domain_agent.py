@@ -97,7 +97,14 @@ class DomainAgent:
 
         if needs_raw_rag:
             # Bypass README-first: go directly to vector search + pin rules
-            pre_ranked = await self._pre_rank(question, top_n=effective_top_n)
+            if cfg.KB_CONTEXT_STORE:
+                # Lazy: only pay for Chroma/re-rank if the tiered store and
+                # README-first both decline to answer.
+                async def _lazy() -> list[dict]:
+                    return await self._pre_rank(question, top_n=effective_top_n)
+                pre_ranked, lazy = None, _lazy
+            else:
+                pre_ranked, lazy = await self._pre_rank(question, top_n=effective_top_n), None
             return await _base_ask(
                 question=question,
                 folder_name=self.folder_name,
@@ -108,6 +115,7 @@ class DomainAgent:
                 max_chars=self.config.max_chars,
                 pre_ranked_results=pre_ranked,
                 session_id=session_id,
+                pre_rank_fn=lazy,
             )
 
         # Normal path: README-first with optional fallback

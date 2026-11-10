@@ -770,6 +770,7 @@ MCP client → server.ask()
     ├── asyncio.gather( DomainAgent.run() × N )
     │   └── DomainAgent.run()
     │       ├── [data question] _pre_rank() → vector_store.search() + apply_pin_rules()
+    │       │       (flag on: passed lazily as pre_rank_fn; skipped when the store answers)
     │       └── base_agent.ask()
     │           │
     │           ├── [KB_CONTEXT_STORE] tiered.tiered_context()   → see "Tiered retrieval"
@@ -865,6 +866,17 @@ Behaviour notes:
   configured domain keyword matched. Added unconditionally they were noisy and lowered
   top-1 routing accuracy on the golden set. Matching stays whole-word. Keywords shared by
   several domains are dropped.
+- **Content routing.** `orchestrator.content_route()` scores each domain by its best
+  `select_digests` match (`tiered.domain_scores()`) and keeps domains within
+  `ROUTE_FANOUT_RATIO` (0.75) of the best, at most `ROUTE_MAX_DOMAINS` (2). In
+  `_resolve_domains` it wins over the keyword router when the keyword router is not
+  confident, or when it is confident but shares no domain with the content result (a
+  greedy keyword such as "CP4I"). Otherwise the keyword/LLM-classifier path runs
+  unchanged. It returns `[]` when the store is absent or nothing matches.
+- **Lazy pre-rank.** `DomainAgent.run()` no longer runs `_pre_rank()` up front when the
+  flag is on. It passes it as `pre_rank_fn`, and `base_agent.ask()` awaits it only if the
+  tier and README paths decline, so the Chroma query is skipped when the store answers.
+  `pre_ranked_results` is still the fallback when the store returns `None`.
 - **Security gate.** Confidential digests are excluded until `acknowledge_gate()`; the
   response says how many were excluded. Acknowledged ones are tagged `🔒` in `sources`.
 - **Analyst errors are non-fatal.** `clarifying`, `error`, empty answers and exceptions

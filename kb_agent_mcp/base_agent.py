@@ -442,8 +442,14 @@ async def ask(
     max_chars: int | None = None,
     pre_ranked_results: list[dict] | None = None,
     session_id: str = "default",
+    pre_rank_fn=None,
 ) -> AgentResult:
-    """README-first async RAG pipeline for a single domain folder."""
+    """README-first async RAG pipeline for a single domain folder.
+
+    ``pre_rank_fn`` is an optional zero-arg async callable returning ranked
+    results. It is awaited only if the tiered store and README-first both
+    decline, so the (costly) Chroma/re-rank step is skipped when they answer.
+    """
     if max_chars is None:
         max_chars = _cb_get("rag_file")
 
@@ -455,7 +461,11 @@ async def ask(
         tier = await tiered_context(
             folder_name,
             question,
-            data_question=is_data_question(question) or pre_ranked_results is not None,
+            data_question=(
+                is_data_question(question)
+                or pre_ranked_results is not None
+                or pre_rank_fn is not None
+            ),
             session_id=session_id,
         )
         if tier is not None:
@@ -546,6 +556,8 @@ async def ask(
     # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
     if pre_ranked_results is not None:
         results = pre_ranked_results
+    elif pre_rank_fn is not None:
+        results = await pre_rank_fn()
     else:
         from kb_agent_mcp.vector_store import search as _vs_search
         results = await _vs_search(folder_name, question, top_n=top_n)
