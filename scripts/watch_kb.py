@@ -1034,7 +1034,7 @@ class KBHandler(FileSystemEventHandler):
         }
         self._cache:                    dict         = _load_summary_cache()
         self._next_stale_check:         float        = time.time() + _STALE_CHECK_INTERVAL
-        self._next_log_check:           float        = 0.0
+        self._next_log_check:           float        = time.time() + _LOG_CHECK_SECS
         self._next_resync:              float        = (
             time.time() + _RESYNC_INTERVAL if _RESYNC_INTERVAL > 0 else float("inf")
         )
