@@ -55,6 +55,7 @@ from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
 from agent_base import (  # noqa: E402
     _find_readme as find_readme,
     DEFAULT_BLOCKLIST,
+    is_ignored_folder,
     folder_to_safe_name,
     _has_noindex_ancestor,
 )
@@ -188,7 +189,7 @@ def is_knowledge_folder(path: pathlib.Path) -> bool:
     return (
         path.is_dir()
         and path.parent == WATCH_ROOT
-        and path.name.lower() not in BLOCKLIST
+        and not is_ignored_folder(path.name, BLOCKLIST)
     )
 
 def discover_knowledge_folders() -> list[pathlib.Path]:
@@ -1207,7 +1208,7 @@ class KBHandler(FileSystemEventHandler):
         path = pathlib.Path(event.src_path)
 
         if event.is_directory:
-            if path.parent == WATCH_ROOT and path.name.lower() not in BLOCKLIST:
+            if path.parent == WATCH_ROOT and not is_ignored_folder(path.name, BLOCKLIST):
                 if path.name not in self._known_folders:
                     self._known_folders.add(path.name)
                     print(f"[KB Watcher] 📁 New folder: {path.name} → scheduling generate.py",
@@ -1216,7 +1217,7 @@ class KBHandler(FileSystemEventHandler):
             return
 
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if is_readme(path) or should_skip(path):
             return
@@ -1251,7 +1252,7 @@ class KBHandler(FileSystemEventHandler):
             return
 
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if is_readme(path) or path.suffix.lower() not in INCLUDE_EXTS:
             return
@@ -1274,7 +1275,7 @@ class KBHandler(FileSystemEventHandler):
             old_name = src.name
             new_name = dest.name
 
-            if old_name in self._known_folders and new_name.lower() not in BLOCKLIST:
+            if old_name in self._known_folders and not is_ignored_folder(new_name, BLOCKLIST):
                 self._known_folders.discard(old_name)
                 self._known_folders.add(new_name)
                 print(f"[KB Watcher] ✏ Folder renamed: {old_name} → {new_name} "
@@ -1298,12 +1299,12 @@ class KBHandler(FileSystemEventHandler):
         src_folder  = top_folder_name(event.src_path)
         dest_folder = top_folder_name(event.dest_path)
 
-        if src_folder and src_folder.lower() not in BLOCKLIST:
+        if src_folder and not is_ignored_folder(src_folder, BLOCKLIST):
             if not is_readme(src) and src.suffix.lower() in INCLUDE_EXTS and not should_skip(src):
                 print(f"[KB Watcher] ↩ {src.name} moved/renamed → deindexing src", flush=True)
                 self._schedule_deindex(src_folder, src)
 
-        if dest_folder and dest_folder.lower() not in BLOCKLIST:
+        if dest_folder and not is_ignored_folder(dest_folder, BLOCKLIST):
             if not is_readme(dest) and dest.suffix.lower() in INCLUDE_EXTS and not should_skip(dest):
                 print(f"[KB Watcher] ↪ {dest.name} moved/renamed → indexing dest", flush=True)
                 self._schedule_index(dest_folder, dest)
@@ -1316,7 +1317,7 @@ class KBHandler(FileSystemEventHandler):
         if is_readme(path):
             return
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if path.suffix.lower() not in INCLUDE_EXTS or should_skip(path):
             return

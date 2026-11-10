@@ -130,6 +130,29 @@ DEFAULT_BLOCKLIST: frozenset[str] = frozenset({
     ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
 })
 
+# Repo infrastructure that must never become a knowledge domain. Mirrors
+# kb_agent_mcp.config.BUILTIN_IGNORE so the legacy scripts and the package agree.
+INFRA_FOLDERS: frozenset[str] = frozenset({
+    ".github", ".kb_index", ".pytest_cache",
+    "kb_agent_mcp", "scripts", "tests",
+})
+
+
+def is_ignored_folder(name: str, blocklist: frozenset[str] | set[str] = DEFAULT_BLOCKLIST) -> bool:
+    """Return True if a top-level folder must not be treated as a knowledge domain.
+
+    Same rules as kb_agent_mcp.config.Config.is_ignored: blocklist / infra names,
+    any dot-folder, and Python packaging artifacts (.egg-info, .dist-info).
+    """
+    lower = name.lower()
+    return (
+        lower in blocklist
+        or lower in INFRA_FOLDERS
+        or lower.startswith(".")
+        or lower.endswith((".egg-info", ".dist-info"))
+    )
+
+
 INCLUDE_EXTS: frozenset[str] = frozenset({
     ".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
     ".csv", ".boxnote", ".ppt", ".doc",
