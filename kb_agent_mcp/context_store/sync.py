@@ -152,6 +152,31 @@ def safe_sync(kb_root: str | Path | None = None, domains: Iterable[str] | None =
     return res
 
 
+def digest_text_for(source: str | Path, kb_root: str | Path | None = None) -> str | None:
+    """Text of the current digest of `source`, building (and storing) it if missing or stale.
+
+    Returns None when the file is not digestable, lies outside a domain folder, or the
+    digest cannot be built; never raises, so vector indexing can fall back to raw text.
+    """
+    try:
+        if kb_root is None:
+            from kb_agent_mcp.config import cfg
+            root = cfg.kb_root_path
+        else:
+            root = Path(kb_root).expanduser().resolve()
+        src = Path(source)
+        if not digestable(src):
+            return None
+        dp = digest_path(context_dir(root), root, src)
+        if not is_current(src, dp):
+            dp.parent.mkdir(parents=True, exist_ok=True)
+            write_if_changed(dp, build_digest_for(src, root))
+        return dp.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.debug("no digest text for %s: %s", source, exc)
+        return None
+
+
 def _remove_orphans(domain_dir: Path, expected: set[Path], ctx: Path, res: SyncResult) -> None:
     if not domain_dir.is_dir():
         return

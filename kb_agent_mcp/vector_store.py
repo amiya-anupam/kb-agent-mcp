@@ -123,9 +123,32 @@ def _cap_chunks(chunks: list[str], cap: int) -> list[str]:
     return chunks[:head] + chunks[mid_start:mid_start + mid] + chunks[len(chunks) - tail:]
 
 
-def _chunk_id(file_id: str, idx: int) -> str:
+def _chunk_id(file_id: str, idx: int | str) -> str:
     """Build the ChromaDB document ID for chunk *idx* of *file_id*."""
     return f"{file_id}{_CHUNK_SEP}{idx}"
+
+
+def _digest_chunks(file_path: pathlib.Path) -> list[str]:
+    """Chunks of the file's markdown digest ([] when it has none or cannot be built)."""
+    try:
+        from kb_agent_mcp.context_store.sync import digest_text_for
+        text = digest_text_for(file_path, cfg.kb_root_path)
+    except Exception as exc:
+        logger.debug("digest chunks for %s unavailable (%s)", file_path, exc)
+        return []
+    return chunk_text(text) if text else []
+
+
+def _digest_missing(col, doc_id: str, file_path: pathlib.Path) -> bool:
+    """True when the file is digestable but its digest was never indexed (pre-3.8 index)."""
+    try:
+        from kb_agent_mcp.context_store import digestable
+        if not digestable(file_path):
+            return False
+        got = col.get(ids=[_chunk_id(doc_id, "digest_0")], include=["metadatas"])
+        return not got["metadatas"]
+    except Exception:
+        return False
 
 
 def _file_id_from_chunk(chunk_id: str) -> str:
@@ -491,7 +514,8 @@ def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
     try:
         existing = col.get(ids=[chunk0_id], include=["metadatas"])
         if existing["metadatas"] and existing["metadatas"][0].get("hash") == current_hash:
-            return False  # unchanged
+            if not _digest_missing(col, doc_id, file_path):
+                return False  # unchanged
     except Exception as exc:
         logger.warning("Hash-check for %s failed (%s); will re-index", doc_id, exc)
 
@@ -528,8 +552,28 @@ def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
             "folder":      domain,
             "chunk_index": idx,
             "chunk_total": len(chunks),
+            "source":      "raw",
             # hash only stored on chunk 0 — sufficient for change detection
             "hash": current_hash if idx == 0 else "",
+        })
+
+    # Also index the markdown digest (file profile, columns, aggregates) as chunks
+    # tagged source="digest".  For tabular files the raw text is capped to a few
+    # head/middle/tail chunks of cells, so a question like "which region renewed
+    # most?" matches the digest's description far better than any cell chunk.
+    digest_chunks = _digest_chunks(file_path)
+    for idx, chunk in enumerate(digest_chunks):
+        ids.append(_chunk_id(doc_id, f"digest_{idx}"))
+        embeddings.append(_embed_sync(f"{file_path.name}\n{chunk}"))
+        documents.append(chunk)
+        metadatas.append({
+            "path":        doc_id,
+            "name":        file_path.name,
+            "folder":      domain,
+            "chunk_index": idx,
+            "chunk_total": len(digest_chunks),
+            "source":      "digest",
+            "hash":        "",
         })
 
     col.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
