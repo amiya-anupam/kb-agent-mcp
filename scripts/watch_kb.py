@@ -773,6 +773,39 @@ def report_stale(warnings: list[str], label: str = "Stale file check") -> None:
         print(f"  {w}", flush=True)
 
 
+# ── Log rotation ──────────────────────────────────────────────────────────────
+
+# launchd/nohup own the stdout redirect to .watch.log and keep it open, so the
+# file cannot be renamed away. Copy the content to .1, then truncate in place.
+LOG_PATH         = SCRIPT_DIR / ".watch.log"
+_LOG_MAX_BYTES   = int(os.environ.get("KB_LOG_MAX_MB", "10")) * 1024 * 1024
+_LOG_BACKUPS     = 3
+_LOG_CHECK_SECS  = 60
+
+
+def rotate_log(path: pathlib.Path = LOG_PATH,
+               max_bytes: int = _LOG_MAX_BYTES,
+               backups: int = _LOG_BACKUPS) -> bool:
+    """Rotate ``path`` to ``path.1`` … ``path.N`` once it exceeds ``max_bytes``.
+
+    Returns True if a rotation happened. Never raises.
+    """
+    try:
+        if max_bytes <= 0 or not path.exists() or path.stat().st_size <= max_bytes:
+            return False
+        for i in range(backups - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{i}")
+            if src.exists():
+                src.replace(path.with_name(f"{path.name}.{i + 1}"))
+        shutil.copyfile(path, path.with_name(f"{path.name}.1"))
+        with path.open("r+b") as fh:
+            fh.truncate(0)
+        return True
+    except OSError as e:
+        print(f"[KB Watcher] ⚠ Log rotation failed: {e}", flush=True)
+        return False
+
+
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 def _write_audit(event: str, detail: dict | None = None):
@@ -1001,6 +1034,7 @@ class KBHandler(FileSystemEventHandler):
         }
         self._cache:                    dict         = _load_summary_cache()
         self._next_stale_check:         float        = time.time() + _STALE_CHECK_INTERVAL
+        self._next_log_check:           float        = 0.0
         self._next_resync:              float        = (
             time.time() + _RESYNC_INTERVAL if _RESYNC_INTERVAL > 0 else float("inf")
         )
@@ -1115,6 +1149,11 @@ class KBHandler(FileSystemEventHandler):
             print(f"[KB Watcher] 🔄 Scheduled 24h resync — running generate.py", flush=True)
             run_generate("scheduled resync")
             self._known_folders = {p.name for p in discover_knowledge_folders()}
+
+        # 6b. Log rotation (cheap stat once a minute)
+        if now >= self._next_log_check:
+            self._next_log_check = now + _LOG_CHECK_SECS
+            rotate_log()
 
         # 7. Hourly stale-file check
         if STALE_DAYS > 0 and now >= self._next_stale_check:
