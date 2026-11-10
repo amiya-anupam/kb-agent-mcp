@@ -136,11 +136,27 @@ def _keyword_hit_counts(
     question: str,
     agents: dict[str, DomainAgent],
 ) -> dict[str, int]:
+    """Whole-word keyword hits per domain; the folder name is an implicit keyword."""
     q = question.lower()
-    return {
-        name: sum(1 for kw in agent.config.keywords if kw.lower() in q)
-        for name, agent in agents.items()
-    }
+    counts: dict[str, int] = {}
+    for name, agent in agents.items():
+        kws = list(agent.config.keywords)
+        if kws:
+            low = name.lower()
+            kws.append(low)
+            if " " in low:
+                kws.append(low.split()[0])
+        seen: set[str] = set()
+        hits = 0
+        for kw in kws:
+            kw = kw.lower()
+            if kw in seen:
+                continue
+            seen.add(kw)
+            if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?:e?s)?(?![a-z0-9])", q):
+                hits += 1
+        counts[name] = hits
+    return counts
 
 
 def _keyword_confidence(

@@ -234,7 +234,11 @@ def _is_passthrough_mode() -> bool:
     try:
         import httpx
         r = httpx.get(f"{LLM_BASE_URL}/api/tags", timeout=3.0)
-        return r.status_code >= 400
+        if r.status_code >= 400:
+            return True
+        # Ollama is up, but the configured model must actually be pulled
+        names = {m.get("name", "") for m in r.json().get("models", [])}
+        return not any(n == MODEL or n.split(":")[0] == MODEL for n in names)
     except Exception:
         return True  # unreachable → passthrough
 

@@ -105,7 +105,13 @@ async def _check_passthrough() -> bool:
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(f"{cfg.KB_LLM_BASE_URL}/api/tags")
-            return r.status_code >= 400
+            if r.status_code >= 400:
+                return True
+            # Ollama is up, but the configured model must actually be pulled
+            names = {m.get("name", "") for m in r.json().get("models", [])}
+            return not any(
+                n == cfg.KB_MODEL or n.split(":")[0] == cfg.KB_MODEL for n in names
+            )
     except Exception as exc:
         logger.debug("Ollama reachability check failed (%s); treating as passthrough", exc)
         return True  # unreachable → passthrough

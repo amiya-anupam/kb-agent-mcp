@@ -7,12 +7,12 @@ description: >
 
   Current domains (4):
   - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: BizOps: 117 documents (81 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, Deployment Tracking, ELA Tracking, Transaction Pipeline Tracking, revenue, opportunity, renewals, emea, renewed
+  - **BizOps**: BizOps: 128 documents (84 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, ACE Attrition Bob Analysis, Deployment Tracking, ELA Tracking, revenue, renewals, emea, renewed, expiring, japan
   - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-  - **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
+  - **skills**: skills: 0 documents ()
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  App Connect, ACE, migration, revenue, opportunity, renewals, Cloud Pak for Integration, CP4I, presentation, skills, knowledge domain, notes, what does my KnowledgeBase say, /kb, /agent
+  App Connect, ACE, migration, revenue, renewals, emea, Cloud Pak for Integration, CP4I, presentation, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -35,9 +35,9 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 
 ## Current Domains
 - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: BizOps: 117 documents (81 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, Deployment Tracking, ELA Tracking, Transaction Pipeline Tracking, revenue, opportunity, renewals, emea, renewed
+- **BizOps**: BizOps: 128 documents (84 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, ACE Attrition Bob Analysis, Deployment Tracking, ELA Tracking, revenue, renewals, emea, renewed, expiring, japan
 - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-- **skills**: This folder contains information related to skills, including knowledge domain notes and additional content.
+- **skills**: skills: 0 documents ()
 
 ## Usage
 Just ask naturally — Bob detects the intent and runs the agent:
