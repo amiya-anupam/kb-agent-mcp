@@ -162,6 +162,10 @@ class Config:
     KB_BUDGET_EMBED_CHARS: int = field(default_factory=lambda: _int(
         "KB_BUDGET_EMBED_CHARS", 3500
     ))
+    # Maximum chunks stored per file; longer files are sampled head/middle/tail.
+    KB_MAX_CHUNKS_PER_FILE: int = field(default_factory=lambda: _int(
+        "KB_MAX_CHUNKS_PER_FILE", 60
+    ))
     KB_MIN_README_CHARS: int = field(default_factory=lambda: _int(
         "KB_MIN_README_CHARS", 200
     ))

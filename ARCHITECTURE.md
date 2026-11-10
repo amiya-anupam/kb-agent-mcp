@@ -1168,7 +1168,8 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_BUDGET_PRE_INDEX` | `2000` | `context_budget.py` | Hand-written README intro budget |
 | `KB_BUDGET_RAG_FILE` | `4000` | `context_budget.py` | Max chars per file in RAG fallback and gate scan |
 | `KB_BUDGET_SUMMARY` | `500` | `context_budget.py` | Per-file summary line budget in AUTO-INDEX table |
-| `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint |
+| `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint per chunk |
+| `KB_MAX_CHUNKS_PER_FILE` | `60` | `vector_store.py` | Max chunks indexed per file; longer files are sampled head/middle/tail |
 | `KB_MIN_README_CHARS` | `200` | `base_agent.py` | README below this length is treated as absent |
 | `KB_NUM_CTX` | `32768` | `base_agent.py` | Ollama `num_ctx` parameter |
 | `KB_SESSION_TIMEOUT_HOURS` | `2` | `memory.py` | Session auto-expiry in hours |

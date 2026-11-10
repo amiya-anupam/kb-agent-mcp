@@ -108,6 +108,21 @@ def chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP
     return chunks
 
 
+# Upper bound on characters extracted from one file before chunking.
+_MAX_EXTRACT_CHARS = 5_000_000
+
+
+def _cap_chunks(chunks: list[str], cap: int) -> list[str]:
+    """Keep at most *cap* chunks, sampling head, middle and tail contiguously."""
+    if cap <= 0 or len(chunks) <= cap:
+        return chunks
+    head = cap // 3
+    tail = cap // 3
+    mid = cap - head - tail
+    mid_start = (len(chunks) - mid) // 2
+    return chunks[:head] + chunks[mid_start:mid_start + mid] + chunks[len(chunks) - tail:]
+
+
 def _chunk_id(file_id: str, idx: int) -> str:
     """Build the ChromaDB document ID for chunk *idx* of *file_id*."""
     return f"{file_id}{_CHUNK_SEP}{idx}"
@@ -480,9 +495,9 @@ def _upsert_file_sync(domain: str, file_path: pathlib.Path) -> bool:
     except Exception as exc:
         logger.warning("Hash-check for %s failed (%s); will re-index", doc_id, exc)
 
-    # Extract the full document text (up to KB_BUDGET_EMBED_CHARS) and chunk it.
-    full_text = _snippet(file_path, max_chars=cfg.KB_BUDGET_EMBED_CHARS)
-    chunks    = chunk_text(full_text)
+    # Extract the full document text and chunk it; cap chunks per file.
+    full_text = _snippet(file_path, max_chars=_MAX_EXTRACT_CHARS)
+    chunks    = _cap_chunks(chunk_text(full_text), cfg.KB_MAX_CHUNKS_PER_FILE)
 
     # Delete any previously stored chunks for this file before re-indexing.
     # We use a metadata filter so stale chunks from a previously larger file
