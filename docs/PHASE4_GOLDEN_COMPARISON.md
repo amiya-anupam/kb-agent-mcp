@@ -1,6 +1,6 @@
 # Phase 4 — tiered retrieval: golden-set comparison
 
-Task 4.4 of `IMPLEMENTATION_PLAN.html`. Compares the old path (`KB_CONTEXT_STORE=0`:
+Task 4.4 of the refactor plan. Compares the old path (`KB_CONTEXT_STORE=0`:
 README-first, then Chroma/BM25) with the tiered path (`KB_CONTEXT_STORE=1`).
 
 ## Method

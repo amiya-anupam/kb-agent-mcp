@@ -156,12 +156,12 @@ kb_agent_mcp/
 ├── config.py            Frozen Config dataclass — reads all env vars + .env; module-level cfg singleton
 ├── security_gate.py     Anti-trick confidentiality gate — classify, scan, token, GateSession persistence
 ├── aggregator.py        Cross-domain answer synthesis — merges multi-agent results into a single coherent answer
-├── audit.py             Append-only JSONL audit log — log_turn(), read_log(); size-capped rotation
+├── audit.py             Append-only JSONL audit log — log_turn(), log_event(), read_log(), summarise_log(); size-capped rotation
 ├── feedback.py          Per-answer 1–5 star ratings — record(), read_feedback(); persisted to feedback.jsonl
 ├── writeback.py         Safe document write-back — write_document(rel_path, content, mode) → WriteResult
 ├── tiered.py            Tiered retrieval over the markdown context store (INDEX → digests → analyst); domain_scores() for routing
 ├── reranker.py          Optional cross-encoder re-rank pass (rerank, is_available, reset); KB_RERANKER_*
-├── format_instruction.py  apply_format_instruction() — dependency-free, shared with agents/
+├── format_instruction.py  apply_format_instruction(), format tables, detect_format_intent_key() — dependency-free, shared with agents/
 ├── _xlsx_stream.py      Streaming XLSX aggregation shared by file_parser.py and agents/ (internal)
 ├── _context_budget_logic.py  Pure compaction logic shared by both context_budget modules (internal)
 ├── context_store/
@@ -299,7 +299,12 @@ Coordinates the full query pipeline for every `ask()` call:
 7. **Memory persistence** — `add_turn_sync(session_id, question, answer)` appends
    to the session file (sync disk write at the end of the pipeline).
 8. **Audit logging** — `audit.log_turn(session_id, question, answer)` appends one
-   JSONL record to `.kb_index/audit.jsonl` after every successful `ask()`.
+   JSONL record (`event: "query"`) to `.kb_index/audit.jsonl` after every successful
+   `ask()`. Indexing runs write `generate_complete` / `reindex_complete` lines through
+   `audit.log_event()`, so every line carries `event`, a numeric `ts` and an ISO `iso`;
+   identical consecutive `generate_complete` runs are coalesced into one line with a
+   `count`. `summarise_log()` counts only `event == "query"` lines (a missing `event`
+   is treated as `query`); the drift check in `agents/` reads the last indexing event.
 
 `_agents` is a module-level dict loaded lazily on first `ask()` call (double-checked
 locking via `asyncio.Lock`). `refresh_agents()` rebuilds it after `reindex()`.
@@ -472,7 +477,12 @@ Loads and validates `domain_config.yaml` for each knowledge folder.
 `boost_keywords` (list), `data_patterns` (list of regex strings), `complex_patterns` (list).
 
 `load_domain_config(folder_name)` reads `domain_config.yaml` from the domain folder
-(via PyYAML when available, else falls back to a minimal config). Compiled
+(via PyYAML when available, else falls back to a minimal config); the file-level parse
+is `load_domain_config_file(config_path, folder_name)`.
+`overlay_domain_config(entry, folder_dir)` returns a legacy `domain_meta.json` entry
+with `agent_name`, `description`, `keywords`, `top_n`, `max_chars` and `system_prompt`
+taken from the yaml — `domain_config.yaml` is the single source of truth, and the
+legacy cache is derived from it. Compiled
 `re.Pattern` objects for `data_patterns` / `complex_patterns` are materialised lazily
 on first `is_data_question()` / `is_complex_question()` call.
 
@@ -651,8 +661,9 @@ re-ranker is available. Disabled with `KB_RERANKER_ENABLED=false`.
 ---
 
 ### Internal shared modules
-- `format_instruction.py` — `apply_format_instruction(system_prompt, format_instruction)`;
-  dependency-free, imported by `domain_agent.py` and `agents/agent_base.py`.
+- `format_instruction.py` — `apply_format_instruction(system_prompt, format_instruction)`,
+  the format tables and `detect_format_intent_key()`; dependency-free, imported by
+  `domain_agent.py`, `orchestrator.py` and `agents/agent_base.py`.
 - `_xlsx_stream.py` — streaming XLSX aggregation (`AGG_KEYWORDS`, `PREFERRED_NUM_COLS`,
   `stream_xlsx_aggregate`), used by `file_parser.py` and `agents/agent_base.py`.
 - `_context_budget_logic.py` — pure compaction logic; `kb_agent_mcp/context_budget.py` and
@@ -1365,7 +1376,23 @@ independently from the same `KB_ROOT`.
 
 **Shared logic:** `format_instruction`, `_xlsx_stream` and `_context_budget_logic`
 live in `kb_agent_mcp/`; the `agents/` modules import them from there. The package
-never imports from `agents/`.
+never imports from `agents/`. Beyond those, `agents/` is a set of thin shims:
+
+| `agents/` module | Reuses from `kb_agent_mcp/` |
+|---|---|
+| `memory.py` | `memory` helpers (`_trim_messages`, `_session_record`, compression) |
+| `embeddings.py` | `embeddings` backends (`_embed_ollama`, `_embed_openai`, `_embed_sentence_transformers`, `_embed_sync`) |
+| `agent_base.py` | `base_agent` (`_find_readme`, `_non_index_chars`, `format_confidence_footer`), `format_instruction`, `orchestrator.confidence_from_counts` |
+
+Left separate on purpose (behaviour differs): sync `call_llm`/`ask`, `should_skip`
+and the slug helpers. The legacy default session stays in
+`agents/vector_store/session_memory.json`.
+
+**Domain metadata:** `domain_config.yaml` is canonical.
+`agents/vector_store/domain_meta.json` is a derived cache — `scripts/generate.py`
+overlays the yaml before writing it and `agents/agent_knowledgebase.load_domain_meta()`
+overlays it again on read. The per-domain `*_index.json` files are still used by the
+legacy embeddings path; the package uses Chroma and never reads either file.
 
 **Security gate:** implemented only in `kb_agent_mcp/security_gate.py`. Legacy
 `agents/` queries bypass the gate — this is intentional for backward compatibility
