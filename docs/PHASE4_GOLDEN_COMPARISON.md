@@ -94,8 +94,37 @@ Recall is scored on the model's answer. Avg chars is what `call_llm` received.
   recall on 0.769 → 0.808, avg chars sent 8,141 → 5,932. Single runs of a 14B model vary
   (`bz-renewal-rate-*` flipped between two runs with identical context), so treat ±1 question
   as noise.
-- `bz-part-vpc-perpetual` and `bz-part-linux-z` have the right context in passthrough
-  (recall 1.00) but the model's answer misses it, so those are model-side, not retrieval.
+- `bz-part-vpc-perpetual` and `bz-part-linux-z` (task 5 follow-up). Replaying the exact prompt
+  on the tiered path: the right part number is in the context (`D1Q4ELL` at char 1,140 of
+  2,653; `Z287CLL` at char 1,600 of 9,597), both from the `ACE_Purchasing_Options.md` digest,
+  and the model answers "not explicitly mentioned" for both. Control runs on the raw file
+  (2 runs each):
+
+  | Input to qwen3:14b | vpc-perpetual | linux-z |
+  |---|---|---|
+  | Whole raw markdown (12.9K chars) | `D22FSLL` (wrong) | `Z287DLL` (wrong) |
+  | Only the matching section | `D22FSLL` (wrong) | `Z287CLL` (correct) |
+  | Digest only | not listed | "not explicitly listed" (3/3) |
+
+  - **vpc-perpetual is model-side / ambiguous.** The file has near-identical VPC rows
+    (`D1Q4ELL`, `D22FSLL` "standard VPC perpetual license", `D22FQLL` Linux on Z). The model
+    picks `D22FSLL` even with the full section, so the expected `D1Q4ELL` is debatable.
+    Not fixable by context shaping.
+  - **linux-z is a digest-truncation effect, not a `tiered.py` one.** `doc_digest.py` keeps
+    key points to `_POINT_CHARS=160`, so each parts table survives only as a truncated first
+    row without the description the question matches on. The model succeeds when it sees the
+    section. A fix would change the stored digests (or add a raw-section fallback), which
+    touches `doc_digest.py` and its tests; left as a follow-up rather than a quick patch.
+  - No change made to `tiered.py`: no ordering or selection change puts the missing
+    description in front of the model.
+- **Analyst tier for `bz-top-expiring-customer` (re-verified, not widened).**
+  `is_data_question` is False for all 13 golden questions, so widening the regex would only
+  affect behaviour if it were broadened to match them. It would gain nothing here:
+  `query_data` on `1H Renewals CP4I & App Connect.xlsx` with the exact question returns
+  `clarifying` ("Which metric should I use? Options: ELA, col_2, ELA"), and tier 4 only
+  accepts `status == "answered"`. `is_data_question` also drives the raw-RAG choice in
+  `domain_agent.run` and `orchestrator`, so widening risks rerouting other questions. The
+  question already scores recall 1.00 through the digest fixes above.
 
 ## Routing (task 4.3)
 
