@@ -139,7 +139,7 @@ Supported file formats: `.xlsx` `.xls` `.csv` `.json` `.jsonl` `.pdf` `.docx` `.
 
 ### Tiered retrieval
 
-When the context store exists (`kb-agent context build`) and `KB_CONTEXT_STORE` is on, agents answer from it before touching Chroma. On the 13-question golden set (`scripts/golden_eval.py`) this raised fact recall from 0.23 to 1.00 and cut the average context from 11,267 to 8,831 characters. See [`docs/PHASE4_GOLDEN_COMPARISON.md`](docs/PHASE4_GOLDEN_COMPARISON.md). Domain routing also uses the store: a domain's best-matching digest decides which agents run, lifting top-1 routing on the golden set from 7/13 to 12/13. `scripts/golden_eval.py` takes `--gate {off,blocked,ack}`, `--routing` and `--llm` (real model, not passthrough). Details are in [ARCHITECTURE.md](ARCHITECTURE.md#tiered-retrieval-kb_context_store).
+When the context store exists (`kb-agent context build`) and `KB_CONTEXT_STORE` is on, agents answer from it before touching Chroma. On the 13-question golden set (`scripts/golden_eval.py`) this raised fact recall from 0.23 to 1.00 and cut the average context from 11,267 to 8,831 characters. Domain routing also uses the store: a domain's best-matching digest decides which agents run, lifting top-1 routing on the golden set from 7/13 to 12/13. `scripts/golden_eval.py` takes `--gate {off,blocked,ack}`, `--routing` and `--llm` (real model, not passthrough). Details are in [ARCHITECTURE.md](docs/ARCHITECTURE.md#tiered-retrieval-kb_context_store).
 
 ### `ask` examples
 
@@ -523,7 +523,7 @@ KB_SECURITY_GATE_ENABLED=false
 
 ## Architecture
 
-> For the complete technical reference — module descriptions, call graphs, data-flow diagrams — see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+> For the complete technical reference — module descriptions, call graphs, data-flow diagrams — see **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
 
 ### System overview
 
@@ -594,6 +594,10 @@ Format: `regex_pattern|label|description_template`
 ---
 
 ## Development
+
+> **Contributors only.** To *use* KB Agent, `pip install kb-agent-mcp` is all you need.
+> The `tests/`, `scripts/`, `agents/` and `docs/` folders in this repo are development
+> resources and are not part of the installed package.
 
 ```bash
 git clone https://github.com/amiya-anupam/kb-agent-mcp.git ~/KnowledgeBase

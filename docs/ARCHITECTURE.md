@@ -986,8 +986,6 @@ Behaviour notes:
 - **Indexing cap.** `KB_MAX_CHUNKS_PER_FILE` (default 60) limits Chroma chunks per file.
   Long tabular files rely on digests and the analyst engine for completeness.
 
-Measured on the golden set: [`docs/PHASE4_GOLDEN_COMPARISON.md`](docs/PHASE4_GOLDEN_COMPARISON.md).
-
 ---
 
 ## Data storage
@@ -1402,3 +1400,13 @@ and does not affect MCP-based deployments.
 time (`agent_base.extract_full_text`) and index time (`embeddings.should_skip`,
 `scripts/watch_kb.should_skip`). These guards were added alongside the MCP-layer
 to close the bypass path described in the security model.
+
+---
+
+<!-- KB:AUTO-INDEX:START -->
+
+| File | Summary |
+|---|---|
+| `ARCHITECTURE.md` | The document details the architecture of the `kb-agent-mcp` package, including its modules, three pipelines, security gate, data storage, environment variables, and inter-module dependencies. |
+
+<!-- KB:AUTO-INDEX:END -->

@@ -1,0 +1,7 @@
+# Contributor-only content: excluded from `git archive` and GitHub "Download ZIP".
+# (A plain `git clone` still contains everything — see README "Development".)
+/tests                      export-ignore
+/docs                       export-ignore
+/.github                    export-ignore
+/scripts/golden_eval.py     export-ignore
+/.gitattributes             export-ignore

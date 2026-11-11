@@ -697,21 +697,7 @@ def interactive_keyword_editor(minimal_domains: list[str], kb_root: Path, yes: b
 
 # ── Step 7: Auto-start watcher via launchd (macOS) ────────────────────────────
 
-def _watch_script_path(kb_root: Path) -> str | None:
-    """Return the absolute path to scripts/watch_kb.py, or None if not found."""
-    # Installed package path: kb_agent_mcp/cli/setup.py → repo root is two levels up
-    candidates = [
-        Path(__file__).parent.parent.parent / "scripts" / "watch_kb.py",
-        kb_root / "scripts" / "watch_kb.py",
-        Path.cwd() / "scripts" / "watch_kb.py",
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c.resolve())
-    return None
-
-
-def _launchd_plist(kb_root: Path, watch_script: str) -> tuple[Path, str]:
+def _launchd_plist(kb_root: Path) -> tuple[Path, str]:
     """Return (plist_path, plist_xml) for the watcher launchd agent."""
     label      = "com.knowledgebase.watcher"
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -729,7 +715,8 @@ def _launchd_plist(kb_root: Path, watch_script: str) -> tuple[Path, str]:
     <key>ProgramArguments</key>
     <array>
         <string>{python}</string>
-        <string>{watch_script}</string>
+        <string>-m</string>
+        <string>kb_agent_mcp.cli.watch</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -768,23 +755,17 @@ def setup_launchd_watcher(kb_root: Path, yes: bool) -> None:
     if sys.platform != "darwin":
         return
 
-    watch_script = _watch_script_path(kb_root)
-    if not watch_script:
-        warn("watch_kb.py not found — skipping auto-start setup.")
-        warn("Start the watcher manually:  python3 scripts/watch_kb.py")
-        return
-
     hdr("⑦ Auto-start watcher on login (launchd)")
     print()
 
-    plist_path, plist_xml = _launchd_plist(kb_root, watch_script)
+    plist_path, plist_xml = _launchd_plist(kb_root)
 
     if not yes:
         print("  The KB watcher can be registered as a macOS login item so it")
         print("  starts automatically and re-indexes your files in real time.")
         print()
         if not _confirm("Register watcher to start automatically on login?", default=True):
-            info("Skipped. Start manually: python3 scripts/watch_kb.py")
+            info("Skipped. Start manually: kb-agent-watch")
             return
 
     try:

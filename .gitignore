@@ -50,7 +50,7 @@ agents/vector_store/*.json
 
 # ── One-off HTML artifacts ────────────────────────────────────
 *.html
-!architecture-flow-diagram-kb-agent-mcp.html
+!docs/architecture-flow-diagram-kb-agent-mcp.html
 
 # ── Knowledge folder contents (private / local data) ─────────
 # Knowledge folders contain private documents — never commit them.
