@@ -78,16 +78,29 @@ def _warn_if_drift() -> None:
         if not AUDIT_PATH.exists() or AUDIT_PATH.stat().st_size == 0:
             return  # no audit yet — generate.py hasn't been run, agent will warn separately
 
-        lines = [l for l in AUDIT_PATH.read_text(encoding="utf-8").splitlines() if l.strip()]
-        if not lines:
+        # Only indexing events mark "last indexed"; query lines are ignored.
+        last = None
+        for raw in reversed(AUDIT_PATH.read_text(encoding="utf-8").splitlines()):
+            if not raw.strip():
+                continue
+            try:
+                entry = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("event") in ("generate_complete", "reindex_complete"):
+                last = entry
+                break
+        if last is None:
             return
-        last = json.loads(lines[-1])
         indexed_ts = last.get("ts", "")
         if not indexed_ts:
             return
 
-        audit_dt = _dt.datetime.fromisoformat(indexed_ts)
-        audit_ts = audit_dt.timestamp()
+        # ts is epoch seconds (current writers) or an ISO string (older lines).
+        if isinstance(indexed_ts, (int, float)):
+            audit_ts = float(indexed_ts)
+        else:
+            audit_ts = _dt.datetime.fromisoformat(indexed_ts).timestamp()
 
         _BLOCKLIST = {
             "agents", ".git", "__pycache__", ".ds_store", "node_modules",
@@ -171,18 +184,15 @@ def _warn_if_drift() -> None:
 
 def _write_drift_audit(domain: str, file_count: int) -> None:
     """Append a reindex_complete entry to audit.jsonl after a background reindex."""
-    import datetime as _dt
     try:
-        AUDIT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "ts":     _dt.datetime.now().isoformat(timespec="seconds"),
-            "event":  "reindex_complete",
-            "domain": domain,
-            "files":  file_count,
-            "source": "auto_drift_check",
-        }
-        with AUDIT_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        from kb_agent_mcp.audit import log_event
+        log_event(
+            "reindex_complete",
+            path=AUDIT_PATH,
+            domain=domain,
+            files=file_count,
+            source="auto_drift_check",
+        )
     except Exception:
         pass  # audit write is best-effort
 

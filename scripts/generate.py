@@ -1108,19 +1108,17 @@ def main():
     elapsed_str = f"{mins}m {secs}s" if mins else f"{secs}s"
 
     # Write audit entry so drift-check can compare against live folder state.
+    # Repeat runs with identical results collapse into one line (count++).
     try:
-        audit_path = kb_root / ".kb_index" / "audit.jsonl"
-        audit_path.parent.mkdir(parents=True, exist_ok=True)
-        total_files = sum(d.get("file_count", 0) for d in domains_list)
-        entry = {
-            "ts":      datetime.datetime.now().isoformat(timespec="seconds"),
-            "event":   "generate_complete",
-            "reason":  "manual" if not os.environ.get("KB_WATCHER_RUN") else "watcher",
-            "domains": [d["folder_name"] for d in domains_list],
-            "files":   total_files,
-        }
-        with audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        from kb_agent_mcp.audit import log_event
+        log_event(
+            "generate_complete",
+            path=kb_root / ".kb_index" / "audit.jsonl",
+            coalesce=True,
+            reason="watcher" if os.environ.get("KB_WATCHER_RUN") else "manual",
+            domains=[d["folder_name"] for d in domains_list],
+            files=sum(d.get("file_count", 0) for d in domains_list),
+        )
     except Exception:
         pass  # audit failure never blocks the main run
 

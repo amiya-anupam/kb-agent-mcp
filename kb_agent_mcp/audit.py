@@ -29,6 +29,12 @@ log_turn(session_id, question, domains, files_cited, answer, blocked, latency_ms
     Append one entry. Silently swallows all I/O errors so a log failure
     never breaks a query response.
 
+log_event(event, path=None, coalesce=False, **detail)
+    Append one non-query entry (generate_complete, reindex_complete, ...).
+    Every line in audit.jsonl carries an ``event`` field plus a numeric ``ts``
+    and an ISO-8601 ``iso`` string. ``coalesce=True`` collapses a repeat of the
+    previous line (same event + same detail) into one line with a ``count``.
+
 read_log(limit, session_id) -> list[dict]
     Return the last *limit* entries, optionally filtered by session_id.
 """
@@ -112,6 +118,57 @@ def log_turn(
         logger.warning("Audit log write failed: %s", exc)
 
 
+def log_event(
+    event: str,
+    path: Path | None = None,
+    coalesce: bool = False,
+    **detail,
+) -> None:
+    """
+    Append a non-query audit entry. Never raises.
+
+    The entry always has ``event``, a numeric ``ts`` and an ISO ``iso`` string,
+    matching the shape written by :func:`log_turn`. With ``coalesce=True`` a
+    repeat of the immediately preceding line (same event and same detail,
+    ignoring ts/iso/count) rewrites that line with a fresh timestamp and an
+    incremented ``count`` instead of appending, so repeated no-op index runs do
+    not flood the log while the newest timestamp stays accurate for drift checks.
+    """
+    now = time.time()
+    entry = {
+        "event": event,
+        "ts":    now,
+        "iso":   datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+        **detail,
+    }
+    try:
+        target = Path(path) if path is not None else _audit_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if coalesce and target.exists() and target.stat().st_size:
+            lines = target.read_text(encoding="utf-8").splitlines()
+            while lines and not lines[-1].strip():
+                lines.pop()
+            if lines:
+                try:
+                    prev = json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    prev = None
+                if prev is not None and prev.get("event") == event:
+                    volatile = {"ts", "iso", "count"}
+                    same = {k: v for k, v in prev.items() if k not in volatile} == detail | {"event": event}
+                    if same:
+                        entry["count"] = int(prev.get("count", 1)) + 1
+                        lines[-1] = json.dumps(entry, ensure_ascii=False)
+                        target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                        return
+        if path is None:
+            _rotate_if_needed(target)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning("Audit log write failed: %s", exc)
+
+
 def read_log(
     limit: int = 50,
     session_id: str | None = None,
@@ -189,7 +246,10 @@ def summarise_log(days: int = 30) -> dict:
             e = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if e.get("ts", 0) >= cutoff and e.get("event", "query") == "query":
+        if e.get("event", "query") != "query":
+            continue
+        ts = e.get("ts", 0)
+        if isinstance(ts, (int, float)) and ts >= cutoff:
             entries.append(e)
 
     if not entries:

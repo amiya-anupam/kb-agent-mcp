@@ -815,17 +815,10 @@ def rotate_log(path: pathlib.Path = LOG_PATH,
 # ── Audit log ─────────────────────────────────────────────────────────────────
 
 def _write_audit(event: str, detail: dict | None = None):
-    """Append a JSON entry to .kb_index/audit.jsonl."""
+    """Append a JSON entry (event + ts + iso + detail) to .kb_index/audit.jsonl."""
     try:
-        AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "ts":    datetime.datetime.now().isoformat(timespec="seconds"),
-            "event": event,
-        }
-        if detail:
-            entry.update(detail)
-        with AUDIT_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry) + "\n")
+        from kb_agent_mcp.audit import log_event
+        log_event(event, path=AUDIT_LOG_PATH, **(detail or {}))
     except Exception as e:
         print(f"[KB Watcher] ⚠ Could not write audit log: {e}", flush=True)
 
@@ -929,6 +922,7 @@ def run_generate(reason: str):
         # child's setdefault() would not override from an inherited env.
         env = os.environ.copy()
         env["KB_ROOT"] = str(WATCH_ROOT)
+        env["KB_WATCHER_RUN"] = "1"
         result = subprocess.run(
             [sys.executable, str(generate_script)],
             capture_output=False,
@@ -938,14 +932,7 @@ def run_generate(reason: str):
         )
         if result.returncode == 0:
             print(f"[KB Watcher] ✓ generate.py completed", flush=True)
-            # Write audit entry so drift-check CLI can compare against folder state.
-            folders = discover_knowledge_folders()
-            total_files = sum(len(gather_files(f)) for f in folders)
-            _write_audit("generate_complete", {
-                "reason":  reason,
-                "domains": [f.name for f in folders],
-                "files":   total_files,
-            })
+            # generate.py writes its own generate_complete audit entry (reason=watcher).
             # Re-scan for any files that arrived or changed during the generate window.
             # This closes the race condition where a user drops files while generate.py
             # is running and those files are not in generate.py's snapshot.
