@@ -222,53 +222,13 @@ def get_domains() -> list[dict]:
 
 # ── Format intent detection ───────────────────────────────────────────────────
 
-# Map each canonical format name to the instruction injected into the system prompt.
-_FORMAT_INSTRUCTIONS: dict[str, str] = {
-    "table":     "Format your entire answer as a Markdown table with clear column headers. "
-                 "Do not use prose paragraphs — the response must be a table.",
-    "bullets":   "Format your entire answer as a concise Markdown bullet list. "
-                 "Use short, scannable bullet points. Do not use prose paragraphs.",
-    "oneline":   "Answer in exactly ONE sentence. Be direct and specific. "
-                 "Do not add any explanation, preamble, or follow-up.",
-    "paragraph": "Write your answer as clear prose paragraphs. "
-                 "Do not use bullet points or tables.",
-    "numbered":  "Format your entire answer as a numbered Markdown list. "
-                 "Each item should be a concise, self-contained point.",
-    "json":      "Return your answer as valid JSON only. No markdown fences, no prose. "
-                 "Choose a sensible structure (array of objects or flat object) for the content.",
-}
-
-# Natural-language phrases that map to a format name.
-# Checked in order — first match wins.
-_FORMAT_PHRASE_MAP: list[tuple[re.Pattern, str]] = [
-    # table
-    (re.compile(r"\b(as a table|in (a )?table (format|form)?|give me a table|show (it|that|results?) as a table)\b", re.IGNORECASE), "table"),
-    # bullets
-    (re.compile(r"\b(as bullet[- ]?points?|in bullet[- ]?points?|bullet[- ]?point (format|form|list)?|as a (bullet )?list)\b", re.IGNORECASE), "bullets"),
-    # one line / one sentence
-    (re.compile(r"\b(in one sentence|as one sentence|one[- ]liner|one[- ]line (answer|summary)?|in a single sentence|briefly in one sentence|give me (a )?(quick |short )?one[- ]?liner)\b", re.IGNORECASE), "oneline"),
-    # numbered list
-    (re.compile(r"\b(as a numbered list|in a numbered list|number (the |each )?(items?|points?|steps?))\b", re.IGNORECASE), "numbered"),
-    # json
-    (re.compile(r"\b(as (valid )?json|in json( format)?|return (as )?json)\b", re.IGNORECASE), "json"),
-    # paragraph (explicit request — paragraphs are the default but allow explicit override)
-    (re.compile(r"\b(as (prose )?paragraphs?|in paragraph (format|form)?)\b", re.IGNORECASE), "paragraph"),
-]
-
-# --format flag alias normalisation (accepts shorthands like "bullet", "1line", etc.)
-_FORMAT_ALIASES: dict[str, str] = {
-    "bullet":    "bullets",
-    "bullet-points": "bullets",
-    "list":      "bullets",
-    "1line":     "oneline",
-    "one-line":  "oneline",
-    "one-liner": "oneline",
-    "1liner":    "oneline",
-    "prose":     "paragraph",
-    "paragraphs": "paragraph",
-    "num":       "numbered",
-    "numbered-list": "numbered",
-}
+# Format tables are canonical in kb_agent_mcp.format_instruction.
+from kb_agent_mcp.format_instruction import (  # noqa: E402,F401
+    _FORMAT_ALIASES,
+    _FORMAT_INSTRUCTIONS,
+    _FORMAT_PHRASE_MAP,
+    detect_format_intent_key as _detect_format_key,
+)
 
 
 def detect_format_intent(question: str, explicit_flag: str | None = None) -> tuple[str, str]:
@@ -276,31 +236,14 @@ def detect_format_intent(question: str, explicit_flag: str | None = None) -> tup
     Detect the desired answer format from an explicit --format flag or
     natural-language phrases embedded in the question text.
 
-    Returns:
-        (clean_question, format_instruction)
-
-    clean_question       — question with any intent phrases left intact
-                           (they are part of the user's phrasing, not noise)
-    format_instruction   — instruction string to append to the system prompt,
-                           or "" when no format preference is detected.
+    Returns (question, format_instruction); format_instruction is "" when no
+    format preference is detected.  Prints the detected format for the CLI.
     """
-    # 1. Explicit --format flag takes highest priority
-    if explicit_flag:
-        key = explicit_flag.strip().lower()
-        key = _FORMAT_ALIASES.get(key, key)
-        instruction = _FORMAT_INSTRUCTIONS.get(key, "")
-        if instruction:
-            print(f"[KnowledgeBase Agent] Format: {key} (--format flag)")
-        return question, instruction
-
-    # 2. Scan question for natural-language intent phrases
-    for pattern, fmt_key in _FORMAT_PHRASE_MAP:
-        if pattern.search(question):
-            instruction = _FORMAT_INSTRUCTIONS[fmt_key]
-            print(f"[KnowledgeBase Agent] Format: {fmt_key} (detected from question)")
-            return question, instruction
-
-    return question, ""
+    key, instruction = _detect_format_key(question, explicit_flag)
+    if instruction:
+        how = "--format flag" if explicit_flag else "detected from question"
+        print(f"[KnowledgeBase Agent] Format: {key} ({how})")
+    return question, instruction
 
 
 # ── Fast keyword router ────────────────────────────────────────────────────────
@@ -338,37 +281,14 @@ def _keyword_confidence(question: str, domains: list[dict]) -> tuple[list[str], 
     """
     Return (matched_domain_names, is_confident).
 
-    is_confident is True when keyword matching alone is sufficient to route:
-      - exactly 1 domain matched AND it has ≥2 keyword hits, OR
-      - one domain has ≥3× more keyword hits than any other matched domain
-        (dominant match — e.g. BizOps:5 vs ACE Docs:1 for a multi-product
-         revenue question where both product names appear in the query)
-
-    When not confident, the LLM classifier is invoked to disambiguate.
+    The confidence rule is shared with the package router
+    (kb_agent_mcp.orchestrator.confidence_from_counts); only the hit counting
+    differs because this layer works on domain_meta dicts.
     """
-    hit_counts: dict[str, int] = {}
-    for d in domains:
-        hits = _keyword_hits(question, d)
-        if hits > 0:
-            hit_counts[d["folder_name"]] = hits
-
-    matched = list(hit_counts.keys())
-
-    if not matched:
-        return matched, False
-
-    # Confident: single domain with ≥2 hits
-    if len(matched) == 1 and hit_counts[matched[0]] >= 2:
-        return matched, True
-
-    # Confident: one domain has ≥3× the hits of every other matched domain
-    top_name  = max(hit_counts, key=hit_counts.__getitem__)
-    top_hits  = hit_counts[top_name]
-    others    = [v for k, v in hit_counts.items() if k != top_name]
-    if top_hits >= 2 and others and top_hits >= 3 * max(others):
-        return [top_name], True
-
-    return matched, False
+    from kb_agent_mcp.orchestrator import confidence_from_counts
+    return confidence_from_counts(
+        {d["folder_name"]: _keyword_hits(question, d) for d in domains}
+    )
 
 
 # ── LLM-based intent classifier ───────────────────────────────────────────────

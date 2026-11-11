@@ -120,6 +120,14 @@ Deliberately NOT merged yet (behaviour differs, not a pure move):
 
 - Rows 2-3 (`_has_noindex_ancestor`, `should_skip`): different skip-pattern sets (`watch_kb` in agents) and root source (`KB_ROOT` vs `cfg`); tests monkeypatch each.
 - Slug helpers: `folder_to_safe_name` collapses runs of non-alphanumerics, `domain_slug`/`_safe_name` do not (and `_safe_name` pads/truncates). Unifying would change output.
-- Rows 5-9, 11-22: sync (agents) vs async (package) shapes; need thin sync wrappers and per-group tests.
-- Rows 8, 10 (`call_llm`, `ask`): last, per the plan.
+- Rows 8, 10 (`call_llm`, `ask`): sync + `LLM_PROVIDER` dispatch (agents, monkeypatched by `tests/test_routing_and_passthrough.py`) vs async `_LLM_REGISTRY` (package). Left separate on purpose.
+
+Also done (migration order memory -> embeddings -> content_gate -> routing/base; suite 940 passed after each):
+
+- memory: `agents/memory.py` is a shim over `kb_agent_mcp.memory` (`_trim_messages`, `_session_record`, keyword overrides on `_compress_answer_sync`). Kept divergence: the agents default session still lives in `agents/vector_store/session_memory.json`, separate from the package's `.kb_index/session_memory/default.json`.
+- embeddings: `agents/embeddings.py` re-exports `_embed_ollama`, `_embed_openai`, `_embed_sentence_transformers`, `_embed_sync as get_embedding`. The package reads `cfg` (not import-time env vars) and gates its fallback on `KB_PASSTHROUGH_FALLBACK`.
+- content_gate: no package twin. The only same-name pair, `_tokens` (content_gate vs `tiered._tokens`), is a false duplicate (different tokenizers). Nothing to merge.
+- routing/base: `_find_readme`, `_non_index_chars`, `format_confidence_footer` are imported from `kb_agent_mcp.base_agent`; the format tables and a new `detect_format_intent_key` live in `kb_agent_mcp/format_instruction.py` (orchestrator and agents both use it; agents keeps its CLI `print`); `_keyword_confidence` shares `kb_agent_mcp.orchestrator.confidence_from_counts` (hit counting stays per-layer).
+- Divergence reconciled: the agents one-liner phrase regex was wider (`briefly in one sentence`, `give me a quick one-liner`); the canonical table now uses the wider one, so the package also recognises those phrases.
+- `_get_readme_context` stays in agents: it reads `KB_ROOT` and the module-level `_cb` budget, which tests patch.
 

@@ -69,43 +69,12 @@ async def refresh_agents() -> dict[str, DomainAgent]:
 
 # ── Format intent detection ────────────────────────────────────────────────────
 
-_FORMAT_INSTRUCTIONS: dict[str, str] = {
-    "table":     "Format your entire answer as a Markdown table with clear column headers. "
-                 "Do not use prose paragraphs — the response must be a table.",
-    "bullets":   "Format your entire answer as a concise Markdown bullet list. "
-                 "Use short, scannable bullet points. Do not use prose paragraphs.",
-    "oneline":   "Answer in exactly ONE sentence. Be direct and specific. "
-                 "Do not add any explanation, preamble, or follow-up.",
-    "paragraph": "Write your answer as clear prose paragraphs. "
-                 "Do not use bullet points or tables.",
-    "numbered":  "Format your entire answer as a numbered Markdown list. "
-                 "Each item should be a concise, self-contained point.",
-    "json":      "Return your answer as valid JSON only. No markdown fences, no prose. "
-                 "Choose a sensible structure (array of objects or flat object) for the content.",
-}
-
-_FORMAT_ALIASES: dict[str, str] = {
-    "bullet":         "bullets",
-    "bullet-points":  "bullets",
-    "list":           "bullets",
-    "1line":          "oneline",
-    "one-line":       "oneline",
-    "one-liner":      "oneline",
-    "1liner":         "oneline",
-    "prose":          "paragraph",
-    "paragraphs":     "paragraph",
-    "num":            "numbered",
-    "numbered-list":  "numbered",
-}
-
-_FORMAT_PHRASE_MAP: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\b(as a table|in (a )?table (format|form)?|give me a table|show (it|that|results?) as a table)\b", re.IGNORECASE), "table"),
-    (re.compile(r"\b(as bullet[- ]?points?|in bullet[- ]?points?|bullet[- ]?point (format|form|list)?|as a (bullet )?list)\b", re.IGNORECASE), "bullets"),
-    (re.compile(r"\b(in one sentence|as one sentence|one[- ]liner|one[- ]line (answer|summary)?|in a single sentence)\b", re.IGNORECASE), "oneline"),
-    (re.compile(r"\b(as a numbered list|in a numbered list|number (the |each )?(items?|points?|steps?))\b", re.IGNORECASE), "numbered"),
-    (re.compile(r"\b(as (valid )?json|in json( format)?|return (as )?json)\b", re.IGNORECASE), "json"),
-    (re.compile(r"\b(as (prose )?paragraphs?|in paragraph (format|form)?)\b", re.IGNORECASE), "paragraph"),
-]
+from kb_agent_mcp.format_instruction import (  # noqa: E402,F401
+    _FORMAT_ALIASES,
+    _FORMAT_INSTRUCTIONS,
+    _FORMAT_PHRASE_MAP,
+    detect_format_intent_key as _detect_format_key,
+)
 
 
 def detect_format_intent(
@@ -119,15 +88,7 @@ def detect_format_intent(
         (question, format_instruction)  — question is returned unchanged.
         format_instruction is "" when no format is requested.
     """
-    if explicit_flag:
-        key = _FORMAT_ALIASES.get(explicit_flag.strip().lower(), explicit_flag.strip().lower())
-        return question, _FORMAT_INSTRUCTIONS.get(key, "")
-
-    for pattern, fmt_key in _FORMAT_PHRASE_MAP:
-        if pattern.search(question):
-            return question, _FORMAT_INSTRUCTIONS[fmt_key]
-
-    return question, ""
+    return question, _detect_format_key(question, explicit_flag)[1]
 
 
 # ── Keyword router ─────────────────────────────────────────────────────────────
@@ -196,18 +157,15 @@ def _keyword_hit_counts(
     return counts
 
 
-def _keyword_confidence(
-    question: str,
-    agents: dict[str, DomainAgent],
-) -> tuple[list[str], bool]:
+def confidence_from_counts(counts: dict[str, int]) -> tuple[list[str], bool]:
     """
-    Return (matched_domain_names, is_confident).
+    Return (matched_domain_names, is_confident) from per-domain keyword hits.
 
     Confident routing:
       - Exactly 1 domain matched with ≥2 keyword hits, OR
       - Top domain has ≥3× more hits than any other matched domain
     """
-    counts = {k: v for k, v in _keyword_hit_counts(question, agents).items() if v > 0}
+    counts = {k: v for k, v in counts.items() if v > 0}
     matched = list(counts.keys())
 
     if not matched:
@@ -223,6 +181,14 @@ def _keyword_confidence(
         return [top_name], True
 
     return matched, False
+
+
+def _keyword_confidence(
+    question: str,
+    agents: dict[str, DomainAgent],
+) -> tuple[list[str], bool]:
+    """Return (matched_domain_names, is_confident); see confidence_from_counts."""
+    return confidence_from_counts(_keyword_hit_counts(question, agents))
 
 
 ROUTE_FANOUT_RATIO = 0.75   # domains scoring this share of the best are also queried

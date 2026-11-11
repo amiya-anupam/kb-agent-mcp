@@ -321,49 +321,8 @@ def _is_data_question(question: str) -> bool:
 
 # ── README helpers ────────────────────────────────────────────────────────────
 
-def _find_readme(folder: pathlib.Path) -> pathlib.Path | None:
-    """
-    Locate the README for a knowledge folder using a priority cascade:
-      1. Any .md whose name contains 'readme' (case-insensitive)
-      2. <FolderName>.md  (standard name used by generate.py)
-      3. Any .md file whose first 500 chars contain a Markdown heading (# …)
-      4. The first .md file found (last resort)
-
-    This makes README discovery fully dynamic — it works regardless of what
-    the user named the file (e.g. 'ACE readme file.md', 'ACE Docs.md',
-    'Jon Doe Analytics Overview.md', etc.).
-    """
-    try:
-        md_files = [f for f in folder.iterdir()
-                    if f.is_file() and f.suffix.lower() == ".md"]
-    except Exception:
-        return None
-
-    if not md_files:
-        return None
-
-    # Priority 1: name contains "readme"
-    for f in md_files:
-        if "readme" in f.name.lower():
-            return f
-
-    # Priority 2: matches the folder name exactly (e.g. "ACE Docs.md")
-    folder_name_md = folder.name + ".md"
-    for f in md_files:
-        if f.name == folder_name_md:
-            return f
-
-    # Priority 3: first .md whose content starts with a Markdown heading
-    for f in md_files:
-        try:
-            head = f.read_text(encoding="utf-8", errors="ignore")[:500]
-            if re.search(r"^#{1,3}\s+\S", head, re.MULTILINE):
-                return f
-        except Exception:
-            continue
-
-    # Priority 4: first .md file
-    return md_files[0]
+# _find_readme: canonical implementation lives in kb_agent_mcp.base_agent.
+from kb_agent_mcp.base_agent import _find_readme  # noqa: E402,F401
 
 
 def _extract_auto_index_block(readme_text: str) -> str | None:
@@ -375,15 +334,8 @@ def _extract_auto_index_block(readme_text: str) -> str | None:
     return readme_text[start:end].strip()
 
 
-def _non_index_chars(readme_text: str) -> int:
-    """Count characters in the README outside the AUTO-INDEX block."""
-    if MARKER_START in readme_text and MARKER_END in readme_text:
-        start = readme_text.index(MARKER_START)
-        end   = readme_text.index(MARKER_END) + len(MARKER_END)
-        outside = readme_text[:start] + readme_text[end:]
-    else:
-        outside = readme_text
-    return len(outside.strip())
+# _non_index_chars: canonical implementation lives in kb_agent_mcp.base_agent.
+from kb_agent_mcp.base_agent import _non_index_chars  # noqa: E402,F401
 
 
 def _is_complex_question(question: str) -> bool:
@@ -926,52 +878,8 @@ def _call_anthropic(messages: list[dict], temperature: float) -> str:
 
 # ── Confidence footer ─────────────────────────────────────────────────────────
 
-def format_confidence_footer(sources: list[dict]) -> str:
-    """
-    Build a human-readable confidence footer from a sources list.
-
-    Uses the top source's score (0.0–1.0 cosine similarity) to assign a
-    label and returns a single footer line, e.g.:
-
-        Confidence: High (0.87) — Source: Q3_Renewal_Tracker.xlsx
-
-    For README-first results the score is 1.0 and the label is omitted
-    (the source IS the authoritative document — no retrieval uncertainty).
-
-    Score thresholds:
-        ≥ 0.80  → High
-        ≥ 0.60  → Medium
-        < 0.60  → Low
-    """
-    if not sources:
-        return ""
-
-    top = sources[0]
-    score = top.get("score", 0.0)
-    name  = top.get("name", "unknown")
-
-    # README-first path sets score=1.0 to signal "authoritative, no vector search"
-    # Show source without a confidence label in that case.
-    if score >= 1.0:
-        return f"\n\n---\n📄 **Source:** `{name}`"
-
-    if score >= 0.80:
-        label = "High"
-    elif score >= 0.60:
-        label = "Medium"
-    else:
-        label = "Low"
-
-    # Include up to 2 additional sources if present
-    extra = sources[1:3]
-    extra_str = ""
-    if extra:
-        extra_str = " · " + " · ".join(f"`{s['name']}`" for s in extra)
-
-    return (
-        f"\n\n---\n🎯 **Confidence:** {label} ({score:.2f})"
-        f" — **Source:** `{name}`{extra_str}"
-    )
+# format_confidence_footer: canonical implementation lives in kb_agent_mcp.base_agent.
+from kb_agent_mcp.base_agent import format_confidence_footer  # noqa: E402,F401
 
 
 # ── Core ask function ─────────────────────────────────────────────────────────
