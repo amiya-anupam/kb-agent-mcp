@@ -26,7 +26,7 @@ The ASCII diagram in the section below shows all three pipelines and every major
 ╔══════════════════════════════════════╩═══════════════════════════════════════════════════╗
 ║  kb-agent-serve  (FastMCP server process)                                                ║
 ║                                                                                          ║
-║  ┌─────────────────────────────────  server.py  (14 tools)  ──────────────────────────┐  ║
+║  ┌─────────────────────────────────  server.py  (20 tools)  ──────────────────────────┐  ║
 ║  │                                                                                     │  ║
 ║  │  ╔══ KB tools ════════════════╗  ╔══ Security Gate ══════════╗  ╔══ Analyst ═════╗ │  ║
 ║  │  ║ ask()                      ║  ║ check_confidential()      ║  ║ analyze_file() ║ │  ║
@@ -136,7 +136,7 @@ There are three independent processing pipelines:
 ```
 kb_agent_mcp/
 ├── __init__.py          Package metadata (__version__ from importlib.metadata)
-├── server.py            FastMCP server — 14 MCP tools; startup validation; stale-index TTL cache
+├── server.py            FastMCP server — 20 MCP tools; startup validation; stale-index TTL cache
 ├── orchestrator.py      Query pipeline: format detection → keyword route → LLM classify → dispatch → aggregate → merge
 ├── domain_agent.py      DomainAgent wrapper — per-domain config, pre-rank, stale_file_count
 ├── base_agent.py        README-first RAG pipeline + all LLM call implementations + question classifiers
@@ -199,7 +199,7 @@ A module-level singleton `cfg = Config()` is imported by every other module.
 ---
 
 ### `server.py`
-The FastMCP application. Registers **fourteen MCP tools** in four groups:
+The FastMCP application. Registers **twenty MCP tools** (main groups below):
 
 **Knowledge Base tools:**
 
@@ -236,6 +236,12 @@ The FastMCP application. Registers **fourteen MCP tools** in four groups:
 | `resume_session` | `resume_session(session_id)` | Returns the last N turns of a prior session so the AI can continue without re-querying |
 | `rate_answer` | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific turn; persists to `feedback.jsonl` |
 | `update_document` | `update_document(rel_path, content, mode?)` | Writes (overwrite) or appends to a document under `KB_ROOT` via `writeback.write_document()` |
+
+**Context Store tool:**
+
+| Tool | Signature | What it does |
+|---|---|---|
+| `kb_context` | `kb_context(kind?, domain?, path?)` | Returns `MANIFEST.md`, a domain/folder `INDEX.md`, or one file digest from `<KB_ROOT>/.kb_index/context/` via `context_store.sync.read_context()` |
 
 **Module-level state:**
 - `_stale_cache: dict` — `{stale, details, checked_at}`; TTL-guarded mtime scan
@@ -764,7 +770,11 @@ MCP client → server.ask()
     ├── asyncio.gather( DomainAgent.run() × N )
     │   └── DomainAgent.run()
     │       ├── [data question] _pre_rank() → vector_store.search() + apply_pin_rules()
+    │       │       (flag on: passed lazily as pre_rank_fn; skipped when the store answers)
     │       └── base_agent.ask()
+    │           │
+    │           ├── [KB_CONTEXT_STORE] tiered.tiered_context()   → see "Tiered retrieval"
+    │           │   └── returns None when the store has nothing → falls through to README-first
     │           │
     │           ├── [README-first]
     │           │   ├── _find_readme()  [_README_CACHE hit → no disk I/O on warm calls]
@@ -830,6 +840,51 @@ MCP client → server.refine_query(session_id, feedback)
       └── query_data(file_path, original_question, session_id)
             (re-runs full pipeline with updated params)
 ```
+
+---
+
+## Tiered retrieval (`KB_CONTEXT_STORE`)
+
+When `KB_CONTEXT_STORE` is on (default) and the markdown context store exists under
+`.kb_index/context/` (built by `kb-agent context build`), `base_agent.ask()` tries the
+store before the README and Chroma paths. Order:
+
+| Tier | Source | Where |
+|---|---|---|
+| 1 | `MANIFEST.md` — which domain | `orchestrator.py` (`manifest_keywords()`) |
+| 2 | `<domain>/INDEX.md` — which files | `tiered.py` (overview questions only) |
+| 3 | per-file digests, ranked by question terms | `tiered.py` (`select_digests`, `compact_digest`) |
+| 4 | analyst engine on the raw file, for exact numbers | `tiered.py` (`_analyst_answer`, data questions only) |
+| 5 | Chroma + BM25 fallback, then README | unchanged `base_agent.ask()` path |
+
+Behaviour notes:
+
+- **Fallback is automatic.** `tiered_context()` returns `None` when the store is missing,
+  the domain has no digests, or nothing matches the question. The README-first and RAG
+  paths then run exactly as before. With the flag off the tiered code is never called.
+- **Manifest routing is a fallback signal.** Manifest keywords are used only when no
+  configured domain keyword matched. Added unconditionally they were noisy and lowered
+  top-1 routing accuracy on the golden set. Matching stays whole-word. Keywords shared by
+  several domains are dropped.
+- **Content routing.** `orchestrator.content_route()` scores each domain by its best
+  `select_digests` match (`tiered.domain_scores()`) and keeps domains within
+  `ROUTE_FANOUT_RATIO` (0.75) of the best, at most `ROUTE_MAX_DOMAINS` (2). In
+  `_resolve_domains` it wins over the keyword router when the keyword router is not
+  confident, or when it is confident but shares no domain with the content result (a
+  greedy keyword such as "CP4I"). Otherwise the keyword/LLM-classifier path runs
+  unchanged. It returns `[]` when the store is absent or nothing matches.
+- **Lazy pre-rank.** `DomainAgent.run()` no longer runs `_pre_rank()` up front when the
+  flag is on. It passes it as `pre_rank_fn`, and `base_agent.ask()` awaits it only if the
+  tier and README paths decline, so the Chroma query is skipped when the store answers.
+  `pre_ranked_results` is still the fallback when the store returns `None`.
+- **Security gate.** Confidential digests are excluded until `acknowledge_gate()`; the
+  response says how many were excluded. Acknowledged ones are tagged `🔒` in `sources`.
+- **Analyst errors are non-fatal.** `clarifying`, `error`, empty answers and exceptions
+  are ignored and the digests are used alone.
+- **Indexing cap.** `KB_MAX_CHUNKS_PER_FILE` (default 60) limits Chroma chunks per file.
+  Long tabular files rely on digests and the analyst engine for completeness.
+
+Measured on the golden set: [`docs/PHASE4_GOLDEN_COMPARISON.md`](docs/PHASE4_GOLDEN_COMPARISON.md).
 
 ---
 
@@ -1027,7 +1082,7 @@ against the refreshed file inventory after a full rebuild.
 │  kb-agent-serve  (FastMCP server process)                               │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  server.py  (14 MCP tools)                                      │   │
+│  │  server.py  (20 MCP tools)                                      │   │
 │  │  ┌──────────┐ ┌─────────────┐ ┌────────────────┐ ┌──────────┐  │   │
 │  │  │  ask()   │ │list_domains │ │   reindex()    │ │ memory   │  │   │
 │  │  └─────┬────┘ └──────┬──────┘ └───────┬────────┘ └──────────┘  │   │
@@ -1168,7 +1223,10 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_BUDGET_PRE_INDEX` | `2000` | `context_budget.py` | Hand-written README intro budget |
 | `KB_BUDGET_RAG_FILE` | `4000` | `context_budget.py` | Max chars per file in RAG fallback and gate scan |
 | `KB_BUDGET_SUMMARY` | `500` | `context_budget.py` | Per-file summary line budget in AUTO-INDEX table |
-| `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint |
+| `KB_BUDGET_EMBED_CHARS` | `3500` | `embeddings.py` | Max chars of text sent to embedding endpoint per chunk |
+| `KB_MAX_CHUNKS_PER_FILE` | `60` | `vector_store.py` | Max chunks indexed per file; longer files are sampled head/middle/tail |
+| `KB_STALE_DAYS` | `90` | `config.py` | Days before a file/index is flagged stale in `doctor`, `status` and the watcher (0 = disabled) |
+| `KB_CONTEXT_STORE` | `true` | `tiered.py`, `base_agent.py`, `orchestrator.py` | Answer from the markdown context store (manifest → index → digests → analyst) before Chroma/BM25. No-op when no store exists; set `0` to disable |
 | `KB_MIN_README_CHARS` | `200` | `base_agent.py` | README below this length is treated as absent |
 | `KB_NUM_CTX` | `32768` | `base_agent.py` | Ollama `num_ctx` parameter |
 | `KB_SESSION_TIMEOUT_HOURS` | `2` | `memory.py` | Session auto-expiry in hours |

@@ -1,0 +1,93 @@
+[
+  {
+    "id": "bz-part-vpc-perpetual",
+    "domain": "BizOps",
+    "question": "What is the part number for the ACE production VPC perpetual license?",
+    "expected_facts": ["D1Q4ELL"],
+    "expected_source": "ACE_Purchasing_Options.md"
+  },
+  {
+    "id": "bz-part-linux-z",
+    "domain": "BizOps",
+    "question": "Which part number is App Connect Enterprise for Linux on IBM Z Advanced Support Subscription License?",
+    "expected_facts": ["Z287CLL"],
+    "expected_source": "ACE_Purchasing_Options.md"
+  },
+  {
+    "id": "bz-part-monthly-nonprod",
+    "domain": "BizOps",
+    "question": "What is the monthly non-production VPC part number for App Connect Enterprise?",
+    "expected_facts": ["D1Q4HLL"],
+    "expected_source": "ACE_Purchasing_Options.md"
+  },
+  {
+    "id": "bz-renewal-rate-total",
+    "domain": "BizOps",
+    "question": "What was the overall renewal rate for CP4I and App Connect in the 1H renewals tracking?",
+    "expected_facts": ["66.0%"],
+    "expected_source": "1H Renewals CP4I & App Connect.xlsx"
+  },
+  {
+    "id": "bz-renewal-rate-japan",
+    "domain": "BizOps",
+    "question": "What is the renewal rate for JAPAN in the 1H renewals CP4I and App Connect tracking?",
+    "expected_facts": ["48.0%"],
+    "expected_source": "1H Renewals CP4I & App Connect.xlsx"
+  },
+  {
+    "id": "bz-renewal-rate-product",
+    "domain": "BizOps",
+    "question": "What is the renewal rate for Cloud Pak for Integration versus App Connect in the 1H renewals?",
+    "expected_facts": ["69.5%", "59.6%"],
+    "expected_source": "1H Renewals CP4I & App Connect.xlsx"
+  },
+  {
+    "id": "bz-top-expiring-customer",
+    "domain": "BizOps",
+    "question": "Which customer has the highest adjusted expired amount in the 1H renewals CP4I and App Connect file?",
+    "expected_facts": ["ADP"],
+    "expected_source": "1H Renewals CP4I & App Connect.xlsx"
+  },
+  {
+    "id": "ace-migration-waiver",
+    "domain": "ACE Docs",
+    "question": "What do I need for an IIB to ACE migration waiver request?",
+    "expected_facts": ["active S&S", "Migration Waiver Request for"],
+    "expected_source": "App Connect - IBM ACE IIB Migration Waiver (April 2025).DOCX"
+  },
+  {
+    "id": "ace-iib-support-end",
+    "domain": "ACE Docs",
+    "question": "When does IIB extended support end and why migrate from IIB to ACE?",
+    "expected_facts": ["April 2026"],
+    "expected_source": "App Connect - Why migrate from IIB to ACE.PPTX"
+  },
+  {
+    "id": "ace-warm-standby",
+    "domain": "ACE Docs",
+    "question": "Do warm standby high availability configurations of ACE require entitlement?",
+    "expected_facts": ["warm standby", "no longer require entitlement"],
+    "expected_source": "App Connect - High Availability.PPTX"
+  },
+  {
+    "id": "ace-program-number",
+    "domain": "ACE Docs",
+    "question": "What is the program number for IBM App Connect Enterprise for Multiplatforms?",
+    "expected_facts": ["5724-J05"],
+    "expected_source": "App Connect - Ultimate Guide to Entitlement, Parts and Licenses.PDF"
+  },
+  {
+    "id": "cp4i-unified-mgmt-release",
+    "domain": "CP4I Docs",
+    "question": "Which CP4I release introduced the Unified Management highlights, and when?",
+    "expected_facts": ["16.1.2", "June 2025"],
+    "expected_source": "CP4I Unified Management Overview.PDF"
+  },
+  {
+    "id": "cp4i-agent",
+    "domain": "CP4I Docs",
+    "question": "What does the IBM CP4I Agent do?",
+    "expected_facts": ["Operational Health and Troubleshooting"],
+    "expected_source": "CP4I Agent client presentation.PDF"
+  }
+]

@@ -39,6 +39,7 @@ import re
 import sys
 import json
 import time
+import threading
 import shutil
 import subprocess
 import datetime
@@ -55,6 +56,7 @@ from context_budget import COLLAPSE_RULES, trim_summary, get as _budget_get
 from agent_base import (  # noqa: E402
     _find_readme as find_readme,
     DEFAULT_BLOCKLIST,
+    is_ignored_folder,
     folder_to_safe_name,
     _has_noindex_ancestor,
 )
@@ -188,7 +190,7 @@ def is_knowledge_folder(path: pathlib.Path) -> bool:
     return (
         path.is_dir()
         and path.parent == WATCH_ROOT
-        and path.name.lower() not in BLOCKLIST
+        and not is_ignored_folder(path.name, BLOCKLIST)
     )
 
 def discover_knowledge_folders() -> list[pathlib.Path]:
@@ -635,6 +637,10 @@ def _purge_folder_artifacts(folder_name: str, cache: dict) -> bool:
         cache_dirty = True
         print(f"[KB Watcher] 🗑 Purged {len(stale)} cache entries for {folder_name}", flush=True)
 
+    # Drop the folder's context-store digests and refresh the MANIFEST (full sync
+    # also prunes digests of deleted domains).
+    _sync_context_store(None, f"folder removed: {folder_name}")
+
     return cache_dirty
 
 
@@ -741,6 +747,69 @@ def check_stale_files(folders: list[pathlib.Path]) -> list[str]:
                 )
 
     return warnings
+
+
+# Keys (folder + file, without the age) of the stale files reported last time.
+_last_stale_keys: frozenset[str] = frozenset()
+
+
+def report_stale(warnings: list[str], label: str = "Stale file check") -> None:
+    """
+    Log stale-file warnings without flooding the log.
+
+    Always prints one summary line. Per-file detail is printed only when the
+    set of stale files differs from the previous report (the age in days is
+    ignored, since it changes daily).
+    """
+    global _last_stale_keys
+
+    if not warnings:
+        _last_stale_keys = frozenset()
+        print(f"[KB Watcher] ✓ {label}: no stale files", flush=True)
+        return
+
+    keys = frozenset(w.rsplit(" was last updated", 1)[0] for w in warnings)
+    if keys == _last_stale_keys:
+        print(f"[KB Watcher] 🕐 {label}: {len(warnings)} stale files (unchanged)", flush=True)
+        return
+
+    _last_stale_keys = keys
+    print(f"[KB Watcher] 🕐 {label}: {len(warnings)} stale files", flush=True)
+    for w in warnings:
+        print(f"  {w}", flush=True)
+
+
+# ── Log rotation ──────────────────────────────────────────────────────────────
+
+# launchd/nohup own the stdout redirect to .watch.log and keep it open, so the
+# file cannot be renamed away. Copy the content to .1, then truncate in place.
+LOG_PATH         = SCRIPT_DIR / ".watch.log"
+_LOG_MAX_BYTES   = int(os.environ.get("KB_LOG_MAX_MB", "10")) * 1024 * 1024
+_LOG_BACKUPS     = 3
+_LOG_CHECK_SECS  = 60
+
+
+def rotate_log(path: pathlib.Path = LOG_PATH,
+               max_bytes: int = _LOG_MAX_BYTES,
+               backups: int = _LOG_BACKUPS) -> bool:
+    """Rotate ``path`` to ``path.1`` … ``path.N`` once it exceeds ``max_bytes``.
+
+    Returns True if a rotation happened. Never raises.
+    """
+    try:
+        if max_bytes <= 0 or not path.exists() or path.stat().st_size <= max_bytes:
+            return False
+        for i in range(backups - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{i}")
+            if src.exists():
+                src.replace(path.with_name(f"{path.name}.{i + 1}"))
+        shutil.copyfile(path, path.with_name(f"{path.name}.1"))
+        with path.open("r+b") as fh:
+            fh.truncate(0)
+        return True
+    except OSError as e:
+        print(f"[KB Watcher] ⚠ Log rotation failed: {e}", flush=True)
+        return False
 
 
 # ── Audit log ─────────────────────────────────────────────────────────────────
@@ -920,6 +989,28 @@ def _rescan_since(since: float):
     else:
         print(f"[KB Watcher] ✓ Post-generate rescan: nothing missed", flush=True)
 
+# ── Markdown context store hook ───────────────────────────────────────────────
+
+_ctx_lock = threading.Lock()
+
+
+def _sync_context_store(domains, reason: str = ""):
+    """Refresh digests/INDEX/MANIFEST for *domains* (None = all). Never raises."""
+    def _run():
+        if not _ctx_lock.acquire(blocking=False):
+            return                      # a sync is already running; the next event will catch up
+        try:
+            sys.path.insert(0, str(SCRIPT_DIR))
+            from kb_agent_mcp.context_store.sync import safe_sync
+            safe_sync(WATCH_ROOT, domains=domains,
+                      log=lambda m: print(f"[KB Watcher] 📄 {m}", flush=True))
+        except Exception as e:
+            print(f"[KB Watcher] ⚠ context store sync failed: {e}", flush=True)
+        finally:
+            _ctx_lock.release()
+    threading.Thread(target=_run, name="kb-context-sync", daemon=True).start()
+
+
 # ── Embeddings helper (lazy import) ───────────────────────────────────────────
 
 def _update_index(folder_name: str, file_path: pathlib.Path):
@@ -966,11 +1057,13 @@ class KBHandler(FileSystemEventHandler):
         self._pending_generate:         float | None = None
         self._pending_generate_reason:  str          = ""
         self._pending_reindex:          dict[str, str] = {}   # domain → reason (debounced per-domain)
+        self._pending_context:          set[str] = set()      # domains whose context-store digests are stale
         self._known_folders:            set[str]     = {
             p.name for p in discover_knowledge_folders()
         }
         self._cache:                    dict         = _load_summary_cache()
         self._next_stale_check:         float        = time.time() + _STALE_CHECK_INTERVAL
+        self._next_log_check:           float        = time.time() + _LOG_CHECK_SECS
         self._next_resync:              float        = (
             time.time() + _RESYNC_INTERVAL if _RESYNC_INTERVAL > 0 else float("inf")
         )
@@ -1016,6 +1109,7 @@ class KBHandler(FileSystemEventHandler):
             # Only fire when the matching readme debounce has passed
             if self._pending_readme.get(folder_name, 0) <= now:
                 del self._pending_deindex[folder_name]
+                self._pending_context.add(folder_name)
                 for fp in files:
                     _remove_index(folder_name, fp)
                     rel_key = str(fp.relative_to(WATCH_ROOT))
@@ -1027,6 +1121,7 @@ class KBHandler(FileSystemEventHandler):
         for folder_name, files in list(self._pending_index.items()):
             if self._pending_readme.get(folder_name, 0) <= now:
                 del self._pending_index[folder_name]
+                self._pending_context.add(folder_name)
                 for fp in files:
                     if fp.exists():
                         _update_index(folder_name, fp)
@@ -1045,6 +1140,11 @@ class KBHandler(FileSystemEventHandler):
             if folder_name in self._pending_reindex:
                 reason = self._pending_reindex.pop(folder_name)
                 run_reindex(folder_name, reason)
+
+        # 3b. Refresh the markdown context store for domains touched this tick
+        if self._pending_context:
+            dirty, self._pending_context = sorted(self._pending_context), set()
+            _sync_context_store(dirty)
 
         # 4. Poll for folder changes the OS may not have delivered directory events for.
         #    macOS FSEvents sometimes coalesces mkdir/rmdir into just file events.
@@ -1086,16 +1186,17 @@ class KBHandler(FileSystemEventHandler):
             run_generate("scheduled resync")
             self._known_folders = {p.name for p in discover_knowledge_folders()}
 
+        # 6b. Log rotation (cheap stat once a minute)
+        if now >= self._next_log_check:
+            self._next_log_check = now + _LOG_CHECK_SECS
+            rotate_log()
+
         # 7. Hourly stale-file check
         if STALE_DAYS > 0 and now >= self._next_stale_check:
             self._next_stale_check = now + _STALE_CHECK_INTERVAL
             folders = [WATCH_ROOT / fn for fn in self._known_folders
                        if (WATCH_ROOT / fn).is_dir()]
-            stale   = check_stale_files(folders)
-            if stale:
-                print("[KB Watcher] 🕐 Stale file check:", flush=True)
-                for w in stale:
-                    print(f"  {w}", flush=True)
+            report_stale(check_stale_files(folders))
 
         # 8. LLM upgrade queue — attempt to upgrade heuristic summaries to LLM
         #    quality when the LLM becomes reachable.  Process at most
@@ -1142,7 +1243,7 @@ class KBHandler(FileSystemEventHandler):
         path = pathlib.Path(event.src_path)
 
         if event.is_directory:
-            if path.parent == WATCH_ROOT and path.name.lower() not in BLOCKLIST:
+            if path.parent == WATCH_ROOT and not is_ignored_folder(path.name, BLOCKLIST):
                 if path.name not in self._known_folders:
                     self._known_folders.add(path.name)
                     print(f"[KB Watcher] 📁 New folder: {path.name} → scheduling generate.py",
@@ -1151,7 +1252,7 @@ class KBHandler(FileSystemEventHandler):
             return
 
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if is_readme(path) or should_skip(path):
             return
@@ -1186,7 +1287,7 @@ class KBHandler(FileSystemEventHandler):
             return
 
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if is_readme(path) or path.suffix.lower() not in INCLUDE_EXTS:
             return
@@ -1209,7 +1310,7 @@ class KBHandler(FileSystemEventHandler):
             old_name = src.name
             new_name = dest.name
 
-            if old_name in self._known_folders and new_name.lower() not in BLOCKLIST:
+            if old_name in self._known_folders and not is_ignored_folder(new_name, BLOCKLIST):
                 self._known_folders.discard(old_name)
                 self._known_folders.add(new_name)
                 print(f"[KB Watcher] ✏ Folder renamed: {old_name} → {new_name} "
@@ -1233,12 +1334,12 @@ class KBHandler(FileSystemEventHandler):
         src_folder  = top_folder_name(event.src_path)
         dest_folder = top_folder_name(event.dest_path)
 
-        if src_folder and src_folder.lower() not in BLOCKLIST:
+        if src_folder and not is_ignored_folder(src_folder, BLOCKLIST):
             if not is_readme(src) and src.suffix.lower() in INCLUDE_EXTS and not should_skip(src):
                 print(f"[KB Watcher] ↩ {src.name} moved/renamed → deindexing src", flush=True)
                 self._schedule_deindex(src_folder, src)
 
-        if dest_folder and dest_folder.lower() not in BLOCKLIST:
+        if dest_folder and not is_ignored_folder(dest_folder, BLOCKLIST):
             if not is_readme(dest) and dest.suffix.lower() in INCLUDE_EXTS and not should_skip(dest):
                 print(f"[KB Watcher] ↪ {dest.name} moved/renamed → indexing dest", flush=True)
                 self._schedule_index(dest_folder, dest)
@@ -1251,7 +1352,7 @@ class KBHandler(FileSystemEventHandler):
         if is_readme(path):
             return
         folder_name = top_folder_name(event.src_path)
-        if not folder_name or folder_name.lower() in BLOCKLIST:
+        if not folder_name or is_ignored_folder(folder_name, BLOCKLIST):
             return
         if path.suffix.lower() not in INCLUDE_EXTS or should_skip(path):
             return
@@ -1298,13 +1399,7 @@ def main():
             f"(KB_STALE_DAYS — set to 0 to disable)",
             flush=True,
         )
-        stale_warnings = check_stale_files(folders)
-        if stale_warnings:
-            print(f"[KB Watcher] ⚠ Stale files detected:", flush=True)
-            for w in stale_warnings:
-                print(f"  {w}", flush=True)
-        else:
-            print(f"[KB Watcher] ✓ No stale files (all within {STALE_DAYS} days)", flush=True)
+        report_stale(check_stale_files(folders), label="Startup stale check")
 
     handler  = KBHandler()
     observer = Observer()

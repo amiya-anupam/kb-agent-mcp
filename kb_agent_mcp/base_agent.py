@@ -105,7 +105,13 @@ async def _check_passthrough() -> bool:
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(f"{cfg.KB_LLM_BASE_URL}/api/tags")
-            return r.status_code >= 400
+            if r.status_code >= 400:
+                return True
+            # Ollama is up, but the configured model must actually be pulled
+            names = {m.get("name", "") for m in r.json().get("models", [])}
+            return not any(
+                n == cfg.KB_MODEL or n.split(":")[0] == cfg.KB_MODEL for n in names
+            )
     except Exception as exc:
         logger.debug("Ollama reachability check failed (%s); treating as passthrough", exc)
         return True  # unreachable → passthrough
@@ -436,10 +442,70 @@ async def ask(
     max_chars: int | None = None,
     pre_ranked_results: list[dict] | None = None,
     session_id: str = "default",
+    pre_rank_fn=None,
 ) -> AgentResult:
-    """README-first async RAG pipeline for a single domain folder."""
+    """README-first async RAG pipeline for a single domain folder.
+
+    ``pre_rank_fn`` is an optional zero-arg async callable returning ranked
+    results. It is awaited only if the tiered store and README-first both
+    decline, so the (costly) Chroma/re-rank step is skipped when they answer.
+    """
     if max_chars is None:
         max_chars = _cb_get("rag_file")
+
+    # ── Tiered retrieval: context store (flag-gated) ─────────────────────────
+    # INDEX / digests / analyst engine; falls through to README + RAG when the
+    # store is absent or has nothing relevant.
+    if cfg.KB_CONTEXT_STORE:
+        from kb_agent_mcp.tiered import tiered_context
+        tier = await tiered_context(
+            folder_name,
+            question,
+            data_question=(
+                is_data_question(question)
+                or pre_ranked_results is not None
+                or pre_rank_fn is not None
+            ),
+            session_id=session_id,
+        )
+        if tier is not None:
+            if await is_passthrough():
+                block = _build_passthrough_block(
+                    question=question,
+                    context=tier.context,
+                    system_prompt=system_prompt,
+                    agent_name=agent_name,
+                    source_label=tier.label,
+                )
+                return AgentResult(
+                    agent=agent_name,
+                    answer=block,
+                    sources=tier.sources,
+                    found=True,
+                    passthrough=True,
+                    passthrough_block=block,
+                )
+            messages = [{"role": "system", "content": system_prompt}]
+            if conversation_history:
+                messages.extend(conversation_history[-_cb_get("history"):])
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Use the following knowledge base content to answer the question.\n\n"
+                    f"{tier.context}\n---\n\n"
+                    f"Question: {question}"
+                ),
+            })
+            answer = await call_llm(messages)
+            return AgentResult(
+                agent=agent_name,
+                answer=answer,
+                sources=tier.sources,
+                confidence_footer=format_confidence_footer(tier.sources),
+                found=True,
+                passthrough=False,
+            )
+
 
     # ── Strategy 1: README-first ──────────────────────────────────────────────
     readme_context, source_label = await asyncio.to_thread(
@@ -490,6 +556,8 @@ async def ask(
     # ── Strategy 2: Raw-file RAG fallback ────────────────────────────────────
     if pre_ranked_results is not None:
         results = pre_ranked_results
+    elif pre_rank_fn is not None:
+        results = await pre_rank_fn()
     else:
         from kb_agent_mcp.vector_store import search as _vs_search
         results = await _vs_search(folder_name, question, top_n=top_n)

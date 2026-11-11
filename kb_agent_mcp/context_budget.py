@@ -22,8 +22,6 @@ COLLAPSE_RULES                      — list of (pattern, label, description_tem
 
 from __future__ import annotations
 
-import sys
-import pathlib
 import functools
 
 from kb_agent_mcp.config import cfg
@@ -44,16 +42,10 @@ _BUDGETS: dict[str, int] = {
 }
 
 # ── Pure compaction logic (shared with agents/context_budget.py) ──────────────
-# The logic module lives in agents/ which is on the repo root path.
-# We insert the agents/ dir so the shared module is importable without making
-# agents/ a formal package dependency of kb_agent_mcp.
+# The logic module lives in kb_agent_mcp/_context_budget_logic.py.
 # Each function takes `budgets` as its first argument; we bind _BUDGETS via partial.
 
-_agents_dir = str(pathlib.Path(__file__).parent.parent / "agents")
-if _agents_dir not in sys.path:
-    sys.path.insert(0, _agents_dir)
-
-import _context_budget_logic as _logic  # noqa: E402
+from . import _context_budget_logic as _logic  # noqa: E402
 
 COLLAPSE_RULES = _logic.COLLAPSE_RULES
 

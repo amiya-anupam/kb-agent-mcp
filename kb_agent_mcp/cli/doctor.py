@@ -33,8 +33,11 @@ from kb_agent_mcp.config import Config  # imported at module level so tests can 
 
 logger = logging.getLogger(__name__)
 
-# Stale-index threshold in days — shared with status.py
-STALE_DAYS = 7
+# Stale-index threshold in days — cfg.KB_STALE_DAYS (env KB_STALE_DAYS, default 90),
+# shared with status.py and the watcher. 0 disables the check.
+from kb_agent_mcp.config import cfg as _cfg
+
+STALE_DAYS = _cfg.KB_STALE_DAYS
 
 
 # ── ANSI colour helpers ────────────────────────────────────────────────────────
@@ -254,10 +257,10 @@ def _check_chroma_collections(domains: list[str]) -> list[CheckResult]:
                 if indexed_at_str:
                     indexed_dt = datetime.datetime.fromisoformat(indexed_at_str)
                     age_days = (datetime.datetime.now(datetime.timezone.utc) - indexed_dt).days
-                    if age_days > STALE_DAYS:
+                    if STALE_DAYS > 0 and age_days > STALE_DAYS:
                         _warn(
                             f"ChromaDB index: {name}/  ({count} docs, indexed {age_days}d ago)",
-                            "Index is older than 7 days. Run kb-agent-generate to refresh.",
+                            f"Index is older than {STALE_DAYS} days. Run kb-agent-generate to refresh.",
                         )
                     else:
                         _pass(f"ChromaDB index: {name}/  ({count} documents, indexed {age_days}d ago)")

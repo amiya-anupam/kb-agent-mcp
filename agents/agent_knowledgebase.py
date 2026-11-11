@@ -305,12 +305,33 @@ def detect_format_intent(question: str, explicit_flag: str | None = None) -> tup
 
 # ── Fast keyword router ────────────────────────────────────────────────────────
 
-def keyword_route(question: str, domains: list[dict]) -> list[str]:
+def _keyword_hits(question: str, domain: dict) -> int:
+    """
+    Count keyword hits for a domain using whole-word matching (an optional
+    plural suffix is allowed), so "ace" does not match "workspace".
+    The folder name is treated as an implicit keyword for domains that
+    define keywords.
+    """
     q = question.lower()
-    return [
-        d["folder_name"] for d in domains
-        if any(kw.lower() in q for kw in d.get("keywords", []))
-    ]
+    kws = list(domain.get("keywords", []))
+    if kws:
+        name = domain["folder_name"].lower()
+        kws.append(name)
+        if " " in name:
+            kws.append(name.split()[0])
+    seen, hits = set(), 0
+    for kw in kws:
+        kw = kw.lower()
+        if kw in seen:
+            continue
+        seen.add(kw)
+        if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?:e?s)?(?![a-z0-9])", q):
+            hits += 1
+    return hits
+
+
+def keyword_route(question: str, domains: list[dict]) -> list[str]:
+    return [d["folder_name"] for d in domains if _keyword_hits(question, d) > 0]
 
 
 def _keyword_confidence(question: str, domains: list[dict]) -> tuple[list[str], bool]:
@@ -325,10 +346,9 @@ def _keyword_confidence(question: str, domains: list[dict]) -> tuple[list[str], 
 
     When not confident, the LLM classifier is invoked to disambiguate.
     """
-    q = question.lower()
     hit_counts: dict[str, int] = {}
     for d in domains:
-        hits = sum(1 for kw in d.get("keywords", []) if kw.lower() in q)
+        hits = _keyword_hits(question, d)
         if hits > 0:
             hit_counts[d["folder_name"]] = hits
 

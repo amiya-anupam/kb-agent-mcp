@@ -31,9 +31,11 @@ from rich import box
 logger = logging.getLogger(__name__)
 
 # ── Stale threshold constant ───────────────────────────────────────────────────
-# Doctor uses 7 days; keep them in sync by centralising the constant here and
-# importing it from doctor to avoid drift.
-STALE_DAYS = 7
+# Single source of truth is cfg.KB_STALE_DAYS (env KB_STALE_DAYS, default 90),
+# shared with doctor and the watcher. 0 disables staleness warnings.
+from kb_agent_mcp.config import cfg as _cfg
+
+STALE_DAYS = _cfg.KB_STALE_DAYS
 
 
 # ── Data collection ────────────────────────────────────────────────────────────
@@ -114,7 +116,7 @@ def _domain_row(domain_name: str, kb_root: Path) -> dict:
 
         if doc_count == 0:
             status_icon, status_text = "⚠", "empty index"
-        elif age_days is not None and age_days > STALE_DAYS:
+        elif age_days is not None and STALE_DAYS > 0 and age_days > STALE_DAYS:
             status_icon, status_text = "⚠", f"stale (>{STALE_DAYS}d)"
         else:
             status_icon, status_text = "✓", "fresh"

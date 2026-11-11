@@ -91,7 +91,7 @@ Requires Python 3.10+.
 
 ## MCP Tools
 
-Once the server is running, the following **fourteen tools** are available in four groups:
+Once the server is running, the following **twenty tools** are available; the groups below list the main ones:
 
 ### Knowledge Base tools (5)
 
@@ -130,6 +130,16 @@ Supported file formats: `.xlsx` `.xls` `.csv` `.json` `.jsonl` `.pdf` `.docx` `.
 | `resume_session(session_id)` | Returns the last N turns of a prior session |
 | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific answer turn |
 | `update_document(rel_path, content, mode?)` | Writes or appends to a document under `KB_ROOT` |
+
+### Context Store tool (1)
+
+| Tool | Description |
+|---|---|
+| `kb_context(kind?, domain?, path?)` | Read the markdown context store without an LLM: `manifest` → domain `index` → per-file `digest`. Build it with `kb-agent context build`. |
+
+### Tiered retrieval
+
+When the context store exists (`kb-agent context build`) and `KB_CONTEXT_STORE` is on, agents answer from it before touching Chroma. On the 13-question golden set (`scripts/golden_eval.py`) this raised fact recall from 0.23 to 1.00 and cut the average context from 11,267 to 8,831 characters. See [`docs/PHASE4_GOLDEN_COMPARISON.md`](docs/PHASE4_GOLDEN_COMPARISON.md). Domain routing also uses the store: a domain's best-matching digest decides which agents run, lifting top-1 routing on the golden set from 7/13 to 12/13. `scripts/golden_eval.py` takes `--gate {off,blocked,ack}`, `--routing` and `--llm` (real model, not passthrough). Details are in [ARCHITECTURE.md](ARCHITECTURE.md#tiered-retrieval-kb_context_store).
 
 ### `ask` examples
 
@@ -187,6 +197,14 @@ KB_AUDIT_MAX_MB=10
 
 # Stale file detection
 KB_STALE_DAYS=90               # days before flagging a file as stale (0 = disabled)
+
+# Indexing cap: files with more chunks are sampled head/middle/tail.
+# Tabular files rely on the context-store digests and the analyst engine instead.
+KB_MAX_CHUNKS_PER_FILE=60
+
+# Tiered retrieval from the markdown context store (default: on).
+# No-op until a store exists (`kb-agent context build`). Set to 0 to disable.
+KB_CONTEXT_STORE=1
 
 # Passthrough fallback
 KB_PASSTHROUGH_FALLBACK=true   # auto-switch to passthrough when Ollama unreachable
@@ -514,7 +532,7 @@ AI tool (Claude, Bob, Cursor, …)
         │   MCP protocol
         ▼
 ┌───────────────────────────────────────────────────────────────┐
-│  server.py  (FastMCP — 14 tools)                              │
+│  server.py  (FastMCP — 20 tools)                              │
 ├──────────────────────────┬────────────────────────────────────┤
 │  Knowledge Base (5)      │  Data Analyst (4)                  │
 │  ask()                   │  analyze_file()                    │

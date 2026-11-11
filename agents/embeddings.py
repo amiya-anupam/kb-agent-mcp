@@ -50,6 +50,7 @@ from agent_base import (
     AGG_KEYWORDS,
     PREFERRED_NUM_COLS,
     DEFAULT_BLOCKLIST,
+    is_ignored_folder,
     INCLUDE_EXTS,
     SKIP_PATTERNS,
 )
@@ -85,7 +86,7 @@ def discover_folders() -> list[str]:
     for p in sorted(KB_ROOT.iterdir()):
         if not p.is_dir():
             continue
-        if p.name.lower() in BLOCKLIST:
+        if is_ignored_folder(p.name, BLOCKLIST):
             continue
         # Must contain at least one indexable file
         has_files = any(

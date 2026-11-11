@@ -57,35 +57,8 @@ _LARGE_XLSX_BYTES = 50 * 1024 * 1024  # 50 MB threshold for streaming aggregatio
 
 # ── XLSX aggregation config ───────────────────────────────────────────────────
 
-_AGG_KEYWORDS: dict[str, str] = {
-    "ut lvl 30 name dynamic": "Product (UT L30)",
-    "ut l30 name": "Product (UT L30)",
-    "ut l30": "Product (UT L30)",
-    "product family name": "Product Family",
-    "reporting product family": "Reporting Product Family",
-    "product": "Product",
-    "year": "Year",
-    "quarter": "Quarter",
-    "quarter in year": "Quarter In Year",
-    "geography": "Geography",
-    "geography name": "Geography",
-    "market": "Market",
-    "market name": "Market",
-    "country": "Country",
-    "finance family": "Finance Family",
-    "revenue type": "Revenue Type",
-    "reporting revenue type name": "Revenue Type",
-    "on-prem or saas": "On-prem/SaaS",
-    "division": "Division",
-    "classification name": "Classification",
-    "frozen client lifecycle name": "Client Lifecycle",
-    "status": "Status",
-}
-
-_PREFERRED_NUM_COLS: list[str] = [
-    "won", "total(cy cw won @ pc)", "rev act @ pc",
-    "amount", "oppty value", "total",
-]
+from ._xlsx_stream import AGG_KEYWORDS as _AGG_KEYWORDS  # noqa: E402
+from ._xlsx_stream import PREFERRED_NUM_COLS as _PREFERRED_NUM_COLS  # noqa: E402
 
 
 # ── Skip helper ───────────────────────────────────────────────────────────────
@@ -255,15 +228,10 @@ def _extract_boxnote(path: pathlib.Path, max_chars: int) -> str:
         return f"BoxNote: {path.name}"
 
 
-# _stream_xlsx_aggregate: pure algorithm lives in agents/_xlsx_stream.py.
+# _stream_xlsx_aggregate: pure algorithm lives in kb_agent_mcp/_xlsx_stream.py.
 # This wrapper binds the kb_agent_mcp-layer constants.
 
-import sys as _sys
-import pathlib as _pathlib
-_agents_dir = str(_pathlib.Path(__file__).parent.parent / "agents")
-if _agents_dir not in _sys.path:
-    _sys.path.insert(0, _agents_dir)
-import _xlsx_stream as _xlsx_stream_mod
+from . import _xlsx_stream as _xlsx_stream_mod
 
 def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
     """Stream-aggregate a large XLSX file. Delegates to the shared _xlsx_stream module."""

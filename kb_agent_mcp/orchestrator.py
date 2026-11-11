@@ -132,15 +132,68 @@ def detect_format_intent(
 
 # ── Keyword router ─────────────────────────────────────────────────────────────
 
+_MANIFEST_BULLET_RE = re.compile(r"^- \*\*(?P<name>.+?)\*\* — .*? · (?P<kws>[^·]+)$")
+
+
+def manifest_keywords() -> dict[str, list[str]]:
+    """Per-domain routing keywords from the context-store MANIFEST.md.
+
+    Keywords shared by several domains (e.g. "IBM") carry no routing signal and
+    are dropped. Returns {} when the store is absent.
+    """
+    try:
+        from kb_agent_mcp.context_store.sync import read_context
+        text = read_context("manifest")
+    except Exception:
+        return {}
+    per: dict[str, list[str]] = {}
+    for line in text.splitlines():
+        m = _MANIFEST_BULLET_RE.match(line.strip())
+        if m:
+            per[m["name"]] = [k.strip() for k in m["kws"].split(",") if k.strip()]
+    owners: dict[str, int] = {}
+    for kws in per.values():
+        for k in {k.lower() for k in kws}:
+            owners[k] = owners.get(k, 0) + 1
+    return {n: [k for k in kws if owners[k.lower()] == 1] for n, kws in per.items()}
+
+
+def _count_hits(q: str, kws: list[str]) -> int:
+    seen: set[str] = set()
+    hits = 0
+    for kw in kws:
+        kw = kw.lower()
+        if kw in seen:
+            continue
+        seen.add(kw)
+        if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?:e?s)?(?![a-z0-9])", q):
+            hits += 1
+    return hits
+
+
 def _keyword_hit_counts(
     question: str,
     agents: dict[str, DomainAgent],
 ) -> dict[str, int]:
+    """Whole-word keyword hits per domain; the folder name is an implicit keyword.
+
+    With KB_CONTEXT_STORE on, manifest keywords are a fallback signal: they are
+    counted only when the configured keywords match no domain at all.
+    """
     q = question.lower()
-    return {
-        name: sum(1 for kw in agent.config.keywords if kw.lower() in q)
-        for name, agent in agents.items()
-    }
+    counts: dict[str, int] = {}
+    for name, agent in agents.items():
+        kws = list(agent.config.keywords)
+        if kws:
+            low = name.lower()
+            kws.append(low)
+            if " " in low:
+                kws.append(low.split()[0])
+        counts[name] = _count_hits(q, kws)
+    if cfg.KB_CONTEXT_STORE and not any(counts.values()):
+        mk = manifest_keywords()
+        counts = {name: _count_hits(q, mk.get(name, [])) for name in agents}
+    return counts
 
 
 def _keyword_confidence(
@@ -170,6 +223,33 @@ def _keyword_confidence(
         return [top_name], True
 
     return matched, False
+
+
+ROUTE_FANOUT_RATIO = 0.75   # domains scoring this share of the best are also queried
+ROUTE_MAX_DOMAINS  = 2
+
+
+def content_route(question: str, agents: dict[str, DomainAgent]) -> list[str]:
+    """Domains whose context-store digests best match the question, best first.
+
+    Scores every domain by its best digest (name, keyword and body match), so
+    routing follows what the files actually say rather than hand-kept keyword
+    lists.  A runner-up within ROUTE_FANOUT_RATIO of the best is kept so a close
+    call is answered from both domains.  Returns [] when the store is absent or
+    nothing matches.
+    """
+    from kb_agent_mcp.tiered import domain_scores
+    try:
+        scores = domain_scores(question, list(agents))
+    except Exception as exc:                          # routing must never fail a query
+        logger.debug("content routing failed: %s", exc)
+        return []
+    ranked = sorted((n for n, v in scores.items() if v > 0), key=lambda n: -scores[n])
+    if not ranked:
+        return []
+    best = scores[ranked[0]]
+    keep = [n for n in ranked if scores[n] >= ROUTE_FANOUT_RATIO * best]
+    return keep[:ROUTE_MAX_DOMAINS]
 
 
 # ── LLM intent classifier ──────────────────────────────────────────────────────
@@ -490,8 +570,17 @@ async def _resolve_domains(
     """
     kw_domains, kw_confident = _keyword_confidence(question, agents)
 
+    by_content = content_route(question, agents) if cfg.KB_CONTEXT_STORE else []
+
     if kw_confident:
+        # Content evidence outranks a keyword hit: a bare "CP4I" in a BizOps
+        # spreadsheet question must not send it to the CP4I docs.
+        if by_content and not set(kw_domains) & set(by_content):
+            return by_content, None
         return kw_domains, None
+
+    if by_content:
+        return by_content, None
 
     classification = await _classify_intent(question, history, agents)
     domain_names   = classification["domains"] or kw_domains or [list(agents.keys())[0]]

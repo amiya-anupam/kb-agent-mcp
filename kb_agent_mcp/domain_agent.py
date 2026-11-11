@@ -25,6 +25,7 @@ from kb_agent_mcp.domain_rules import (
     load_domain_config,
     apply_pin_rules,
 )
+from kb_agent_mcp.format_instruction import apply_format_instruction
 from kb_agent_mcp.reranker import rerank as _rerank, is_available as _reranker_available
 
 if TYPE_CHECKING:
@@ -35,13 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ── Format instruction helpers ─────────────────────────────────────────────────
 
-def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
-    if not format_instruction:
-        return system_prompt
-    return (
-        system_prompt
-        + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
-    )
+_apply_format_instruction = apply_format_instruction
 
 
 # ── DomainAgent ────────────────────────────────────────────────────────────────
@@ -97,7 +92,14 @@ class DomainAgent:
 
         if needs_raw_rag:
             # Bypass README-first: go directly to vector search + pin rules
-            pre_ranked = await self._pre_rank(question, top_n=effective_top_n)
+            if cfg.KB_CONTEXT_STORE:
+                # Lazy: only pay for Chroma/re-rank if the tiered store and
+                # README-first both decline to answer.
+                async def _lazy() -> list[dict]:
+                    return await self._pre_rank(question, top_n=effective_top_n)
+                pre_ranked, lazy = None, _lazy
+            else:
+                pre_ranked, lazy = await self._pre_rank(question, top_n=effective_top_n), None
             return await _base_ask(
                 question=question,
                 folder_name=self.folder_name,
@@ -108,6 +110,7 @@ class DomainAgent:
                 max_chars=self.config.max_chars,
                 pre_ranked_results=pre_ranked,
                 session_id=session_id,
+                pre_rank_fn=lazy,
             )
 
         # Normal path: README-first with optional fallback

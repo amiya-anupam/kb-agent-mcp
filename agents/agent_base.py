@@ -77,44 +77,13 @@ VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 # ── XLSX aggregation config ───────────────────────────────────────────────────
 # Single source of truth for both _stream_xlsx_aggregate() (>50 MB path) and
 # extract_full_text() (<50 MB path).  embeddings.py imports these directly.
-# kb_agent_mcp/file_parser.py keeps its own copy (_AGG_KEYWORDS) — intentional
-# package-boundary isolation; do not remove that copy.
+# kb_agent_mcp/file_parser.py imports the same objects (single definition).
 
-AGG_KEYWORDS: dict[str, str] = {
-    # ── Product columns first (most semantically relevant for search) ──
-    "ut lvl 30 name dynamic": "Product (UT L30)",
-    "ut l30 name":            "Product (UT L30)",
-    "ut l30":                 "Product (UT L30)",
-    "product family name":    "Product Family",
-    "reporting product family": "Reporting Product Family",
-    "product":                "Product",
-    # ── Time columns ──
-    "year": "Year", "quarter": "Quarter",
-    "quarter in year": "Quarter In Year",
-    # ── Standard finance columns ──
-    "geography":                    "Geography",
-    "geography name":               "Geography",
-    "market":                       "Market",
-    "market name":                  "Market",
-    "country":                      "Country",
-    "finance family":               "Finance Family",
-    "revenue type":                 "Revenue Type",
-    "reporting revenue type name":  "Revenue Type",
-    "on-prem or saas":              "On-prem/SaaS",
-    "division":                     "Division",
-    # ── CRM deal columns ──
-    "classification name":          "Classification",
-    "frozen client lifecycle name": "Client Lifecycle",
-    # ── Renewal / ELA columns ──
-    "status": "Status",
-}
-
-# Preferred numeric column names — checked in order; first match wins.
-# CRM exports use "Won"; revenue reports use "Rev Act @ PC".
-PREFERRED_NUM_COLS: list[str] = [
-    "won", "total(cy cw won @ pc)", "rev act @ pc",
-    "amount", "oppty value", "total",
-]
+_repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:  # allow running agents/ standalone without pip install
+    sys.path.append(_repo_root)
+# Defined once in kb_agent_mcp/_xlsx_stream.py; re-exported here under the legacy names.
+from kb_agent_mcp._xlsx_stream import AGG_KEYWORDS, PREFERRED_NUM_COLS  # noqa: E402,F401
 
 
 # ── File discovery constants ──────────────────────────────────────────────────
@@ -129,6 +98,29 @@ DEFAULT_BLOCKLIST: frozenset[str] = frozenset({
     "agents", ".git", "__pycache__", ".ds_store", "node_modules",
     ".venv", "venv", "env", ".bob", ".idea", ".vscode", "dist", "build",
 })
+
+# Repo infrastructure that must never become a knowledge domain. Mirrors
+# kb_agent_mcp.config.BUILTIN_IGNORE so the legacy scripts and the package agree.
+INFRA_FOLDERS: frozenset[str] = frozenset({
+    ".github", ".kb_index", ".pytest_cache",
+    "kb_agent_mcp", "scripts", "tests", "docs",
+})
+
+
+def is_ignored_folder(name: str, blocklist: frozenset[str] | set[str] = DEFAULT_BLOCKLIST) -> bool:
+    """Return True if a top-level folder must not be treated as a knowledge domain.
+
+    Same rules as kb_agent_mcp.config.Config.is_ignored: blocklist / infra names,
+    any dot-folder, and Python packaging artifacts (.egg-info, .dist-info).
+    """
+    lower = name.lower()
+    return (
+        lower in blocklist
+        or lower in INFRA_FOLDERS
+        or lower.startswith(".")
+        or lower.endswith((".egg-info", ".dist-info"))
+    )
+
 
 INCLUDE_EXTS: frozenset[str] = frozenset({
     ".pdf", ".docx", ".pptx", ".xlsx", ".md", ".txt",
@@ -188,17 +180,11 @@ def should_skip(path: pathlib.Path) -> bool:
     return _has_noindex_ancestor(path)
 
 
-def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
-    """
-    Append a format instruction to a system prompt.
-
-    Defined here (agent_base) so per-domain sub-agent files can import it
-    without importing from agent_knowledgebase (which would create a circular
-    dependency).  agent_knowledgebase imports and re-exports this function.
-    """
-    if not format_instruction:
-        return system_prompt
-    return system_prompt + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
+# Defined in kb_agent_mcp/format_instruction.py; kept importable from here so
+# per-domain sub-agent files need not import agent_knowledgebase (circular).
+from kb_agent_mcp.format_instruction import (  # noqa: E402
+    apply_format_instruction as _apply_format_instruction,
+)
 
 LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
@@ -234,7 +220,11 @@ def _is_passthrough_mode() -> bool:
     try:
         import httpx
         r = httpx.get(f"{LLM_BASE_URL}/api/tags", timeout=3.0)
-        return r.status_code >= 400
+        if r.status_code >= 400:
+            return True
+        # Ollama is up, but the configured model must actually be pulled
+        names = {m.get("name", "") for m in r.json().get("models", [])}
+        return not any(n == MODEL or n.split(":")[0] == MODEL for n in names)
     except Exception:
         return True  # unreachable → passthrough
 
@@ -454,7 +444,7 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 # The pure algorithm lives in _xlsx_stream.py; this wrapper binds the agents-layer
 # AGG_KEYWORDS and PREFERRED_NUM_COLS constants.
 
-import _xlsx_stream as _xlsx_stream_mod  # noqa: E402
+from kb_agent_mcp import _xlsx_stream as _xlsx_stream_mod  # noqa: E402
 
 def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> str:
     """Stream-aggregate a large XLSX file. Delegates to the shared _xlsx_stream module."""

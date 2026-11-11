@@ -91,6 +91,7 @@ def log_turn(
 
     now = time.time()
     entry = {
+        "event":       "query",
         "ts":          now,
         "iso":         datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
         "session_id":  session_id,
@@ -188,7 +189,7 @@ def summarise_log(days: int = 30) -> dict:
             e = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if e.get("ts", 0) >= cutoff:
+        if e.get("ts", 0) >= cutoff and e.get("event", "query") == "query":
             entries.append(e)
 
     if not entries:

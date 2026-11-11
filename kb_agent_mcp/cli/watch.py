@@ -70,6 +70,8 @@ class _KBWatcher:
         self._pending_deindex: dict[str, set[Path]] = {}
         self._pending_readme:  dict[str, float]     = {}  # folder_name → deadline
         self._known_folders:   set[str]             = set()
+        self._pending_context: set[str]             = set()  # domains with stale digests
+        self._context_busy:    bool                 = False
 
     async def start(self) -> None:
         from kb_agent_mcp.config import cfg
@@ -214,6 +216,24 @@ class _KBWatcher:
                         logger.warning("  ✗ Index failed for %s: %s", fp.name, e)
 
             del self._pending_readme[folder_name]
+            self._pending_context.add(folder_name)
+
+        if self._pending_context and not self._context_busy:
+            dirty, self._pending_context = sorted(self._pending_context), set()
+            asyncio.create_task(self._sync_context(dirty))
+
+    async def _sync_context(self, domains: list[str] | None) -> None:
+        """Refresh digests/INDEX/MANIFEST off the event loop. Never raises."""
+        from kb_agent_mcp.context_store.sync import safe_sync
+        self._context_busy = True
+        try:
+            res = await asyncio.to_thread(safe_sync, self.kb_root, domains)
+            if res is not None and res.changed:
+                logger.info("  ✓ Context store: %s", res.summary())
+        except Exception as exc:
+            logger.warning("  ✗ Context store sync failed: %s", exc)
+        finally:
+            self._context_busy = False
 
     # ── Poll for new/deleted folders (macOS coalesces some dir events) ──────────
 
@@ -259,6 +279,7 @@ class _KBWatcher:
         except Exception as e:
             logger.error("  ✗ Index failed for %s: %s", folder_name, e)
             return
+        await self._sync_context([folder_name])
 
         if yaml_path.exists():
             logger.info("  domain_config.yaml already exists — skipping YAML generation")
@@ -288,6 +309,8 @@ class _KBWatcher:
             logger.info("  ✓ ChromaDB collection deleted for: %s", folder_name)
         except Exception as e:
             logger.warning("  ✗ Could not purge collection for %s: %s", folder_name, e)
+
+        await self._sync_context(None)   # full sync also prunes the deleted domain's digests
 
         from kb_agent_mcp.orchestrator import refresh_agents
         await refresh_agents()

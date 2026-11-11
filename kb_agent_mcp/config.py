@@ -162,6 +162,10 @@ class Config:
     KB_BUDGET_EMBED_CHARS: int = field(default_factory=lambda: _int(
         "KB_BUDGET_EMBED_CHARS", 3500
     ))
+    # Maximum chunks stored per file; longer files are sampled head/middle/tail.
+    KB_MAX_CHUNKS_PER_FILE: int = field(default_factory=lambda: _int(
+        "KB_MAX_CHUNKS_PER_FILE", 60
+    ))
     KB_MIN_README_CHARS: int = field(default_factory=lambda: _int(
         "KB_MIN_README_CHARS", 200
     ))
@@ -209,6 +213,15 @@ class Config:
     # documents are already trusted).  Enabled by default.
     KB_SECURITY_GATE_ENABLED: bool = field(default_factory=lambda: _bool(
         "KB_SECURITY_GATE_ENABLED", True
+    ))
+
+    # ── Tiered retrieval (context store) ──────────────────────────────────────
+    # KB_CONTEXT_STORE=1 makes agents read the markdown context store
+    # (.kb_index/context/: INDEX → digests, then the analyst engine for exact
+    # numbers) before falling back to Chroma / BM25.  On by default; it is a
+    # no-op until a store exists (kb-agent context build).  Set 0 to disable.
+    KB_CONTEXT_STORE: bool = field(default_factory=lambda: _bool(
+        "KB_CONTEXT_STORE", True
     ))
 
     # ── Default session identity ──────────────────────────────────────────────
@@ -294,7 +307,7 @@ class Config:
     # ── Built-in folder blocklist ─────────────────────────────────────────────
     BUILTIN_IGNORE: frozenset[str] = field(default_factory=lambda: frozenset({
         ".kb_index", ".git", ".github", "__pycache__", "node_modules",
-        "agents", "scripts", "tests", "dist", "build", ".venv", "venv",
+        "agents", "scripts", "tests", "docs", "dist", "build", ".venv", "venv",
         "kb_agent_mcp",
     }))
 
