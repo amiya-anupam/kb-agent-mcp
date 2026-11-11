@@ -481,7 +481,10 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 # The pure algorithm lives in _xlsx_stream.py; this wrapper binds the agents-layer
 # AGG_KEYWORDS and PREFERRED_NUM_COLS constants.
 
-import _xlsx_stream as _xlsx_stream_mod  # noqa: E402
+_repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:  # allow running agents/ standalone without pip install
+    sys.path.append(_repo_root)
+from kb_agent_mcp import _xlsx_stream as _xlsx_stream_mod  # noqa: E402
 
 def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> str:
     """Stream-aggregate a large XLSX file. Delegates to the shared _xlsx_stream module."""

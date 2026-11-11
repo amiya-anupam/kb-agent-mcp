@@ -75,10 +75,13 @@ _BUDGETS: dict[str, int] = {
 }
 
 # ── Pure compaction logic (shared with kb_agent_mcp/context_budget.py) ───────
-# Each function in _context_budget_logic takes `budgets` as its first argument.
+# Each function in kb_agent_mcp._context_budget_logic takes `budgets` as its first argument.
 # We bind our local _BUDGETS here via partial so callers see the clean API.
 
-import _context_budget_logic as _logic  # noqa: E402
+_repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+if _repo_root not in _sys.path:  # allow running agents/ standalone without pip install
+    _sys.path.append(_repo_root)
+from kb_agent_mcp import _context_budget_logic as _logic  # noqa: E402
 
 COLLAPSE_RULES = _logic.COLLAPSE_RULES
 

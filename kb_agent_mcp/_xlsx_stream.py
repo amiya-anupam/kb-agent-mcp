@@ -1,7 +1,8 @@
 """
 _xlsx_stream.py — Shared streaming XLSX aggregation logic
 ----------------------------------------------------------
-Used by both agents/agent_base.py and kb_agent_mcp/file_parser.py.
+Used by both agents/agent_base.py and kb_agent_mcp/file_parser.py (lives here so
+the package never imports from agents/).
 
 Provides a single canonical implementation of stream_xlsx_aggregate().
 Callers pass their own agg_keywords and preferred_num_cols dicts so this

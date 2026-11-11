@@ -69,7 +69,7 @@ reconcile toward the plan's 26.
 - `ask`: `agents/agent_base.ask` / `base_agent.ask` are related (row 10); `orchestrator.ask` and `server.ask` are separate layers.
 - `list_sessions`: `server.list_sessions` is an MCP tool wrapper, not a copy.
 
-## Reverse dependency (blocks the "package canonical" direction)
+## Reverse dependency (RESOLVED in 5.2: both modules now live in `kb_agent_mcp/`)
 
 `kb_agent_mcp` imports shared logic **from** `agents/` via `sys.path` insertion:
 
@@ -101,7 +101,7 @@ re-exports them).
 
 ## Suggested order for 5.2 (not started)
 
-1. Move `_xlsx_stream` and `_context_budget_logic` into `kb_agent_mcp/` (breaks the reverse dependency).
+1. DONE: moved `_xlsx_stream` and `_context_budget_logic` into `kb_agent_mcp/` (breaks the reverse dependency).
 2. Collapse the byte-identical and constant duplicates (rows 1, 3, 4, 24, 25, 26) - lowest risk.
 3. Unify slug helpers.
 4. Memory and embeddings pairs (sync/async shape differences need thin sync wrappers in agents/).

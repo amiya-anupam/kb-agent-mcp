@@ -255,15 +255,10 @@ def _extract_boxnote(path: pathlib.Path, max_chars: int) -> str:
         return f"BoxNote: {path.name}"
 
 
-# _stream_xlsx_aggregate: pure algorithm lives in agents/_xlsx_stream.py.
+# _stream_xlsx_aggregate: pure algorithm lives in kb_agent_mcp/_xlsx_stream.py.
 # This wrapper binds the kb_agent_mcp-layer constants.
 
-import sys as _sys
-import pathlib as _pathlib
-_agents_dir = str(_pathlib.Path(__file__).parent.parent / "agents")
-if _agents_dir not in _sys.path:
-    _sys.path.insert(0, _agents_dir)
-import _xlsx_stream as _xlsx_stream_mod
+from . import _xlsx_stream as _xlsx_stream_mod
 
 def _stream_xlsx_aggregate(path: pathlib.Path, max_chars: int) -> str:
     """Stream-aggregate a large XLSX file. Delegates to the shared _xlsx_stream module."""
