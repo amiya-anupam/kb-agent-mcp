@@ -2,7 +2,7 @@
 """
 embeddings.py — Dynamic vector index builder and semantic search
 ----------------------------------------------------------------
-Supports three embedding backends (tried in order):
+Embedding backends are provided by kb_agent_mcp.embeddings (tried in order):
   1. Ollama (KB_EMBED_MODEL via KB_LLM_BASE_URL)
   2. OpenAI-compatible API (when KB_LLM_PROVIDER=openai|custom)
   3. sentence-transformers offline fallback (all-MiniLM-L6-v2)
@@ -41,8 +41,6 @@ VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 
 # Import shared helpers and XLSX config from agent_base (same agents/ directory)
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-import importlib as _importlib
-_cb = _importlib.import_module("context_budget")
 from agent_base import (
     _has_noindex_ancestor,
     folder_to_safe_name,
@@ -55,10 +53,15 @@ from agent_base import (
     SKIP_PATTERNS,
 )
 
-OLLAMA_URL   = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
-EMBED_MODEL  = os.environ.get("KB_EMBED_MODEL", "nomic-embed-text")
-LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
-API_KEY      = os.environ.get("KB_API_KEY", "")
+# Embedding backends live in kb_agent_mcp.embeddings (canonical); the names
+# below are re-exported so agents/ callers keep working.  Imported after
+# agent_base so its .env loading has already run when the package config reads env.
+from kb_agent_mcp.embeddings import (  # noqa: E402,F401
+    _embed_ollama,
+    _embed_openai,
+    _embed_sentence_transformers,
+    _embed_sync as get_embedding,
+)
 
 def _user_blocklist() -> set[str]:
     raw = os.environ.get("KB_IGNORE_FOLDERS", "")
@@ -97,101 +100,6 @@ def discover_folders() -> list[str]:
         if has_files:
             folders.append(p.name)
     return folders
-
-
-# ── Embedding backends ────────────────────────────────────────────────────────
-
-def _embed_ollama(text: str) -> list[float]:
-    import httpx
-    response = httpx.post(
-        f"{OLLAMA_URL}/api/embeddings",
-        json={"model": EMBED_MODEL, "prompt": text[:_cb.get("embed_chars")]},
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()["embedding"]
-
-
-def _embed_openai(text: str) -> list[float]:
-    import httpx
-    base = os.environ.get("KB_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
-    response = httpx.post(
-        f"{base}/embeddings",
-        headers=headers,
-        json={"model": EMBED_MODEL or "text-embedding-3-small", "input": text[:_cb.get("embed_chars")]},
-        timeout=30.0,
-    )
-    response.raise_for_status()
-    return response.json()["data"][0]["embedding"]
-
-
-_st_model = None  # lazy-loaded sentence-transformers model
-_ST_MODEL_NAME = "all-MiniLM-L6-v2"
-
-def _embed_sentence_transformers(text: str) -> list[float]:
-    global _st_model
-    if _st_model is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            try:
-                _st_model = SentenceTransformer(_ST_MODEL_NAME)
-            except OSError as exc:
-                # Raised when the model is not cached and the network is unreachable.
-                raise RuntimeError(
-                    f"Embedding model '{_ST_MODEL_NAME}' could not be loaded — "
-                    "no internet connection and the model is not cached on this machine.\n"
-                    "Run this once on a machine with internet access to pre-cache it:\n"
-                    f"  python -c \"from sentence_transformers import SentenceTransformer; "
-                    f"SentenceTransformer('{_ST_MODEL_NAME}')\"\n"
-                    "After that the model loads entirely offline."
-                ) from exc
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is not installed and the configured embed "
-                "endpoint is not reachable.\n"
-                "Install it with:  pip install sentence-transformers"
-            )
-    return _st_model.encode(text[:_cb.get("embed_chars")]).tolist()
-
-
-def get_embedding(text: str) -> list[float]:
-    """
-    Try embedding backends in order:
-      1. passthrough mode → sentence-transformers directly (no LLM available)
-      2. Configured provider (Ollama or OpenAI-compatible)
-      3. sentence-transformers offline fallback
-    """
-    # passthrough mode has no LLM — go straight to sentence-transformers
-    if LLM_PROVIDER == "passthrough":
-        try:
-            return _embed_sentence_transformers(text)
-        except ImportError:
-            raise RuntimeError(
-                "KB_LLM_PROVIDER=passthrough requires sentence-transformers for embeddings.\n"
-                "Install it with:  pip install sentence-transformers\n"
-                "(This downloads ~80 MB the first time, then works fully offline.)"
-            )
-
-    # Try primary provider
-    try:
-        if LLM_PROVIDER in ("openai", "anthropic", "custom"):
-            return _embed_openai(text)
-        else:
-            return _embed_ollama(text)
-    except Exception as primary_err:
-        # Fallback to sentence-transformers
-        try:
-            vec = _embed_sentence_transformers(text)
-            return vec
-        except ImportError:
-            raise RuntimeError(
-                f"Primary embedding failed ({primary_err}) and sentence-transformers "
-                f"is not installed.\nEither fix the LLM connection or run:\n"
-                f"  pip install sentence-transformers"
-            )
 
 
 # ── Text extraction (lightweight — for embedding summaries only) ──────────────
