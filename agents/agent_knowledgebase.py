@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from memory import get_history, add_turn, clear, summary, set_session, list_sessions
-from agent_base import call_llm, _load_env, _PASSTHROUGH, _apply_format_instruction
+from agent_base import call_llm, _load_env, _PASSTHROUGH, _apply_format_instruction, KB_ROOT
 
 _load_env()
 
@@ -188,12 +188,28 @@ def _write_drift_audit(domain: str, file_count: int) -> None:
 
 # ── Domain meta loader ────────────────────────────────────────────────────────
 
+def _overlay_domain_configs(meta: dict[str, dict]) -> dict[str, dict]:
+    """domain_config.yaml is canonical: refresh routing/prompt fields from it.
+
+    domain_meta.json is a derived cache; without this overlay a hand-edited
+    domain_config.yaml would be ignored here until generate.py is re-run.
+    """
+    from kb_agent_mcp.domain_rules import overlay_domain_config
+    return {
+        name: overlay_domain_config(entry, KB_ROOT / entry.get("folder_name", name))
+        for name, entry in meta.items()
+    }
+
+
 def load_domain_meta() -> dict[str, dict]:
-    """Load domain_meta.json. Returns empty dict if not yet generated."""
+    """Load domain_meta.json (a derived cache) with domain_config.yaml overlaid.
+
+    Returns empty dict if not yet generated.
+    """
     if not META_PATH.exists():
         return {}
     try:
-        return json.loads(META_PATH.read_text(encoding="utf-8"))
+        return _overlay_domain_configs(json.loads(META_PATH.read_text(encoding="utf-8")))
     except json.JSONDecodeError as e:
         print(
             f"[KnowledgeBase Agent] ✗ domain_meta.json is corrupt (invalid JSON): {e}\n"

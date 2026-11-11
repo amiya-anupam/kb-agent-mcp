@@ -276,3 +276,35 @@ def test_system_prompt_extra_before_format_directive(monkeypatch):
     assert "Return JSON" in prompt
     # ordering: base → extra → format
     assert prompt.index("Cite all sources.") < prompt.index("Return JSON")
+
+
+def test_overlay_domain_config_yaml_wins_over_cached_meta(tmp_path):
+    """domain_config.yaml is canonical; domain_meta.json is a derived cache."""
+    from kb_agent_mcp.domain_rules import overlay_domain_config
+
+    (tmp_path / "domain_config.yaml").write_text(
+        "folder_name: Demo\nagent_name: Demo Agent\ndescription: from yaml\n"
+        "keywords: [alpha, beta]\ntop_n: 7\nmax_chars: 1234\n"
+        "system_prompt: yaml prompt\nsystem_prompt_extra: extra\n",
+        encoding="utf-8",
+    )
+    cached = {
+        "folder_name": "Demo", "description": "stale", "keywords": ["old"],
+        "top_n": 4, "max_chars": 6000, "system_prompt": "old",
+        "file_count": 3, "file_summaries": {"Demo/a.md": "s"},
+    }
+    out = overlay_domain_config(cached, tmp_path)
+    assert out["description"] == "from yaml"
+    assert out["keywords"] == ["alpha", "beta"]
+    assert (out["top_n"], out["max_chars"]) == (7, 1234)
+    assert out["system_prompt"] == "yaml prompt\n\nextra"
+    # derived-only fields are preserved; input is not mutated
+    assert out["file_count"] == 3 and out["file_summaries"] == {"Demo/a.md": "s"}
+    assert cached["description"] == "stale"
+
+
+def test_overlay_domain_config_without_yaml_is_noop(tmp_path):
+    from kb_agent_mcp.domain_rules import overlay_domain_config
+
+    cached = {"folder_name": "Demo", "description": "kept"}
+    assert overlay_domain_config(cached, tmp_path) == cached

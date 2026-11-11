@@ -64,6 +64,7 @@ from agent_base import (  # noqa: E402
 )
 from embeddings import extract_text_snippet as _extract_snippet_for_summary  # noqa: E402
 import content_gate as gate  # noqa: E402
+from kb_agent_mcp.domain_rules import overlay_domain_config  # noqa: E402
 
 def resolve_kb_root() -> pathlib.Path:
     raw = os.environ.get("KB_ROOT", "")
@@ -999,6 +1000,11 @@ def main():
                 "max_chars":    existing.get("max_chars", 6000),
                 "system_prompt": system_prompt,
             }
+
+        # domain_config.yaml (inside the knowledge folder) is canonical for
+        # description / keywords / top_n / max_chars / system_prompt; the
+        # domain_meta.json entry is derived from it when the yaml exists.
+        entry = overlay_domain_config(entry, folder)
 
         # ── Per-file summaries ────────────────────────────────────────────────
         # Generate (or load from cache) a 3–5 sentence LLM summary for every

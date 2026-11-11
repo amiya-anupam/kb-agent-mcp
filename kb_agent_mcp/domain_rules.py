@@ -136,12 +136,11 @@ def _parse_yaml(text: str) -> dict[str, Any]:
     return data
 
 
-def load_domain_config(folder_name: str) -> DomainConfig | None:
+def load_domain_config_file(config_path: Path, folder_name: str) -> DomainConfig | None:
     """
-    Load domain_config.yaml from inside a knowledge folder.
-    Returns None if the file does not exist.
+    Load a domain_config.yaml from an explicit path.
+    Returns None if the file does not exist or cannot be read.
     """
-    config_path = cfg.kb_root_path / folder_name / "domain_config.yaml"
     if not config_path.exists():
         return None
     try:
@@ -153,6 +152,44 @@ def load_domain_config(folder_name: str) -> DomainConfig | None:
         )
         return None
     return _build_config(folder_name, raw)
+
+
+def load_domain_config(folder_name: str) -> DomainConfig | None:
+    """
+    Load domain_config.yaml from inside a knowledge folder.
+    Returns None if the file does not exist.
+    """
+    return load_domain_config_file(
+        cfg.kb_root_path / folder_name / "domain_config.yaml", folder_name
+    )
+
+
+def overlay_domain_config(entry: dict, folder_dir: Path) -> dict:
+    """
+    Return *entry* (a legacy ``domain_meta`` dict) with the routing/prompt
+    fields taken from ``<folder_dir>/domain_config.yaml`` when that file exists.
+
+    domain_config.yaml is the canonical source for description, keywords,
+    top_n, max_chars, agent_name and system_prompt; ``domain_meta.json`` is only
+    a derived cache (plus file_count / file_summaries / grounding fields, which
+    are kept from *entry*).  Without a yaml the entry is returned unchanged.
+    """
+    dc = load_domain_config_file(folder_dir / "domain_config.yaml", entry.get("folder_name", folder_dir.name))
+    if dc is None:
+        return entry
+    prompt = dc.system_prompt
+    if dc.system_prompt_extra:
+        prompt = f"{prompt}\n\n{dc.system_prompt_extra}"
+    merged = dict(entry)
+    merged.update(
+        agent_name=dc.agent_name,
+        description=dc.description,
+        keywords=list(dc.keywords),
+        top_n=dc.top_n,
+        max_chars=dc.max_chars,
+        system_prompt=prompt,
+    )
+    return merged
 
 
 def load_domain_config_from_dict(folder_name: str, raw: dict[str, Any]) -> DomainConfig:

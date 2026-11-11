@@ -131,3 +131,10 @@ Also done (migration order memory -> embeddings -> content_gate -> routing/base;
 - Divergence reconciled: the agents one-liner phrase regex was wider (`briefly in one sentence`, `give me a quick one-liner`); the canonical table now uses the wider one, so the package also recognises those phrases.
 - `_get_readme_context` stays in agents: it reads `KB_ROOT` and the module-level `_cb` budget, which tests patch.
 
+
+## 5.4 progress: single source of truth for domain metadata
+
+- `domain_config.yaml` (per knowledge folder) is canonical. `kb_agent_mcp.domain_rules.overlay_domain_config` returns a legacy meta entry with `agent_name`, `description`, `keywords`, `top_n`, `max_chars` and `system_prompt` taken from the yaml.
+- `agents/vector_store/domain_meta.json` is now a derived cache: `scripts/generate.py` overlays the yaml before writing it, and `agents/agent_knowledgebase.load_domain_meta()` overlays it again on read, so a stale cache can no longer override the yaml. The package itself never reads this file.
+- `<domain>_index.json` files are still required by the legacy embeddings/keyword path (`agents/embeddings.py`, `agent_base.py`, `domain_runner.py`, `watch_kb.py`, `generate.py`); not removable.
+- `docs_index.json` was a stale watcher artefact (a long-running watcher with an older `INFRA_FOLDERS` indexed `docs/`). It is deleted; `generate.py` orphan cleanup removes it, and restarting the watcher stops it reappearing.
