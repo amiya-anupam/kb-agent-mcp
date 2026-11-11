@@ -7,13 +7,11 @@
 # so that `pip install kb-agent-mcp` fetches a clean, minimal package.
 
 # ── Always include ────────────────────────────────────────────────────────────
-include README-MCP.md
 include README.md
-include LICENSE
 include pyproject.toml
 include requirements.txt
 include .env.example
-include "architecture flow diagram.png"
+include architecture-flow-diagram-kb-agent-mcp.html
 
 # ── Exclude tests (for contributors only — not needed to run the server) ─────
 prune tests
