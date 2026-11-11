@@ -77,44 +77,13 @@ VECTOR_STORE = pathlib.Path(__file__).parent / "vector_store"
 # ── XLSX aggregation config ───────────────────────────────────────────────────
 # Single source of truth for both _stream_xlsx_aggregate() (>50 MB path) and
 # extract_full_text() (<50 MB path).  embeddings.py imports these directly.
-# kb_agent_mcp/file_parser.py keeps its own copy (_AGG_KEYWORDS) — intentional
-# package-boundary isolation; do not remove that copy.
+# kb_agent_mcp/file_parser.py imports the same objects (single definition).
 
-AGG_KEYWORDS: dict[str, str] = {
-    # ── Product columns first (most semantically relevant for search) ──
-    "ut lvl 30 name dynamic": "Product (UT L30)",
-    "ut l30 name":            "Product (UT L30)",
-    "ut l30":                 "Product (UT L30)",
-    "product family name":    "Product Family",
-    "reporting product family": "Reporting Product Family",
-    "product":                "Product",
-    # ── Time columns ──
-    "year": "Year", "quarter": "Quarter",
-    "quarter in year": "Quarter In Year",
-    # ── Standard finance columns ──
-    "geography":                    "Geography",
-    "geography name":               "Geography",
-    "market":                       "Market",
-    "market name":                  "Market",
-    "country":                      "Country",
-    "finance family":               "Finance Family",
-    "revenue type":                 "Revenue Type",
-    "reporting revenue type name":  "Revenue Type",
-    "on-prem or saas":              "On-prem/SaaS",
-    "division":                     "Division",
-    # ── CRM deal columns ──
-    "classification name":          "Classification",
-    "frozen client lifecycle name": "Client Lifecycle",
-    # ── Renewal / ELA columns ──
-    "status": "Status",
-}
-
-# Preferred numeric column names — checked in order; first match wins.
-# CRM exports use "Won"; revenue reports use "Rev Act @ PC".
-PREFERRED_NUM_COLS: list[str] = [
-    "won", "total(cy cw won @ pc)", "rev act @ pc",
-    "amount", "oppty value", "total",
-]
+_repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
+if _repo_root not in sys.path:  # allow running agents/ standalone without pip install
+    sys.path.append(_repo_root)
+# Defined once in kb_agent_mcp/_xlsx_stream.py; re-exported here under the legacy names.
+from kb_agent_mcp._xlsx_stream import AGG_KEYWORDS, PREFERRED_NUM_COLS  # noqa: E402,F401
 
 
 # ── File discovery constants ──────────────────────────────────────────────────
@@ -481,9 +450,6 @@ def _get_readme_context(folder_name: str, question: str) -> tuple[str | None, st
 # The pure algorithm lives in _xlsx_stream.py; this wrapper binds the agents-layer
 # AGG_KEYWORDS and PREFERRED_NUM_COLS constants.
 
-_repo_root = str(pathlib.Path(__file__).resolve().parent.parent)
-if _repo_root not in sys.path:  # allow running agents/ standalone without pip install
-    sys.path.append(_repo_root)
 from kb_agent_mcp import _xlsx_stream as _xlsx_stream_mod  # noqa: E402
 
 def _stream_xlsx_aggregate(file_path: pathlib.Path, max_chars: int = 8000) -> str:

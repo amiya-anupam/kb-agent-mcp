@@ -20,6 +20,46 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from typing import Any
 
+# ── XLSX aggregation config (single definition for agents/ and kb_agent_mcp/) ──
+# Order of AGG_KEYWORDS is significant: it sets group-by column priority.
+
+AGG_KEYWORDS: dict[str, str] = {
+    # ── Product columns first (most semantically relevant for search) ──
+    "ut lvl 30 name dynamic": "Product (UT L30)",
+    "ut l30 name":            "Product (UT L30)",
+    "ut l30":                 "Product (UT L30)",
+    "product family name":    "Product Family",
+    "reporting product family": "Reporting Product Family",
+    "product":                "Product",
+    # ── Time columns ──
+    "year": "Year", "quarter": "Quarter",
+    "quarter in year": "Quarter In Year",
+    # ── Standard finance columns ──
+    "geography":                    "Geography",
+    "geography name":               "Geography",
+    "market":                       "Market",
+    "market name":                  "Market",
+    "country":                      "Country",
+    "finance family":               "Finance Family",
+    "revenue type":                 "Revenue Type",
+    "reporting revenue type name":  "Revenue Type",
+    "on-prem or saas":              "On-prem/SaaS",
+    "division":                     "Division",
+    # ── CRM deal columns ──
+    "classification name":          "Classification",
+    "frozen client lifecycle name": "Client Lifecycle",
+    # ── Renewal / ELA columns ──
+    "status": "Status",
+}
+
+# Preferred numeric column names — checked in order; first match wins.
+# CRM exports use "Won"; revenue reports use "Rev Act @ PC".
+PREFERRED_NUM_COLS: list[str] = [
+    "won", "total(cy cw won @ pc)", "rev act @ pc",
+    "amount", "oppty value", "total",
+]
+
+
 
 def stream_xlsx_aggregate(
     path: "pathlib.Path",
