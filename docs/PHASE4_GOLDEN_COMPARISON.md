@@ -80,9 +80,20 @@ Recall is scored on the model's answer. Avg chars is what `call_llm` received.
 - **Do not read the chars column as a cost comparison.** For 7 BizOps questions the old path
   sent 0 chars through `call_llm` (answered by another path or not at all), so its average is
   lower for that reason. The comparison that is valid is the passthrough one above.
-- `bz-top-expiring-customer` regressed (1.00 → 0.00): the old path answered it without a
-  tapped LLM call, the tiered path sent 16,936 chars and the model missed the fact. Not
-  investigated further.
+- `bz-top-expiring-customer` regressed (1.00 → 0.00). Investigated (task 4 follow-up): retrieval
+  was correct (`ADP` was in the 16.9K-char context) but the context was diluted and badly
+  ordered. Replaying the exact prompt: 3 digests → 0/4 hits; the named digest alone → 1/4
+  (the model read the small `CP4I Jan26` / `App Connect Jan26` sheets that come first in the
+  workbook and said the data was absent); same digest with the matching sheet first → 4/4.
+  Two fixes in `kb_agent_mcp/tiered.py`: (1) `select_digests` returns only the best digest
+  when the question names that file (≥ `NAMED_FILE_TOKENS` filename tokens, more than any
+  other candidate); (2) `compact_digest(text, question)` orders `## Sheet:` sections by
+  overlap with the question. Not fixed: the analyst tier never runs for this phrasing
+  (`is_data_question` is False) and, if called, returns `clarifying` for this workbook.
+  After the fixes, `--llm --gate ack`: `bz-top-expiring-customer` 0.00 → 1.00, mean answer
+  recall on 0.769 → 0.808, avg chars sent 8,141 → 5,932. Single runs of a 14B model vary
+  (`bz-renewal-rate-*` flipped between two runs with identical context), so treat ±1 question
+  as noise.
 - `bz-part-vpc-perpetual` and `bz-part-linux-z` have the right context in passthrough
   (recall 1.00) but the model's answer misses it, so those are model-side, not retrieval.
 
@@ -116,5 +127,6 @@ Under the real LLM classifier: top-1 9/13 → 12/13, in set 9/13 → 13/13. Rema
 | File | Summary |
 |---|---|
 | `PHASE4_GOLDEN_COMPARISON.md` | The document evaluates tiered retrieval (KB_CONTEXT_STORE=1) against the old method (KB_CONTEXT_STORE=0) using 13 golden questions, showing higher recall and shorter context length when the security flag is enabled. |
+| `PHASE5_DUPLICATE_INVENTORY.md` | The document lists 26 function name duplicates between `agents/` and `kb_agent_mcp/`, noting their locations, differences, and canonical versions, with only one fully identical function. |
 
 <!-- KB:AUTO-INDEX:END -->
