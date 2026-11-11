@@ -64,6 +64,15 @@ _sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from agent_base import _load_env  # noqa: E402
 _load_env()
 
+# Shared implementation lives in the package (canonical); this module is the
+# sync, legacy-path-aware shim used by agents/ callers.
+from kb_agent_mcp.memory import (  # noqa: E402
+    _sentence_truncate_sync,
+    _compress_answer_sync,
+    _trim_messages,
+    _session_record,
+)
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # Legacy single-file path (kept for the implicit "default" session)
@@ -143,109 +152,29 @@ def get_history(session_id: str | None = None) -> list[dict]:
 # ── Answer compression ────────────────────────────────────────────────────────
 
 def _sentence_truncate(text: str, max_chars: int) -> str:
-    """Tier 2: truncate at the last complete sentence boundary within max_chars.
-
-    Splits on sentence-ending punctuation followed by whitespace, then walks
-    backward to find the longest prefix that fits.  Falls back to a hard cut
-    (Tier 3) when no sentence boundary is found within the limit.
-    """
-    if len(text) <= max_chars:
-        return text
-    window = text[:max_chars]
-    sentences = _SENT_END_RE.split(window)
-    if len(sentences) <= 1:
-        # No sentence boundary found — hard cut (Tier 3)
-        return window.rstrip() + "…"
-    # Drop the last (potentially incomplete) sentence fragment
-    result = " ".join(sentences[:-1]).rstrip()
-    return result + "…"
+    """Tier 2/3 truncation — delegates to kb_agent_mcp.memory."""
+    return _sentence_truncate_sync(text, max_chars)
 
 
 def _compress_answer(answer: str) -> str:
-    """
-    Compress a long answer for memory storage using a three-tier fallback:
+    """Three-tier answer compression — delegates to kb_agent_mcp.memory.
 
-      Tier 1: LLM summarisation  (fast, temperature=0, 8 s timeout)
-      Tier 2: Sentence-boundary truncation
-      Tier 3: Hard character truncation  (original behaviour, safety net)
-
-    Returns the compressed string.  Never raises.
+    Tier 1 uses ``agent_base.call_llm`` (this layer's LLM client) and is
+    skipped when KB_MEMORY_COMPRESS is off or agent_base is in passthrough mode.
+    Never raises.
     """
     if len(answer) <= MAX_ANSWER_CHARS:
-        return answer  # short enough — store verbatim
-
-    # ── Tier 2 is always ready as the fallback ────────────────────────────────
-    tier2 = _sentence_truncate(answer, MAX_ANSWER_CHARS)
-
-    # ── Tier 1: skip when compression is disabled or we are in passthrough ────
-    if not _COMPRESS:
-        return tier2
-
+        return answer
     try:
-        # Import at call time to avoid a hard dependency at module import;
-        # agent_base is only available when running inside the agents/ context.
-        import sys as _sys
-        import pathlib as _pathlib
-        _agents_dir = str(_pathlib.Path(__file__).parent)
-        if _agents_dir not in _sys.path:
-            _sys.path.insert(0, _agents_dir)
-
         from agent_base import call_llm, _PASSTHROUGH  # type: ignore[import]
-
-        if _PASSTHROUGH:
-            # passthrough mode: no local LLM — skip to Tier 2
-            return tier2
-
-        prompt = (
-            "Summarise the following answer in at most 100 words. "
-            "Preserve the key conclusions, findings, and any named entities "
-            "(products, numbers, dates, names). "
-            "Reply with ONLY the summary — no preamble, no explanation.\n\n"
-            f"ANSWER:\n{answer[:4000]}"   # cap input to keep the call cheap
-        )
-        messages = [
-            {"role": "system", "content": "You are a concise summariser."},
-            {"role": "user",   "content": prompt},
-        ]
-
-        # Override the default 120 s timeout with a tight 8 s budget so a slow
-        # or unavailable LLM never meaningfully delays the caller.
-        try:
-            # agent_base uses httpx directly; we can't pass a custom timeout
-            # through call_llm(), so we wrap it in a threading.Timer guard.
-            import threading as _threading
-            result_holder: list[str] = []
-            error_holder:  list[Exception] = []
-
-            def _do_call():
-                try:
-                    result_holder.append(call_llm(messages, temperature=0.0))
-                except Exception as exc:
-                    error_holder.append(exc)
-
-            t = _threading.Thread(target=_do_call, daemon=True)
-            t.start()
-            t.join(timeout=8.0)  # hard 8-second wall-clock limit
-
-            if t.is_alive() or error_holder:
-                # LLM timed out or errored — Tier 2
-                return tier2
-
-            summary_text = result_holder[0].strip() if result_holder else ""
-            if not summary_text:
-                return tier2
-
-            # Tag so callers can tell a compressed entry from a verbatim one
-            return f"[summary] {summary_text}"
-
-        except Exception:
-            return tier2
-
     except ImportError:
-        # agent_base not on path (e.g. called from the MCP layer) — Tier 2
-        return tier2
-    except Exception:
-        return tier2
+        return _sentence_truncate_sync(answer, MAX_ANSWER_CHARS)
+    return _compress_answer_sync(
+        answer,
+        max_chars=MAX_ANSWER_CHARS,
+        compress=_COMPRESS and not _PASSTHROUGH,
+        summarise=lambda messages: call_llm(messages, temperature=0.0),
+    )
 
 
 def add_turn(user_message: str, assistant_message: str, session_id: str | None = None):
@@ -264,8 +193,7 @@ def add_turn(user_message: str, assistant_message: str, session_id: str | None =
     data["messages"].append({"role": "user",      "content": user_message})
     data["messages"].append({"role": "assistant",  "content": stored_answer})
     # Trim to MAX_TURNS (keep most recent)
-    if len(data["messages"]) > MAX_TURNS * 2:
-        data["messages"] = data["messages"][-(MAX_TURNS * 2):]
+    data["messages"] = _trim_messages(data["messages"], MAX_TURNS)
     _save(data, session_id)
 
 
@@ -303,7 +231,6 @@ def list_sessions() -> list[dict]:
         last_active  float — Unix timestamp of last activity
         expired      bool  — True when the session has exceeded the timeout
     """
-    now = time.time()
     seen: set[str] = set()
     sessions: list[dict] = []
 
@@ -311,19 +238,9 @@ def list_sessions() -> list[dict]:
         if session_id in seen:
             return
         seen.add(session_id)
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
-        last_active = data.get("last_active", 0)
-        turns = len(data.get("messages", [])) // 2
-        expired = (now - last_active) > TIMEOUT_HOURS * 3600
-        sessions.append({
-            "session_id":  session_id,
-            "turns":       turns,
-            "last_active": last_active,
-            "expired":     expired,
-        })
+        rec = _session_record(path, session_id, TIMEOUT_HOURS)
+        if rec:
+            sessions.append(rec)
 
     # Legacy single-file default session
     if _LEGACY_MEMORY_FILE.exists():

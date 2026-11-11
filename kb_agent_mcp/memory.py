@@ -147,9 +147,24 @@ def _sentence_truncate_sync(text: str, max_chars: int) -> str:
     return " ".join(sentences[:-1]).rstrip() + "…"
 
 
-def _compress_answer_sync(answer: str) -> str:
+def _compress_answer_sync(
+    answer: str,
+    *,
+    max_chars: int | None = None,
+    compress: bool | None = None,
+    summarise=None,
+) -> str:
     """
     Compress a long answer for memory storage (sync, called from a thread).
+
+    Optional keyword overrides let the legacy ``agents/memory.py`` shim reuse
+    this implementation with its own settings:
+
+      max_chars  Override KB_SESSION_MAX_ANSWER_CHARS.
+      compress   Override KB_MEMORY_COMPRESS (False skips Tier 1).
+      summarise  ``callable(messages) -> str`` used for Tier 1 instead of the
+                 package provider dispatch.  When given, the package's
+                 passthrough-provider check is skipped (the caller owns it).
 
     Three-tier fallback — never raises, never blocks the caller for more than
     ~8 seconds:
@@ -161,7 +176,8 @@ def _compress_answer_sync(answer: str) -> str:
 
       Tier 3 – Hard character truncation  (original behaviour, safety net).
     """
-    max_chars = cfg.KB_SESSION_MAX_ANSWER_CHARS
+    if max_chars is None:
+        max_chars = cfg.KB_SESSION_MAX_ANSWER_CHARS
 
     if len(answer) <= max_chars:
         return answer  # short enough — store verbatim
@@ -169,30 +185,34 @@ def _compress_answer_sync(answer: str) -> str:
     tier2 = _sentence_truncate_sync(answer, max_chars)
 
     # Respect KB_MEMORY_COMPRESS=false (pure offline mode)
-    compress_enabled = cfg.KB_MEMORY_COMPRESS
+    compress_enabled = cfg.KB_MEMORY_COMPRESS if compress is None else compress
     if not compress_enabled:
         return tier2
 
     # Skip Tier 1 in passthrough mode (no local LLM available)
-    if cfg.KB_LLM_PROVIDER == "passthrough":
+    if summarise is None and cfg.KB_LLM_PROVIDER == "passthrough":
         return tier2
 
     try:
-        # Re-use the same sync LLM helpers that base_agent already uses so we
-        # share the connection pool and don't introduce a new HTTP client.
-        from kb_agent_mcp.base_agent import (
-            _call_ollama_sync,
-            _call_openai_compat_sync,
-            _call_anthropic_sync,
-        )
+        if summarise is None:
+            # Re-use the same sync LLM helpers that base_agent already uses so we
+            # share the connection pool and don't introduce a new HTTP client.
+            from kb_agent_mcp.base_agent import (
+                _call_ollama_sync,
+                _call_openai_compat_sync,
+                _call_anthropic_sync,
+            )
 
-        def _raw_call() -> str:
-            provider = cfg.KB_LLM_PROVIDER.lower()
-            if provider == "anthropic":
-                return _call_anthropic_sync(messages, 0.0)
-            if provider in ("openai", "custom"):
-                return _call_openai_compat_sync(messages, 0.0)
-            return _call_ollama_sync(messages, 0.0)
+            def _raw_call() -> str:
+                provider = cfg.KB_LLM_PROVIDER.lower()
+                if provider == "anthropic":
+                    return _call_anthropic_sync(messages, 0.0)
+                if provider in ("openai", "custom"):
+                    return _call_openai_compat_sync(messages, 0.0)
+                return _call_ollama_sync(messages, 0.0)
+        else:
+            def _raw_call() -> str:
+                return summarise(messages)
 
         prompt = (
             "Summarise the following answer in at most 100 words. "
@@ -246,6 +266,27 @@ def get_history_sync(session_id: str = "default") -> list[dict]:
     return _load_sync(session_id).get("messages", [])
 
 
+def _trim_messages(messages: list[dict], max_turns: int) -> list[dict]:
+    """Keep only the most recent *max_turns* turns (2 messages per turn)."""
+    max_msgs = max_turns * 2
+    return messages[-max_msgs:] if len(messages) > max_msgs else messages
+
+
+def _session_record(path: Path, session_id: str, timeout_hours: float) -> dict | None:
+    """Build one list_sessions entry from a session file; None if unreadable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    last_active = data.get("last_active", 0)
+    return {
+        "session_id":  session_id,
+        "turns":       len(data.get("messages", [])) // 2,
+        "last_active": last_active,
+        "expired":     (time.time() - last_active) > timeout_hours * 3600,
+    }
+
+
 def add_turn_sync(
     user_message: str,
     assistant_message: str,
@@ -266,9 +307,7 @@ def add_turn_sync(
     data["messages"].append({"role": "user", "content": user_message})
     data["messages"].append({"role": "assistant", "content": stored})
     # Keep only the most recent KB_SESSION_MAX_TURNS turns
-    max_msgs = cfg.KB_SESSION_MAX_TURNS * 2
-    if len(data["messages"]) > max_msgs:
-        data["messages"] = data["messages"][-max_msgs:]
+    data["messages"] = _trim_messages(data["messages"], cfg.KB_SESSION_MAX_TURNS)
     _save_sync(session_id, data)
 
 
@@ -325,27 +364,14 @@ def list_sessions_sync() -> list[dict]:
         last_active  float — Unix timestamp of last activity
         expired      bool  — True when the session has exceeded the timeout
     """
-    now = time.time()
     mem_dir = cfg.kb_index_path / "session_memory"
     if not mem_dir.exists():
         return []
 
-    sessions: list[dict] = []
-    for path in mem_dir.glob("*.json"):
-        session_id = path.stem
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        last_active = data.get("last_active", 0)
-        turns = len(data.get("messages", [])) // 2
-        expired = (now - last_active) > cfg.KB_SESSION_TIMEOUT_HOURS * 3600
-        sessions.append({
-            "session_id":  session_id,
-            "turns":       turns,
-            "last_active": last_active,
-            "expired":     expired,
-        })
+    sessions = [
+        rec for path in mem_dir.glob("*.json")
+        if (rec := _session_record(path, path.stem, cfg.KB_SESSION_TIMEOUT_HOURS))
+    ]
 
     # Newest-first
     sessions.sort(key=lambda s: s["last_active"], reverse=True)
