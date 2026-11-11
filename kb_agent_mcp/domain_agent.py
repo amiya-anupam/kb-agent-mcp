@@ -25,6 +25,7 @@ from kb_agent_mcp.domain_rules import (
     load_domain_config,
     apply_pin_rules,
 )
+from kb_agent_mcp.format_instruction import apply_format_instruction
 from kb_agent_mcp.reranker import rerank as _rerank, is_available as _reranker_available
 
 if TYPE_CHECKING:
@@ -35,13 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ── Format instruction helpers ─────────────────────────────────────────────────
 
-def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
-    if not format_instruction:
-        return system_prompt
-    return (
-        system_prompt
-        + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
-    )
+_apply_format_instruction = apply_format_instruction
 
 
 # ── DomainAgent ────────────────────────────────────────────────────────────────

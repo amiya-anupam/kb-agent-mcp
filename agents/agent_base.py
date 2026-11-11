@@ -180,17 +180,11 @@ def should_skip(path: pathlib.Path) -> bool:
     return _has_noindex_ancestor(path)
 
 
-def _apply_format_instruction(system_prompt: str, format_instruction: str) -> str:
-    """
-    Append a format instruction to a system prompt.
-
-    Defined here (agent_base) so per-domain sub-agent files can import it
-    without importing from agent_knowledgebase (which would create a circular
-    dependency).  agent_knowledgebase imports and re-exports this function.
-    """
-    if not format_instruction:
-        return system_prompt
-    return system_prompt + f"\n\n**OUTPUT FORMAT DIRECTIVE (highest priority):**\n{format_instruction}"
+# Defined in kb_agent_mcp/format_instruction.py; kept importable from here so
+# per-domain sub-agent files need not import agent_knowledgebase (circular).
+from kb_agent_mcp.format_instruction import (  # noqa: E402
+    apply_format_instruction as _apply_format_instruction,
+)
 
 LLM_PROVIDER = os.environ.get("KB_LLM_PROVIDER", "ollama").lower()
 LLM_BASE_URL = os.environ.get("KB_LLM_BASE_URL", "http://localhost:11434")
