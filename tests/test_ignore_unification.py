@@ -21,7 +21,7 @@ import watch_kb  # noqa: E402
 from kb_agent_mcp.config import cfg  # noqa: E402
 
 INFRA = [".github", ".kb_index", ".pytest_cache", "kb_agent_mcp", "scripts",
-         "tests", "kb_agent_mcp.egg-info", ".git", "agents", "__pycache__"]
+         "tests", "docs", "kb_agent_mcp.egg-info", ".git", "agents", "__pycache__"]
 REAL = ["ACE Docs", "BizOps", "CP4I Docs", "skills"]
 
 

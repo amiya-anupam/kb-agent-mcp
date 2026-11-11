@@ -307,7 +307,7 @@ class Config:
     # ── Built-in folder blocklist ─────────────────────────────────────────────
     BUILTIN_IGNORE: frozenset[str] = field(default_factory=lambda: frozenset({
         ".kb_index", ".git", ".github", "__pycache__", "node_modules",
-        "agents", "scripts", "tests", "dist", "build", ".venv", "venv",
+        "agents", "scripts", "tests", "docs", "dist", "build", ".venv", "venv",
         "kb_agent_mcp",
     }))
 

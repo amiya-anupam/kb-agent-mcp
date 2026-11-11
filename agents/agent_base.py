@@ -134,7 +134,7 @@ DEFAULT_BLOCKLIST: frozenset[str] = frozenset({
 # kb_agent_mcp.config.BUILTIN_IGNORE so the legacy scripts and the package agree.
 INFRA_FOLDERS: frozenset[str] = frozenset({
     ".github", ".kb_index", ".pytest_cache",
-    "kb_agent_mcp", "scripts", "tests",
+    "kb_agent_mcp", "scripts", "tests", "docs",
 })
 
 
