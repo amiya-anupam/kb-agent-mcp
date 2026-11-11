@@ -404,18 +404,17 @@ def generate_sub_agent(domain: dict, agents_dir: pathlib.Path):
     """
     Write agents/agent_<safe>.py for one domain.
 
-    The file is a thin, standalone module that:
-      • Imports agent_base.ask() for all shared RAG logic
-      • Overrides only what is domain-specific (system_prompt, top_n, max_chars)
-      • Can be run directly:  python3 agents/agent_bizops.py "question"
+    The file is a thin shim that delegates entirely to domain_runner.run().
+    All domain-specific retrieval logic (e.g. BizOps Revenue-pinning) lives
+    in domain_runner.py — this file is regenerated on every generate run and
+    must not be edited manually.
 
-    Domain-specific retrieval hooks are injected here so they live alongside
-    the domain definition — not scattered across agent_base.py as global hacks.
+    Can be run directly:  python3 agents/agent_<safe>.py "question"
     """
-    folder_name  = domain["folder_name"]
-    safe         = domain["safe_name"]
-    agent_name   = domain["agent_name"]
-    description  = domain["description"]
+    folder_name   = domain["folder_name"]
+    safe          = domain["safe_name"]
+    agent_name    = domain["agent_name"]
+    description   = domain["description"]
     system_prompt = domain.get("system_prompt", (
         f"You are the {agent_name}, a specialist in the {folder_name} knowledge domain.\n"
         f"Domain description: {description}\n"
@@ -427,115 +426,9 @@ def generate_sub_agent(domain: dict, agents_dir: pathlib.Path):
     top_n     = domain.get("top_n", 4)
     max_chars = domain.get("max_chars", 6000)
 
-    # ── Domain-specific ask() override (injected per domain) ─────────────────
-    # For most domains, the ask() function is a straight pass-through to
-    # agent_base.ask().  For domains that need custom retrieval logic (e.g.
-    # always pinning certain file types), a domain_ask() override is injected.
-    #
-    # Convention: if the domain's safe_name matches a known override key, inject
-    # extra code; otherwise the override is just a direct call to agent_base.ask().
-
-    # Keys that signal "this domain needs a custom ask override"
-    _REVENUE_DOMAINS = {"bizops"}  # extend as needed
-
-    if safe in _REVENUE_DOMAINS:
-        domain_ask_body = textwrap.dedent(f"""\
-        def domain_ask(question, history, format_instruction=""):
-            \"\"\"
-            BizOps-specific ask: always pins *Revenue*.xlsx files to the top
-            of the context for data/revenue questions so the LLM reads
-            authoritative Rev Act @ PC numbers before CRM Won-Deals files.
-            \"\"\"
-            import json, pathlib, sys
-            sys.path.insert(0, str(pathlib.Path(__file__).parent))
-            from agent_base import (
-                ask as _base_ask, _is_data_question,
-                folder_to_safe_name, KB_ROOT, VECTOR_STORE,
-                _apply_format_instruction,
-            )
-            from embeddings import search
-
-            fmt_prompt = _apply_format_instruction(SYSTEM_PROMPT, format_instruction)
-
-            # For non-data questions delegate entirely to base
-            if not _is_data_question(question):
-                return _base_ask(
-                    question=question,
-                    folder_name=FOLDER_NAME,
-                    agent_name=AGENT_NAME,
-                    system_prompt=fmt_prompt,
-                    conversation_history=history,
-                    top_n=TOP_N,
-                    max_chars=MAX_CHARS,
-                )
-
-            # Data question: run base search then pin Revenue files to front
-            results = search(question, FOLDER_NAME, top_n=TOP_N)
-            if results:
-                result_paths = {{r["path"] for r in results}}
-                safe_name = folder_to_safe_name(FOLDER_NAME)
-                idx_path  = VECTOR_STORE / f"{{safe_name}}_index.json"
-                if idx_path.exists():
-                    try:
-                        idx_data = json.loads(idx_path.read_text())
-                        for entry in idx_data.get("entries", []):
-                            name = entry.get("name", "")
-                            if ("revenue" in name.lower()
-                                    and name.lower().endswith(".xlsx")
-                                    and entry.get("path") not in result_paths):
-                                results.append({{
-                                    "path":   entry["path"],
-                                    "name":   name,
-                                    "score":  1.0,
-                                    "folder": FOLDER_NAME,
-                                }})
-                                result_paths.add(entry["path"])
-                    except Exception:
-                        pass
-
-                def _rev_priority(r):
-                    n = r.get("name", "").lower()
-                    return 0 if ("revenue" in n and n.endswith(".xlsx")) else 1
-                results = sorted(results, key=_rev_priority)
-
-            # Delegate the rest (extraction + LLM call) to base, bypassing its
-            # own search by passing the pre-ordered result list via the
-            # _pre_ranked_results kwarg (added to agent_base.ask below).
-            return _base_ask(
-                question=question,
-                folder_name=FOLDER_NAME,
-                agent_name=AGENT_NAME,
-                system_prompt=fmt_prompt,
-                conversation_history=history,
-                top_n=TOP_N,
-                max_chars=MAX_CHARS,
-                _pre_ranked_results=results,
-            )
-        """)
-    else:
-        domain_ask_body = textwrap.dedent(f"""\
-        def domain_ask(question, history, format_instruction=""):
-            import sys, pathlib
-            sys.path.insert(0, str(pathlib.Path(__file__).parent))
-            from agent_base import ask as _base_ask, _apply_format_instruction
-            fmt_prompt = _apply_format_instruction(SYSTEM_PROMPT, format_instruction)
-            return _base_ask(
-                question=question,
-                folder_name=FOLDER_NAME,
-                agent_name=AGENT_NAME,
-                system_prompt=fmt_prompt,
-                conversation_history=history,
-                top_n=TOP_N,
-                max_chars=MAX_CHARS,
-            )
-        """)
-
     # Escape the system prompt for embedding in Python source
     sp_escaped = system_prompt.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
 
-    # Build content at column-0.  Do NOT use textwrap.dedent on a template
-    # that is itself indented inside a function — dedent strips the indentation
-    # of the template lines, not the interpolated values, causing mismatches.
     lines = [
         "#!/usr/bin/env python3",
         '"""',
@@ -558,15 +451,31 @@ def generate_sub_agent(domain: dict, agents_dir: pathlib.Path):
         "from agent_base import _load_env",
         "_load_env()",
         "",
+        f"SAFE_NAME     = {safe!r}",
         f"FOLDER_NAME   = {folder_name!r}",
         f"AGENT_NAME    = {agent_name!r}",
         f'SYSTEM_PROMPT = """{sp_escaped}"""',
         f"TOP_N         = {top_n}",
         f"MAX_CHARS     = {max_chars}",
         "",
-        "# ── Domain-specific ask() ─────────────────────────────────────────────────",
+        "# ── Thin shim — all logic lives in domain_runner.py ──────────────────────",
         "",
-        domain_ask_body,
+        "def domain_ask(question, history, format_instruction=''):",
+        "    import sys, pathlib",
+        "    sys.path.insert(0, str(pathlib.Path(__file__).parent))",
+        "    from domain_runner import run",
+        "    return run(",
+        "        safe_name=SAFE_NAME,",
+        "        folder_name=FOLDER_NAME,",
+        "        agent_name=AGENT_NAME,",
+        "        system_prompt=SYSTEM_PROMPT,",
+        "        top_n=TOP_N,",
+        "        max_chars=MAX_CHARS,",
+        "        question=question,",
+        "        history=history,",
+        "        format_instruction=format_instruction,",
+        "    )",
+        "",
         "# ── Standalone entry point ────────────────────────────────────────────────",
         "",
         "def main():",
