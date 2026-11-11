@@ -5,14 +5,13 @@ description: >
   specialist sub-agent automatically based on your knowledge folders.
   Use when asking about any content in your KnowledgeBase.
 
-  Current domains (4):
+  Current domains (3):
   - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-  - **BizOps**: BizOps: 128 documents (84 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, ACE Attrition Bob Analysis, Deployment Tracking, ELA Tracking, revenue, renewals, emea, renewed, expiring, japan
+  - **BizOps**: The BizOps folder contains documents related to revenue, renewals, customer tracking, and pipeline analysis for IBM products and services.
   - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-  - **skills**: skills: 0 documents ()
 
   Trigger phrases: ask the agent, KnowledgeBase Agent, query knowledge base,
-  App Connect, ACE, migration, revenue, renewals, emea, Cloud Pak for Integration, CP4I, presentation, what does my KnowledgeBase say, /kb, /agent
+  App Connect, ACE, migration, renewals, revenue, pipeline, Cloud Pak for Integration, CP4I, presentation, what does my KnowledgeBase say, /kb, /agent
 
 execute: |
   python3 "${SKILL_DIR}/../agent_knowledgebase.py" "${QUESTION}"
@@ -35,9 +34,8 @@ using your local LLM (Ollama / OpenAI / etc.). Bob reads the output and relays i
 
 ## Current Domains
 - **ACE Docs**: Folder containing App Connect ACE documentation, presentations, guides, and migration resources.
-- **BizOps**: BizOps: 128 documents (84 XLSX, 20 BOXNOTE, 10 PPTX) covering Renewal Tracking, ACE Attrition Bob Analysis, Deployment Tracking, ELA Tracking, revenue, renewals, emea, renewed, expiring, japan
+- **BizOps**: The BizOps folder contains documents related to revenue, renewals, customer tracking, and pipeline analysis for IBM products and services.
 - **CP4I Docs**: Folder containing Cloud Pak for Integration documentation, presentations, and sales materials.
-- **skills**: skills: 0 documents ()
 
 ## Usage
 Just ask naturally — Bob detects the intent and runs the agent:

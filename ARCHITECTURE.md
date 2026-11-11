@@ -66,6 +66,11 @@ The ASCII diagram in the section below shows all three pipelines and every major
 ║  │                                                             │    │                    ║
 ║  │  is_complex_question() / is_data_question()                 │    │                    ║
 ║  │                                                             │    │                    ║
+║  │  ┌─ Tiered path (KB_CONTEXT_STORE, default on) ─────────┐   │    │                    ║
+║  │  │  tiered_context(): INDEX → digests (top 3) → analyst │   │    │                    ║
+║  │  │  returns None → falls through to README / RAG        │   │    │                    ║
+║  │  └──────────────────────────────────────────────────────┘   │    │                    ║
+║  │                                                             │    │                    ║
 ║  │  ┌─ README-first path ──────────────────────────────────┐   │    │                    ║
 ║  │  │  _find_readme() → _README_CACHE (5-min TTL)          │   │    │                    ║
 ║  │  │  simple  → AUTO-INDEX block + context_budget         │   │    │                    ║
@@ -74,6 +79,7 @@ The ASCII diagram in the section below shows all three pipelines and every major
 ║  │                                                             │    │                    ║
 ║  │  ┌─ RAG fallback path ──────────────────────────────────┐   │    │                    ║
 ║  │  │  vector_store.search() → file_parser.extract() × N  │   │    │                    ║
+║  │  │  reranker.rerank() (cross-encoder, optional)         │   │    │                    ║
 ║  │  └──────────────────────────────────────────────────────┘   │    │                    ║
 ║  │                                                             │    │                    ║
 ║  │  ┌─ LLM call  OR  passthrough block ───────────────────┐   │    │                    ║
@@ -110,6 +116,7 @@ The ASCII diagram in the section below shows all three pipelines and every major
 ║  │    gate_sessions.json       {session_id: GateSession, …}                        │  ║
 ║  │    audit.jsonl              append-only Q&A audit log (auto-rotates at 50 MB)   │  ║
 ║  │    feedback.jsonl           per-answer 1–5 star ratings + comments              │  ║
+║  │    context/                 MANIFEST.md, <domain>/INDEX.md, file digests        │  ║
 ║  └─────────────────────────────────────────────────────────────────────────────────┘  ║
 ╚════════════════════════════════════════════════════════════════════════════════════════╝
 ```
@@ -152,6 +159,21 @@ kb_agent_mcp/
 ├── audit.py             Append-only JSONL audit log — log_turn(), read_log(); size-capped rotation
 ├── feedback.py          Per-answer 1–5 star ratings — record(), read_feedback(); persisted to feedback.jsonl
 ├── writeback.py         Safe document write-back — write_document(rel_path, content, mode) → WriteResult
+├── tiered.py            Tiered retrieval over the markdown context store (INDEX → digests → analyst); domain_scores() for routing
+├── reranker.py          Optional cross-encoder re-rank pass (rerank, is_available, reset); KB_RERANKER_*
+├── format_instruction.py  apply_format_instruction() — dependency-free, shared with agents/
+├── _xlsx_stream.py      Streaming XLSX aggregation shared by file_parser.py and agents/ (internal)
+├── _context_budget_logic.py  Pure compaction logic shared by both context_budget modules (internal)
+├── context_store/
+│   ├── __init__.py      TABLE_EXTS, digestable(), build_digest_for()
+│   ├── digest.py        Per-file digest builder
+│   ├── doc_digest.py    Document (non-tabular) digests; DOC_EXTS
+│   ├── table_scan.py    Tabular profiling for digests
+│   ├── table_stream.py  Streaming reader for large tabular files
+│   ├── frontmatter.py   parse_front_matter() for digest files
+│   ├── index.py         INDEX.md / MANIFEST.md writers
+│   ├── paths.py         context_dir(), INDEX_NAME, domain_slug()
+│   └── sync.py          build / refresh orchestration; read_context() (used by kb_context)
 ├── analyst/
 │   ├── __init__.py      Re-exports: inspect_file, DataCard, suggest_questions, query_data, refine_query
 │   ├── inspector.py     Schema profiler → DataCard (columns, types, grain, themes); (path, mtime) cache
@@ -164,7 +186,8 @@ kb_agent_mcp/
     ├── generate.py      Index builder + domain YAML generator (kb-agent-generate / kb-agent generate)
     ├── watch.py         Filesystem watcher with debounce (kb-agent-watch / kb-agent watch)
     ├── doctor.py        9-check health checklist with auto-fix (kb-agent-doctor / kb-agent doctor)
-    └── status.py        Read-only per-domain status table with Rich (kb-agent-status / kb-agent status)
+    ├── status.py        Read-only per-domain status table with Rich (kb-agent-status / kb-agent status)
+    └── context.py       Build / refresh the markdown context store (kb-agent context build|refresh)
 
 scripts/
 └── setup.py             12-line shim → delegates to kb_agent_mcp.cli.setup (backward compat)
@@ -210,6 +233,7 @@ The FastMCP application. Registers **twenty MCP tools** (main groups below):
 | `reindex` | `reindex()` | Rebuilds ChromaDB; clears stale cache, passthrough cache, gate sessions |
 | `clear_memory` | `clear_memory(session_id?)` | `memory.clear(session_id)` |
 | `show_memory` | `show_memory(session_id?)` | Session summary + last N turns (200-char truncated) |
+| `list_sessions` | `list_sessions()` | Table of named sessions: turn count, last-active time, expiry status |
 
 **Security Gate tools:**
 
@@ -226,6 +250,7 @@ The FastMCP application. Registers **twenty MCP tools** (main groups below):
 | `suggest_questions` | `suggest_questions(path)` | `planner.suggest_questions(card)` → QuestionMenu JSON |
 | `query_data` | `query_data(path, question, session_id?)` | `engine.query_data()` → answer or clarifications |
 | `refine_query` | `refine_query(session_id, feedback)` | `engine.refine_query()` → updated answer |
+| `compare_data` | `compare_data(path_a, path_b, question?, session_id?, metric_col?, time_col?)` | Aggregates two tabular files by period and returns a side-by-side diff (A, B, absolute and % change, total) |
 
 **Session & Feedback tools:**
 
@@ -234,6 +259,7 @@ The FastMCP application. Registers **twenty MCP tools** (main groups below):
 | `domain_status` | `domain_status()` | Returns per-domain indexing status: file counts, stale counts, last-indexed timestamps |
 | `read_audit` | `read_audit(session_id?, limit?)` | Returns recent audit log entries from `audit.jsonl` (filtered by session when provided) |
 | `resume_session` | `resume_session(session_id)` | Returns the last N turns of a prior session so the AI can continue without re-querying |
+| `audit_summary` | `audit_summary(days?)` | Usage analytics from `audit.jsonl` + `feedback.jsonl`: volume, latency, top questions, per-domain volume, ratings, low-rated answers |
 | `rate_answer` | `rate_answer(session_id, turn_index, rating, comment?)` | Records a 1–5 star rating for a specific turn; persists to `feedback.jsonl` |
 | `update_document` | `update_document(rel_path, content, mode?)` | Writes (overwrite) or appends to a document under `KB_ROOT` via `writeback.write_document()` |
 
@@ -582,6 +608,60 @@ Public API:
 
 ---
 
+### `tiered.py`
+Tiered retrieval over the markdown context store (see [Tiered retrieval](#tiered-retrieval-kb_context_store)).
+Imports only `config`, `context_store.frontmatter` and `context_store.paths`.
+
+- `tiered_context()` — builds the context for one question; returns `None` when no store
+  exists, the domain has no digests, or nothing matches (callers then fall back to README / Chroma).
+- `select_digests()` / `compact_digest()` — rank per-file digests by question terms and trim them
+  (`MAX_DIGESTS=3`, `DIGEST_CHARS=6000`).
+- `_analyst_answer()` — runs the analyst engine on the raw file for exact numbers on data questions
+  (`ANALYST_CHARS=3000`, `ANALYST_TIMEOUT=30` s).
+- `domain_scores()` — per-domain best-match score used by `orchestrator.content_route()`
+  (`MIN_SCORE=2.0`, `REL_SCORE=0.5`, `NAMED_FILE_TOKENS=3`).
+
+---
+
+### `context_store/`
+Builds and reads the plain-markdown store at `<KB_ROOT>/.kb_index/context/`
+(`MANIFEST.md`, `<domain>/INDEX.md`, one digest per file). Digests are readable with
+`read_file` / `grep` without the MCP server.
+
+| Module | Role |
+|---|---|
+| `__init__.py` | `TABLE_EXTS`, `digestable(path)`, `build_digest_for(path, root)` |
+| `digest.py`, `doc_digest.py` | Digest builders for tabular and document files (`DOC_EXTS`) |
+| `table_scan.py`, `table_stream.py` | Profiling and streaming reads for large tabular files |
+| `frontmatter.py` | `parse_front_matter()` for digest files |
+| `index.py` | `INDEX.md` / `MANIFEST.md` writers |
+| `paths.py` | `context_dir()`, `INDEX_NAME`, `domain_slug()` |
+| `sync.py` | Build / refresh orchestration; `read_context()` backs the `kb_context` tool |
+
+---
+
+### `reranker.py`
+Optional cross-encoder re-rank pass applied by `DomainAgent` on the RAG path.
+`rerank(question, results, top_n)` rescored (query, passage) pairs with a
+sentence-transformers cross-encoder (default `cross-encoder/ms-marco-MiniLM-L-6-v2`);
+`is_available()` reports whether it can run; `reset()` clears the loaded model.
+`domain_agent.py` fetches `max(top_n * 4, KB_RERANKER_CANDIDATES)` candidates when the
+re-ranker is available. Disabled with `KB_RERANKER_ENABLED=false`.
+
+---
+
+### Internal shared modules
+- `format_instruction.py` — `apply_format_instruction(system_prompt, format_instruction)`;
+  dependency-free, imported by `domain_agent.py` and `agents/agent_base.py`.
+- `_xlsx_stream.py` — streaming XLSX aggregation (`AGG_KEYWORDS`, `PREFERRED_NUM_COLS`,
+  `stream_xlsx_aggregate`), used by `file_parser.py` and `agents/agent_base.py`.
+- `_context_budget_logic.py` — pure compaction logic; `kb_agent_mcp/context_budget.py` and
+  `agents/context_budget.py` bind their own budget dicts to it.
+
+These exist so the package never imports from `agents/`; `agents/` imports them from the package.
+
+---
+
 ## Module responsibilities (CLI)
 
 ### `cli/main.py`
@@ -597,6 +677,7 @@ patches `sys.argv`, and imports + calls the subcommand's `main()` in-process
 | `watch` | `cli.watch` | Filesystem watcher |
 | `doctor` | `cli.doctor` | Health checks with auto-fix |
 | `status` | `cli.status` | Per-domain status table |
+| `context` | `cli.context` | Build / refresh the markdown context store (`build`, `refresh`) |
 | `init` | _(inline)_ | `setup` → `generate` → `doctor` in sequence |
 
 `kb-agent init` is the recommended first-time path — runs all three steps in one command.
@@ -661,6 +742,16 @@ Filesystem watcher (`kb-agent-watch`). Backed by `watchdog`, debounced at 5 s.
 | Top-level folder deleted | `delete_collection(domain)` — purge ChromaDB collection |
 
 Flags: `--no-prompt` — auto-accepts new folders (CI/headless).
+
+---
+
+### `cli/context.py`
+Markdown context store commands (`kb-agent context`):
+
+| Command | Action |
+|---|---|
+| `kb-agent context build [--force] [--domain NAME]` | Digest every file; write `INDEX.md` and `MANIFEST.md` |
+| `kb-agent context refresh [--domain NAME]` | Re-digest only new / changed files |
 
 ---
 
@@ -1095,12 +1186,13 @@ against the refreshed file inventory after a full rebuild.
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
 │  │  │  Data Analyst tools                                        │  │   │
 │  │  │  analyze_file  suggest_questions  query_data  refine_query │  │   │
+│  │  │  compare_data                                              │  │   │
 │  │  └───────────────────────┬────────────────────────────────────┘  │   │
 │  │                                                                  │   │
 │  │  ┌────────────────────────────────────────────────────────────┐  │   │
 │  │  │  Session & Feedback tools                                  │  │   │
-│  │  │  domain_status  read_audit  resume_session                 │  │   │
-│  │  │  rate_answer    update_document                            │  │   │
+│  │  │  domain_status  read_audit  audit_summary  resume_session  │  │   │
+│  │  │  list_sessions  rate_answer  update_document  kb_context   │  │   │
 │  │  └───────────────────────┬────────────────────────────────────┘  │   │
 │  └──────────────────────────┼────────────────────────────────────-──┘   │
 │                             │                                            │
@@ -1116,7 +1208,7 @@ against the refreshed file inventory after a full rebuild.
 │               │                              │                          │
 │  ┌────────────▼──────────────────────────────▼─────────────────────┐   │
 │  │  base_agent.py                                                   │   │
-│  │  README-first → RAG fallback → LLM call / passthrough block     │   │
+│  │  tiered path → README-first → RAG fallback → LLM / passthrough  │   │
 │  └────────┬───────────────────────────────────────┬────────────────┘   │
 │           │                                       │                     │
 │  ┌────────▼──────────┐              ┌─────────────▼─────────────────┐  │
@@ -1167,18 +1259,22 @@ server.py
 │   │   ├── base_agent.py
 │   │   │   ├── config.py
 │   │   │   ├── vector_store.py  ──→  embeddings.py ──→  config.py
-│   │   │   ├── file_parser.py   ──→  config.py
+│   │   │   ├── file_parser.py   ──→  config.py, _xlsx_stream.py
 │   │   │   ├── memory.py        ──→  config.py
 │   │   │   └── context_budget.py ──→ config.py
+│   │   ├── reranker.py          ──→  config.py
+│   │   ├── format_instruction.py
 │   │   └── domain_rules.py  ──→  config.py
 │   ├── aggregator.py  ──→  config.py
-│   └── context_budget.py
+│   ├── tiered.py      ──→  config.py, context_store/{frontmatter,paths}
+│   └── context_budget.py ──→ _context_budget_logic.py
 ├── security_gate.py
 │   ├── config.py
 │   └── file_parser.py  (for _has_noindex_ancestor, _extract_sync)
 ├── audit.py     ──→  config.py
 ├── feedback.py  ──→  config.py
 ├── writeback.py ──→  config.py
+├── context_store/sync.py  (kb_context tool → read_context)
 └── analyst/
     ├── inspector.py  ──→  file_parser.py
     ├── planner.py    (pure logic, no imports except dataclasses)
@@ -1186,12 +1282,13 @@ server.py
     └── session.py    ──→  config.py
 
 cli/
-├── main.py      ──→  setup.py, generate.py, server.py, watch.py, doctor.py, status.py
+├── main.py      ──→  setup.py, generate.py, server.py, watch.py, doctor.py, status.py, context.py
 ├── setup.py     ──→  generate.py, config.py
 ├── generate.py  ──→  vector_store.py, embeddings.py, domain_rules.py, config.py
 ├── watch.py     ──→  vector_store.py, generate.py, config.py
 ├── doctor.py    ──→  vector_store.py, embeddings.py, config.py
-└── status.py    ──→  vector_store.py, config.py
+├── status.py    ──→  vector_store.py, config.py
+└── context.py   ──→  context_store/*, config.py
 ```
 
 Most modules import `config.cfg` at module load time (frozen dataclass singleton).
@@ -1239,9 +1336,14 @@ No circular imports — `config.py` has no imports from the package.
 | `KB_SECURITY_GATE_ENABLED` | `true` | `security_gate.py` | Set to `false` to disable the confidentiality gate entirely |
 | `KB_DEFAULT_SESSION_ID` | `"default"` | `server.py` | Session ID used when no `session_id` is passed in stdio transport mode |
 | `KB_AUDIT_ENABLED` | `true` | `audit.py` | Set to `false` to disable audit logging entirely |
-| `KB_AUDIT_MAX_MB` | `10` | `audit.py` | Maximum size of `audit.jsonl` in MB before rotation |
-| `KB_OCR_ENABLED` | `false` | `file_parser.py` | Set to `true` to enable image text extraction via OCR |
-| `KB_OCR_ENGINE` | `"tesseract"` | `file_parser.py` | OCR engine to use: `tesseract` \| `easyocr` |
+| `KB_AUDIT_MAX_MB` | `50` | `audit.py` | Maximum size of `audit.jsonl` in MB before rotation |
+| `KB_OCR_ENABLED` | `true` | `file_parser.py` | Set to `false` to disable image text extraction |
+| `KB_OCR_ENGINE` | `auto` | `file_parser.py` | OCR engine: `tesseract` (pytesseract only) \| `auto` (tesseract, then PIL metadata fallback) |
+| `KB_RERANKER_ENABLED` | `true` | `reranker.py` | Set to `false` to skip the cross-encoder re-rank pass |
+| `KB_RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | `reranker.py` | Cross-encoder model used for re-ranking |
+| `KB_RERANKER_CANDIDATES` | `20` | `domain_agent.py` | Candidate pool size passed to the re-ranker (at least `top_n * 4`) |
+| `KB_FEEDBACK_REWEIGHT_ENABLED` | `true` | `vector_store.py` | Set to `false` to disable score adjustment from stored answer ratings |
+| `KB_FEEDBACK_DECAY_DAYS` | `90` | `feedback.py` | Age in days over which feedback influence decays |
 
 `.env` search order: CWD → `$HOME` → `KB_ROOT` → package root.
 Values already in the environment are never overwritten.
@@ -1260,6 +1362,10 @@ independently from the same `KB_ROOT`.
 | Bob skill | `agents/SKILL.md` | Active; points at legacy agent |
 | MCP server | `kb_agent_mcp/server.py` | New canonical entry point |
 | Bob skill (MCP) | `~/.bob/skills/knowledgebase-agent/SKILL.md` | Generated by `kb-agent-generate` |
+
+**Shared logic:** `format_instruction`, `_xlsx_stream` and `_context_budget_logic`
+live in `kb_agent_mcp/`; the `agents/` modules import them from there. The package
+never imports from `agents/`.
 
 **Security gate:** implemented only in `kb_agent_mcp/security_gate.py`. Legacy
 `agents/` queries bypass the gate — this is intentional for backward compatibility

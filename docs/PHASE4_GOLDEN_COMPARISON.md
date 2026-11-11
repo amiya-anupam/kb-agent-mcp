@@ -156,6 +156,6 @@ Under the real LLM classifier: top-1 9/13 → 12/13, in set 9/13 → 13/13. Rema
 | File | Summary |
 |---|---|
 | `PHASE4_GOLDEN_COMPARISON.md` | The document evaluates tiered retrieval (KB_CONTEXT_STORE=1) against the old method (KB_CONTEXT_STORE=0) using 13 golden questions, showing higher recall and shorter context length when the security flag is enabled. |
-| `PHASE5_DUPLICATE_INVENTORY.md` | The document lists 26 function name duplicates between `agents/` and `kb_agent_mcp/`, noting their locations, differences, and canonical versions, with only one fully identical function. |
+| `PHASE5_DUPLICATE_INVENTORY.md` | The document lists 26 function name duplicates between `agents/` and `kb_agent_mcp/`, noting differences in code and designating `kb_agent_mcp/` as the canonical version. |
 
 <!-- KB:AUTO-INDEX:END -->
