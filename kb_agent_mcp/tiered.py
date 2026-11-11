@@ -35,6 +35,7 @@ ANALYST_CHARS = 3000
 ANALYST_TIMEOUT = 30.0   # seconds
 MIN_SCORE     = 2.0      # best digest must score at least this, else fall back
 REL_SCORE     = 0.5      # other digests must reach this share of the best score
+NAMED_FILE_TOKENS = 3    # question matches this many filename tokens -> it names the file
 
 _TABULAR = {"xlsx", "xls", "csv", "tsv"}
 
@@ -151,7 +152,17 @@ def select_digests(domain_dir: Path, question: str) -> list[tuple[float, _Doc]]:
     if not scored or scored[0][0] < MIN_SCORE:
         return []
     best = scored[0][0]
-    return [x for x in scored if x[0] >= REL_SCORE * best][:MAX_DIGESTS]
+    picked = [x for x in scored if x[0] >= REL_SCORE * best][:MAX_DIGESTS]
+
+    # A question that names one file ("... in the 1H renewals CP4I and App Connect
+    # file") wants that file only; extra digests bury the answer for the model.
+    def name_hits(d: _Doc) -> int:
+        return len(d.name_tokens & terms - {"xlsx", "xls", "csv", "tsv", "pdf", "pptx", "docx"})
+
+    hits = [name_hits(d) for _, d in picked]
+    if hits[0] >= NAMED_FILE_TOKENS and all(h < hits[0] for h in hits[1:]):
+        return picked[:1]
+    return picked
 
 
 def domain_scores(question: str, domain_names: list[str], ctx: Path | None = None) -> dict[str, float]:
@@ -167,7 +178,29 @@ def domain_scores(question: str, domain_names: list[str], ctx: Path | None = Non
 
 # ── Digest → context ───────────────────────────────────────────────────────────
 
-def compact_digest(text: str) -> str:
+def _sheets_by_relevance(body: str, question: str) -> str:
+    """Reorder `## Sheet:` sections so the one matching the question comes first.
+
+    The model leans on whatever comes first; a workbook whose first sheets are small
+    summaries would otherwise hide the sheet that holds the answer. Stable on ties,
+    and non-sheet sections keep their place.
+    """
+    terms = set(_tokens(question))
+    parts = re.split(r"(?m)^(?=## )", body)
+    idx = [i for i, p in enumerate(parts) if p.startswith("## Sheet:")]
+    if len(idx) < 2 or not terms:
+        return body
+
+    def score(part: str) -> int:
+        return len(terms & set(_tokens(part.split("\n", 1)[-1])))
+
+    ordered = sorted((parts[i] for i in idx), key=score, reverse=True)
+    for i, part in zip(idx, ordered):
+        parts[i] = part
+    return "".join(parts)
+
+
+def compact_digest(text: str, question: str = "") -> str:
     """Digest body without front-matter and without the per-sheet Schema blocks."""
     lines = text.split("\n")
     if lines and lines[0] == "---":
@@ -182,6 +215,8 @@ def compact_digest(text: str) -> str:
         if not skipping:
             out.append(ln)
     body = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    if question:
+        body = _sheets_by_relevance(body, question)
     return body if len(body) <= DIGEST_CHARS else body[:DIGEST_CHARS].rstrip() + "…"
 
 
@@ -236,7 +271,7 @@ async def tiered_context(
             redacted.append(name)
             continue
         label = f"🔒 {name}" if conf else name
-        blocks.append(f"--- Digest: {label} ---\n{compact_digest(d.text)}")
+        blocks.append(f"--- Digest: {label} ---\n{compact_digest(d.text, question)}")
         sources.append({"name": label, "path": d.source, "score": round(score / top, 2),
                         "confidential": conf, "tier": "digest"})
         kept.append(d)
